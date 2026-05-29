@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VANTA</title>
+<link rel="icon" type="image/png" href="./icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap" rel="stylesheet">
+<style>
+/* ══════════════════════════════════════════════════
+   RESET
+══════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body { overflow-x: hidden; -webkit-font-smoothing: antialiased; }
+
+/* ══════════════════════════════════════════════════
+   ── FOCUS theme ──
+══════════════════════════════════════════════════ */
+body.theme-focus {
+  --bg:           #0d1117;
+  --bg2:          #111820;
+  --bg3:          #16202c;
+  --surface:      #1b2736;
+  --border:       #1f3040;
+  --border2:      #243545;
+  --accent:       #00c9b1;
+  --accent-dim:   #009e8c;
+  --accent-faint: rgba(0,201,177,0.06);
+  --text:         #dce8f0;
+  --text-mid:     #7a9aaf;
+  --text-dim:     #3d5668;
+  --done-text:    #3a5566;
+  --done-strike:  #2a4455;
+  --red:          #e05c6a;
+  --red-bg:       rgba(224,92,106,0.1);
+  --radius:       10px;
+  --radius-lg:    16px;
+  --font-ui:      'Syne', sans-serif;
+  --font-mono:    'DM Mono', monospace;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: 15px; cursor: default;
+}
+
+/* ══════════════════════════════════════════════════
+   ── MINIMAL theme ──
+══════════════════════════════════════════════════ */
+body.theme-minimal {
+  --bg:           #1f1f1f;
+  --bg2:          #252525;
+  --bg3:          #2c2c2c;
+  --surface:      #333333;
+  --border:       #444444;
+  --border2:      #555555;
+  --accent:       #ffffff;
+  --accent-dim:   #cccccc;
+  --accent-faint: rgba(255,255,255,0.05);
+  --text:         #eeeeee;
+  --text-mid:     #aaaaaa;
+  --text-dim:     #666666;
+  --done-text:    #555555;
+  --done-strike:  #444444;
+  --red:          #ff6b6b;
+  --red-bg:       rgba(255,107,107,0.1);
+  --radius:       4px;
+  --radius-lg:    6px;
+  --font-ui:      'DM Mono', monospace;
+  --font-mono:    'DM Mono', monospace;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: 14px; cursor: default;
+}
+
+/* ══════════════════════════════════════════════════
+   OVERLAYS
+══════════════════════════════════════════════════ */
+.noise-overlay {
+  position: fixed; inset: 0; z-index: 9997; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.025;
+}
+.glow-bg {
+  position: fixed; top: -25vh; left: 50%;
+  transform: translateX(-50%);
+  width: 80vw; height: 60vh;
+  pointer-events: none; z-index: 0;
+}
+body.theme-focus .glow-bg { background: radial-gradient(ellipse, rgba(0,201,177,0.07) 0%, transparent 70%); }
+body.theme-minimal .glow-bg { display: none; }
+
+/* ══════════════════════════════════════════════════
+   APP SHELL
+══════════════════════════════════════════════════ */
+#app {
+  position: relative; z-index: 1; min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 0 24px 80px;
+}
+
+header { width: 100%; display: flex; align-items: center; padding: 44px 0 36px; max-width: 680px; }
+.logo { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; color: var(--text); font-family: var(--font-ui); line-height: 1; text-transform: lowercase; }
+.logo-dot { color: var(--accent); }
+.header-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.5px; margin-left: 8px; margin-top: 1px; }
+
+/* ══════════════════════════════════════════════════
+   TOOLBAR
+══════════════════════════════════════════════════ */
+.toolbar { margin-left: auto; display: flex; gap: 4px; align-items: center; }
+.tb-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s; position: relative; width: 30px; height: 30px; border-radius: var(--radius); cursor: pointer;
+}
+.tb-btn:hover { color: var(--accent); border-color: var(--border2); background: var(--accent-faint); }
+.tb-btn:disabled { opacity: 0.2 !important; pointer-events: none; }
+
+/* ══════════════════════════════════════════════════
+   INPUT WRAP
+══════════════════════════════════════════════════ */
+.input-wrap { width: 100%; z-index: 10; position: sticky; top: 16px; max-width: 680px; margin-bottom: 28px; }
+.input-bar {
+  display: flex; align-items: stretch; position: relative;
+  background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius-lg); overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.03);
+  transition: box-shadow 0.25s, border-color 0.25s;
+}
+body.theme-focus .input-bar:focus-within { border-color: rgba(0,201,177,0.35); box-shadow: 0 4px 32px rgba(0,0,0,0.4), 0 0 20px rgba(0,201,177,0.06); }
+body.theme-minimal .input-bar:focus-within { border-color: var(--accent); }
+
+#task-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); letter-spacing: 0.3px; font-size: 15px; padding: 15px 18px; font-family: var(--font-ui); }
+#task-input::placeholder { color: var(--text-dim); }
+
+.bar-btn { background: none; border: none; display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); transition: color 0.15s, background 0.15s; white-space: nowrap; color: var(--text-dim); padding: 10px 14px; font-size: 14px; cursor: pointer; }
+.bar-btn:hover { color: var(--accent); background: var(--accent-faint); }
+
+.bar-btn.add-btn {
+  padding: 9px 18px; margin: 6px 6px 6px 0; border-radius: var(--radius);
+  background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+  color: var(--accent); font-size: 13px; font-weight: 600; font-family: var(--font-ui); cursor: pointer;
+}
+body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px solid rgba(0,201,177,0.2); }
+.bar-btn.add-btn:hover { background: var(--accent-faint); border-color: var(--accent); }
+
+.bar-divider { width: 1px; background: var(--border); flex-shrink: 0; }
+.bar-btn.spacer-btn { border-left: 1px solid var(--border); }
+
+/* ══════════════════════════════════════════════════
+   TASK LIST & ITEMS
+══════════════════════════════════════════════════ */
+#task-list { display: flex; flex-direction: column; width: 100%; max-width: 680px; }
+
+.task-item {
+  position: relative; display: flex; align-items: center; user-select: none; transition: background 0.14s, border-color 0.14s; cursor: default;
+  padding: 11px 12px 11px 10px; gap: 12px; border-radius: var(--radius); border: 1px solid transparent;
+}
+.task-item:hover { background: var(--bg3); border-color: var(--border); }
+
+.task-item.drag-over-top { border-top: 2px solid var(--accent) !important; }
+.task-item.drag-over-bot { border-bottom: 2px solid var(--accent) !important; }
+.task-item.dragging { opacity: 0.25; }
+
+.drag-handle { opacity: 0; color: var(--text-dim); display: flex; align-items: center; transition: opacity 0.12s; flex-shrink: 0; padding: 2px; cursor: grab; }
+.task-item:hover .drag-handle, .spacer-item:hover .drag-handle { opacity: 1; }
+
+.cb-wrap { position: relative; flex-shrink: 0; }
+.cb-wrap input { display: none; }
+.cb-box { display: flex; align-items: center; justify-content: center; transition: all 0.15s; background: transparent; width: 18px; height: 18px; border: 1.5px solid var(--border2); border-radius: 5px; cursor: pointer; }
+.cb-wrap:hover .cb-box { border-color: var(--accent); background: var(--accent-faint); }
+.cb-wrap input:checked ~ .cb-box { background: var(--accent-faint); border-color: var(--accent); }
+
+.cb-box svg { display: none; }
+.cb-wrap input:checked ~ .cb-box svg { display: block; }
+
+.task-text { flex: 1; word-break: break-word; outline: none; transition: color 0.15s; font-family: var(--font-ui); font-size: 14.5px; font-weight: 400; color: var(--text); }
+.task-item.done .task-text { color: var(--done-text); text-decoration: line-through; text-decoration-color: var(--done-strike); }
+
+.task-text[contenteditable=true] {
+  color: var(--text) !important; text-decoration: none !important; outline: none;
+  background: rgba(0,0,0,0.08); box-shadow: 0 0 0 1px var(--border2); padding: 1px 5px; margin: -1px -5px; user-select: text;
+}
+
+.del-btn {
+  opacity: 0; background: none; border: none; color: var(--text-dim); display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.12s, color 0.12s, background 0.12s; flex-shrink: 0; cursor: pointer; width: 24px; height: 24px; border-radius: 6px;
+}
+.task-item:hover .del-btn { opacity: 1; }
+.del-btn:hover { color: var(--red) !important; background: var(--red-bg) !important; }
+
+/* ══════════════════════════════════════════════════
+   SPACER (FIXED TRANS-LINE BUG)
+══════════════════════════════════════════════════ */
+.spacer-item { position: relative; display: flex; align-items: center; transition: background 0.12s; padding: 8px 12px 8px 10px; gap: 12px; border-radius: var(--radius); border: 1px solid transparent; }
+.spacer-item:hover { background: var(--bg3); border-color: var(--border); }
+
+.spacer-item.drag-over-top { border-top: 2px solid var(--accent) !important; }
+.spacer-item.drag-over-bot { border-bottom: 2px solid var(--accent) !important; }
+.spacer-item.dragging { opacity: 0.25; }
+
+/* Changed from linear-gradient to a reliable, clean physical line */
+.spacer-line { flex: 1; height: 1px; background: var(--border2); opacity: 0.7; }
+
+.spacer-del {
+  opacity: 0; background: none; border: none; color: var(--text-dim); display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.12s, color 0.12s; flex-shrink: 0; cursor: pointer; width: 24px; height: 24px; border-radius: 6px;
+}
+.spacer-item:hover .spacer-del { opacity: 1; }
+.spacer-del:hover { color: var(--red) !important; }
+
+/* ══════════════════════════════════════════════════
+   EMPTY STATE & FOOTER ELEMENTS
+══════════════════════════════════════════════════ */
+.empty-state { opacity: 0; animation: fadeIn 0.4s 0.2s forwards; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 32px 0 0; }
+.empty-icon { width: 48px; height: 48px; border: 1.5px solid var(--border2); border-radius: 14px; display: flex; align-items: center; justify-content: center; color: var(--text-dim); background: var(--surface); }
+.empty-label { font-family: var(--font-mono); font-size: 12px; color: var(--text-dim); letter-spacing: 0.5px; }
+
+@keyframes slideIn { from { opacity:0; transform:translateY(-5px); } to { opacity:1; transform:translateY(0); } }
+.task-item.new, .spacer-item.new { animation: slideIn 0.2s cubic-bezier(0.22,1,0.36,1); }
+@keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+
+#counter { position: fixed; bottom: 56px; right: 28px; pointer-events: none; z-index: 20; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.8px; }
+#counter b { color: var(--accent); font-weight: 400; }
+
+#theme-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; height: 34px; border-top: 1px solid rgba(255,255,255,0.04); background: rgba(13,17,23,0.96); }
+.theme-label { font-size: 9px; letter-spacing: 3px; text-transform: uppercase; color: var(--text-dim); margin-right: 14px; padding-left: 12px; font-family: var(--font-mono); }
+
+.theme-btn {
+  background: none; border: none; font-family: var(--font-mono); font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  padding: 0 14px; height: 100%; color: var(--text-dim); border-right: 1px solid rgba(255,255,255,0.04); transition: color 0.15s, background 0.15s; position: relative; cursor: pointer;
+}
+.theme-btn:last-child { border-right: none; }
+.theme-btn:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+.theme-btn.active { color: var(--accent); background: var(--accent-faint); }
+.theme-btn.active::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--accent); opacity: 0.6; }
+
+#save-toast { position: fixed; bottom: 46px; right: 28px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); }
+</style>
+</head>
+<body class="theme-focus">
+
+<div class="noise-overlay"></div>
+<div class="glow-bg"></div>
+
+<div id="app">
+  <header>
+    <div class="logo">vanta<span class="logo-dot">.</span></div>
+    <div class="header-meta" id="header-meta">// today</div>
+    <div class="toolbar">
+      <button class="tb-btn" id="undo-btn" title="Undo (Ctrl+Z)" disabled>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7v6h6"/><path d="M3 13c1.5-4.5 6-8 11-8 4.8 0 9 3.6 9 9s-4.2 9-9 9c-3 0-5.7-1.4-7.5-3.5"/></svg>
+      </button>
+      <button class="tb-btn" id="redo-btn" title="Redo (Ctrl+Y)" disabled>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 7v6h-6"/><path d="M21 13c-1.5-4.5-6-8-11-8C5.2 5 1 8.6 1 14s4.2 9 9 9c3 0 5.7-1.4 7.5-3.5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="input-wrap">
+    <div class="input-bar">
+      <input id="task-input" type="text" placeholder="enter task…" autocomplete="off" spellcheck="false"/>
+      <button class="bar-btn add-btn" id="add-btn">add</button>
+      <button class="bar-btn spacer-btn" id="spacer-btn">sep</button>
+    </div>
+  </div>
+
+  <div id="task-list"></div>
+</div>
+
+<div id="counter"></div>
+<div id="save-toast">saved</div>
+
+<div id="theme-bar">
+  <span class="theme-label">theme</span>
+  <button class="theme-btn active" data-theme="focus">focus</button>
+  <button class="theme-btn" data-theme="minimal">minimal</button>
+</div>
+
+<script>
+sessionStorage.clear();
+
+const ALL_THEMES = ['focus', 'minimal'];
+let settingsFileHandle = null;
+
+async function loadSettings() {
+  try {
+    const res = await fetch('./vanta.settings.json?_=' + Date.now());
+    if (res.ok) {
+      const data = await res.json();
+      if (data.theme && ALL_THEMES.includes(data.theme)) return data;
+    }
+  } catch(e) {}
+  return { theme: 'focus' };
+}
+
+async function saveSettings(settings) {
+  try {
+    if (window.showSaveFilePicker) {
+      if (!settingsFileHandle) {
+        try {
+          settingsFileHandle = await window.showSaveFilePicker({
+            suggestedName: 'vanta.settings.json',
+            types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+          });
+        } catch(e) {}
+      }
+      if (settingsFileHandle) {
+        const writable = await settingsFileHandle.createWritable();
+        await writable.write(JSON.stringify(settings, null, 2));
+        await writable.close();
+        flashToast(); return;
+      }
+    }
+  } catch(e) {}
+  try { localStorage.setItem('vanta_settings', JSON.stringify(settings)); flashToast(); } catch(e) {}
+}
+
+function loadSettingsSync() {
+  try {
+    const raw = localStorage.getItem('vanta_settings');
+    if (raw) { const d = JSON.parse(raw); if (d.theme && ALL_THEMES.includes(d.theme)) return d; }
+  } catch(e) {}
+  return null;
+}
+
+function flashToast() {
+  const t = document.getElementById('save-toast');
+  t.style.opacity = '1'; setTimeout(() => { t.style.opacity = '0'; }, 1200);
+}
+
+function applyTheme(t, save = true) {
+  document.body.className = 'theme-' + t;
+  document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.dataset.theme === t));
+  render();
+  if (save) saveSettings({ theme: t });
+}
+
+document.querySelectorAll('.theme-btn').forEach(b => b.addEventListener('click', () => applyTheme(b.dataset.theme)));
+
+// ════════════════════════════════════
+// STATE
+// ════════════════════════════════════
+let items = [], undoStack = [], redoStack = [], idCounter = 0, dragSrc = null;
+const list    = document.getElementById('task-list');
+const input   = document.getElementById('task-input');
+const counter = document.getElementById('counter');
+const undoBtn = document.getElementById('undo-btn');
+const redoBtn = document.getElementById('redo-btn');
+
+function snap()         { return JSON.parse(JSON.stringify(items)); }
+function pushHistory(b) { undoStack.push(b); redoStack = []; updateTB(); }
+function updateTB()     { undoBtn.disabled = !undoStack.length; redoBtn.disabled = !redoStack.length; }
+function undo() { if (!undoStack.length) return; redoStack.push(snap()); items = undoStack.pop(); render(); updateTB(); }
+function redo() { if (!redoStack.length) return; undoStack.push(snap()); items = redoStack.pop(); render(); updateTB(); }
+
+const DRAG_SVG  = `<svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>`;
+const X_SVG     = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="1" y1="1" x2="7" y2="7"/><line x1="7" y1="1" x2="1" y2="7"/></svg>`;
+const CHECK_SVG = `<svg width="9" height="7" viewBox="0 0 9 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1,3.5 3.5,6 8,1"/></svg>`;
+
+// ════════════════════════════════════
+// RENDER
+// ════════════════════════════════════
+function render(newId = null) {
+  list.innerHTML = '';
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'empty-state';
+    e.innerHTML = `
+      <div class="empty-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg></div>
+      <div class="empty-label">nothing yet — start typing</div>`;
+    list.appendChild(e);
+  } else {
+    items.forEach(it => {
+      const el = it.type === 'spacer' ? mkSpacer(it) : mkTask(it);
+      if (it.id === newId) el.classList.add('new');
+      list.appendChild(el);
+    });
+  }
+  updateCounter();
+}
+
+function mkTask(item) {
+  const el = document.createElement('div');
+  el.className = 'task-item' + (item.done ? ' done' : '');
+  el.dataset.id = item.id;
+  el.draggable = false;
+  el.innerHTML = `
+    <div class="drag-handle">${DRAG_SVG}</div>
+    <label class="cb-wrap">
+      <input type="checkbox" ${item.done ? 'checked' : ''}>
+      <div class="cb-box">${CHECK_SVG}</div>
+    </label>
+    <div class="task-text" tabindex="-1">${esc(item.text)}</div>
+    <button class="del-btn">${X_SVG}</button>`;
+
+  el.querySelector('input[type=checkbox]').addEventListener('change', e => {
+    const b = snap(); item.done = e.target.checked; pushHistory(b);
+    el.classList.toggle('done', item.done);
+    updateCounter();
+  });
+  el.querySelector('.del-btn').addEventListener('click', () => del(item.id));
+  const txt = el.querySelector('.task-text');
+  el.addEventListener('dblclick', e => {
+    if (e.target.closest('.cb-wrap,.del-btn,.drag-handle')) return;
+    editTask(item, txt);
+  });
+  setupDrag(el, item);
+  return el;
+}
+
+function mkSpacer(item) {
+  const el = document.createElement('div');
+  el.className = 'spacer-item';
+  el.dataset.id = item.id;
+  el.innerHTML = `
+    <div class="drag-handle">${DRAG_SVG}</div>
+    <div class="spacer-line"></div>
+    <button class="spacer-del">${X_SVG}</button>`;
+  el.querySelector('.spacer-del').addEventListener('click', () => del(item.id));
+  setupDrag(el, item);
+  return el;
+}
+
+function editTask(item, el) {
+  el.contentEditable = 'true';
+  el.focus();
+  const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
+  const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  const b = snap(); let saved = false;
+  function save() {
+    if (saved) return; saved = true;
+    el.contentEditable = 'false';
+    const t = el.textContent.trim();
+    if (t && t !== item.text) { item.text = t; pushHistory(b); }
+    else el.textContent = item.text;
+  }
+  el.addEventListener('blur', save, { once: true });
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    if (e.key === 'Escape') { el.textContent = item.text; el.blur(); }
+  });
+}
+
+function setupDrag(el, item) {
+  const h = el.querySelector('.drag-handle');
+  h.addEventListener('mousedown', () => { el.draggable = true; });
+  el.addEventListener('dragstart', e => {
+    dragSrc = item.id; e.dataTransfer.effectAllowed = 'move';
+    setTimeout(() => el.classList.add('dragging'), 0);
+  });
+  el.addEventListener('dragend', () => {
+    el.draggable = false; el.classList.remove('dragging');
+    document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x => x.classList.remove('drag-over-top','drag-over-bot'));
+    dragSrc = null;
+  });
+  el.addEventListener('dragover', e => {
+    e.preventDefault();
+    if (!dragSrc || dragSrc === item.id) return;
+    const mid = el.getBoundingClientRect().top + el.offsetHeight / 2;
+    el.classList.toggle('drag-over-top', e.clientY < mid);
+    el.classList.toggle('drag-over-bot', e.clientY >= mid);
+  });
+  el.addEventListener('dragleave', () => el.classList.remove('drag-over-top','drag-over-bot'));
+  el.addEventListener('drop', e => {
+    e.preventDefault();
+    if (!dragSrc || dragSrc === item.id) return;
+    const mid = el.getBoundingClientRect().top + el.offsetHeight / 2;
+    const b = snap();
+    const si = items.findIndex(x => x.id === dragSrc);
+    const [moved] = items.splice(si, 1);
+    const ti = items.findIndex(x => x.id === item.id);
+    items.splice(e.clientY >= mid ? ti + 1 : ti, 0, moved);
+    pushHistory(b); render();
+    el.classList.remove('drag-over-top','drag-over-bot');
+  });
+}
+
+function addTask() {
+  const text = input.value.trim();
+  if (!text) { input.focus(); return; }
+  const b = snap();
+  const it = { id: ++idCounter, type: 'task', text, done: false };
+  items.push(it); pushHistory(b); render(it.id);
+  input.value = ''; input.focus();
+}
+function addSpacer() {
+  const b = snap();
+  const it = { id: ++idCounter, type: 'spacer' };
+  items.push(it); pushHistory(b); render(it.id);
+  input.focus();
+}
+function del(id) {
+  const b = snap(); items = items.filter(x => x.id !== id); pushHistory(b); render();
+}
+
+function updateCounter() {
+  const tasks = items.filter(x => x.type === 'task');
+  const done  = tasks.filter(x => x.done).length;
+  counter.innerHTML = tasks.length ? `<b>${done}</b> / ${tasks.length}` : '';
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
+document.getElementById('add-btn').addEventListener('click', addTask);
+document.getElementById('spacer-btn').addEventListener('click', addSpacer);
+undoBtn.addEventListener('click', undo);
+redoBtn.addEventListener('click', redo);
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey||e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+  if ((e.ctrlKey||e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+});
+
+// ── INIT ──
+(async () => {
+  const cached = loadSettingsSync();
+  let currentTheme = 'focus';
+  if (cached && ALL_THEMES.includes(cached.theme)) currentTheme = cached.theme;
+  applyTheme(currentTheme, false);
+  input.focus();
+})();
+</script>
+</body>
+</html>
