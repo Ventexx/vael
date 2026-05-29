@@ -15,7 +15,7 @@ No persistent storage
 
 ## Running
 
-Simply open ````index.html``` in your browser.
+Simply open ```index.html``` in your browser.
 
 ## Notes
 - Tasks reset on refresh
