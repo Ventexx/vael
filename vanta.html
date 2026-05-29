@@ -16,7 +16,7 @@ html, body { height: 100%; }
 body { overflow-x: hidden; -webkit-font-smoothing: antialiased; }
 
 /* ══════════════════════════════════════════════════
-   ── FOCUS theme ──
+   THEME TOKENS
 ══════════════════════════════════════════════════ */
 body.theme-focus {
   --bg:           #0d1117;
@@ -25,6 +25,7 @@ body.theme-focus {
   --surface:      #1b2736;
   --border:       #1f3040;
   --border2:      #243545;
+  --group-line:   rgba(255,255,255,0.09);
   --accent:       #00c9b1;
   --accent-dim:   #009e8c;
   --accent-faint: rgba(0,201,177,0.06);
@@ -35,6 +36,8 @@ body.theme-focus {
   --done-strike:  #2a4455;
   --red:          #e05c6a;
   --red-bg:       rgba(224,92,106,0.1);
+  --chrome:       rgba(13,17,23,0.96);
+  --chrome-border:rgba(255,255,255,0.06);
   --radius:       10px;
   --radius-lg:    16px;
   --font-ui:      'Syne', sans-serif;
@@ -43,9 +46,6 @@ body.theme-focus {
   font-family: var(--font-ui); font-size: 15px; cursor: default;
 }
 
-/* ══════════════════════════════════════════════════
-   ── MINIMAL theme ──
-══════════════════════════════════════════════════ */
 body.theme-minimal {
   --bg:           #1f1f1f;
   --bg2:          #252525;
@@ -53,6 +53,7 @@ body.theme-minimal {
   --surface:      #333333;
   --border:       #444444;
   --border2:      #555555;
+  --group-line:   rgba(255,255,255,0.08);
   --accent:       #ffffff;
   --accent-dim:   #cccccc;
   --accent-faint: rgba(255,255,255,0.05);
@@ -63,6 +64,8 @@ body.theme-minimal {
   --done-strike:  #444444;
   --red:          #ff6b6b;
   --red-bg:       rgba(255,107,107,0.1);
+  --chrome:       rgba(31,31,31,0.96);
+  --chrome-border:rgba(255,255,255,0.06);
   --radius:       4px;
   --radius-lg:    6px;
   --font-ui:      'DM Mono', monospace;
@@ -70,6 +73,38 @@ body.theme-minimal {
   background: var(--bg); color: var(--text);
   font-family: var(--font-ui); font-size: 14px; cursor: default;
 }
+
+body.theme-paper {
+  --bg:           #f6f1e8;
+  --bg2:          #f0ebe2;
+  --bg3:          #ebe4d9;
+  --surface:      #fffaf1;
+  --border:       #d7cfc1;
+  --border2:      #c9c0b2;
+  --group-line:   rgba(63,95,122,0.14);
+  --accent:       #3f5f7a;
+  --accent-dim:   #5b7284;
+  --accent-faint: rgba(63,95,122,0.08);
+  --text:         #202428;
+  --text-mid:     #64707b;
+  --text-dim:     #8e8a80;
+  --done-text:    #8b8174;
+  --done-strike:  #b9b0a3;
+  --red:          #b94b4b;
+  --red-bg:       rgba(185,75,75,0.10);
+  --chrome:       rgba(247,242,234,0.96);
+  --chrome-border:rgba(0,0,0,0.08);
+  --radius:       8px;
+  --radius-lg:    14px;
+  --font-ui:      'Syne', sans-serif;
+  --font-mono:    'DM Mono', monospace;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font-ui); font-size: 15px; cursor: default;
+}
+
+body.theme-focus .glow-bg { background: radial-gradient(ellipse, rgba(0,201,177,0.08) 0%, transparent 70%); }
+body.theme-minimal .glow-bg { display: none; }
+body.theme-paper .glow-bg { background: radial-gradient(ellipse, rgba(63,95,122,0.08) 0%, transparent 72%); top: -20vh; }
 
 /* ══════════════════════════════════════════════════
    OVERLAYS
@@ -79,14 +114,13 @@ body.theme-minimal {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   opacity: 0.025;
 }
+body.theme-paper .noise-overlay { opacity: 0.018; }
 .glow-bg {
   position: fixed; top: -25vh; left: 50%;
   transform: translateX(-50%);
   width: 80vw; height: 60vh;
   pointer-events: none; z-index: 0;
 }
-body.theme-focus .glow-bg { background: radial-gradient(ellipse, rgba(0,201,177,0.07) 0%, transparent 70%); }
-body.theme-minimal .glow-bg { display: none; }
 
 /* ══════════════════════════════════════════════════
    APP SHELL
@@ -126,6 +160,7 @@ header { width: 100%; display: flex; align-items: center; padding: 44px 0 36px; 
 }
 body.theme-focus .input-bar:focus-within { border-color: rgba(0,201,177,0.35); box-shadow: 0 4px 32px rgba(0,0,0,0.4), 0 0 20px rgba(0,201,177,0.06); }
 body.theme-minimal .input-bar:focus-within { border-color: var(--accent); }
+body.theme-paper .input-bar:focus-within { border-color: rgba(63,95,122,0.35); box-shadow: 0 4px 28px rgba(0,0,0,0.12), 0 0 18px rgba(63,95,122,0.06); }
 
 #task-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); letter-spacing: 0.3px; font-size: 15px; padding: 15px 18px; font-family: var(--font-ui); }
 #task-input::placeholder { color: var(--text-dim); }
@@ -139,6 +174,7 @@ body.theme-minimal .input-bar:focus-within { border-color: var(--accent); }
   color: var(--accent); font-size: 13px; font-weight: 600; font-family: var(--font-ui); cursor: pointer;
 }
 body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px solid rgba(0,201,177,0.2); }
+body.theme-paper .bar-btn.add-btn { background: rgba(63,95,122,0.08); border: 1px solid rgba(63,95,122,0.18); color: var(--accent); }
 .bar-btn.add-btn:hover { background: var(--accent-faint); border-color: var(--accent); }
 
 .bar-divider { width: 1px; background: var(--border); flex-shrink: 0; }
@@ -149,8 +185,12 @@ body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px
 ══════════════════════════════════════════════════ */
 #task-list { display: flex; flex-direction: column; width: 100%; max-width: 680px; }
 
-.task-item {
+.task-item, .spacer-item {
   position: relative; display: flex; align-items: center; user-select: none; transition: background 0.14s, border-color 0.14s; cursor: default;
+  width: 100%;
+}
+
+.task-item {
   padding: 11px 12px 11px 10px; gap: 12px; border-radius: var(--radius); border: 1px solid transparent;
 }
 .task-item:hover { background: var(--bg3); border-color: var(--border); }
@@ -158,6 +198,13 @@ body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px
 .task-item.drag-over-top { border-top: 2px solid var(--accent) !important; }
 .task-item.drag-over-bot { border-bottom: 2px solid var(--accent) !important; }
 .task-item.dragging { opacity: 0.25; }
+
+.task-item.child {
+  margin-left: 18px;
+  padding-left: 18px;
+  border-left: 1px solid var(--group-line);
+}
+.task-item.child:hover { background: var(--bg3); }
 
 .drag-handle { opacity: 0; color: var(--text-dim); display: flex; align-items: center; transition: opacity 0.12s; flex-shrink: 0; padding: 2px; cursor: grab; }
 .task-item:hover .drag-handle, .spacer-item:hover .drag-handle { opacity: 1; }
@@ -187,17 +234,29 @@ body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px
 .del-btn:hover { color: var(--red) !important; background: var(--red-bg) !important; }
 
 /* ══════════════════════════════════════════════════
-   SPACER (FIXED TRANS-LINE BUG)
+   SPACER
 ══════════════════════════════════════════════════ */
-.spacer-item { position: relative; display: flex; align-items: center; transition: background 0.12s; padding: 8px 12px 8px 10px; gap: 12px; border-radius: var(--radius); border: 1px solid transparent; }
+.spacer-item {
+  min-height: 22px;
+  padding: 6px 12px 6px 10px;
+  gap: 12px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
 .spacer-item:hover { background: var(--bg3); border-color: var(--border); }
 
 .spacer-item.drag-over-top { border-top: 2px solid var(--accent) !important; }
 .spacer-item.drag-over-bot { border-bottom: 2px solid var(--accent) !important; }
 .spacer-item.dragging { opacity: 0.25; }
 
-/* Changed from linear-gradient to a reliable, clean physical line */
-.spacer-line { flex: 1; height: 1px; background: var(--border2); opacity: 0.7; }
+.spacer-line {
+  flex: 1;
+  height: 2px;
+  min-width: 12px;
+  border-radius: 999px;
+  background: var(--border2);
+  opacity: 0.95;
+}
 
 .spacer-del {
   opacity: 0; background: none; border: none; color: var(--text-dim); display: flex; align-items: center; justify-content: center;
@@ -220,15 +279,22 @@ body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px
 #counter { position: fixed; bottom: 56px; right: 28px; pointer-events: none; z-index: 20; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.8px; }
 #counter b { color: var(--accent); font-weight: 400; }
 
-#theme-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; height: 34px; border-top: 1px solid rgba(255,255,255,0.04); background: rgba(13,17,23,0.96); }
+#theme-bar {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  height: 34px;
+  border-top: 1px solid var(--chrome-border);
+  background: var(--chrome);
+}
 .theme-label { font-size: 9px; letter-spacing: 3px; text-transform: uppercase; color: var(--text-dim); margin-right: 14px; padding-left: 12px; font-family: var(--font-mono); }
 
 .theme-btn {
   background: none; border: none; font-family: var(--font-mono); font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
-  padding: 0 14px; height: 100%; color: var(--text-dim); border-right: 1px solid rgba(255,255,255,0.04); transition: color 0.15s, background 0.15s; position: relative; cursor: pointer;
+  padding: 0 14px; height: 100%; color: var(--text-dim); border-right: 1px solid var(--chrome-border); transition: color 0.15s, background 0.15s; position: relative; cursor: pointer;
 }
 .theme-btn:last-child { border-right: none; }
 .theme-btn:hover { color: var(--text); background: rgba(255,255,255,0.03); }
+body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
 .theme-btn.active { color: var(--accent); background: var(--accent-faint); }
 .theme-btn.active::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--accent); opacity: 0.6; }
 
@@ -275,12 +341,11 @@ body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px
   <span class="theme-label">theme</span>
   <button class="theme-btn active" data-theme="focus">focus</button>
   <button class="theme-btn" data-theme="minimal">minimal</button>
+  <button class="theme-btn" data-theme="paper">paper</button>
 </div>
 
 <script>
-sessionStorage.clear();
-
-const ALL_THEMES = ['focus', 'minimal'];
+const ALL_THEMES = ['focus', 'minimal', 'paper'];
 let settingsFileHandle = null;
 
 async function loadSettings() {
@@ -309,7 +374,8 @@ async function saveSettings(settings) {
         const writable = await settingsFileHandle.createWritable();
         await writable.write(JSON.stringify(settings, null, 2));
         await writable.close();
-        flashToast(); return;
+        flashToast();
+        return;
       }
     }
   } catch(e) {}
@@ -319,14 +385,18 @@ async function saveSettings(settings) {
 function loadSettingsSync() {
   try {
     const raw = localStorage.getItem('vanta_settings');
-    if (raw) { const d = JSON.parse(raw); if (d.theme && ALL_THEMES.includes(d.theme)) return d; }
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (d.theme && ALL_THEMES.includes(d.theme)) return d;
+    }
   } catch(e) {}
   return null;
 }
 
 function flashToast() {
   const t = document.getElementById('save-toast');
-  t.style.opacity = '1'; setTimeout(() => { t.style.opacity = '0'; }, 1200);
+  t.style.opacity = '1';
+  setTimeout(() => { t.style.opacity = '0'; }, 1200);
 }
 
 function applyTheme(t, save = true) {
@@ -341,22 +411,104 @@ document.querySelectorAll('.theme-btn').forEach(b => b.addEventListener('click',
 // ════════════════════════════════════
 // STATE
 // ════════════════════════════════════
-let items = [], undoStack = [], redoStack = [], idCounter = 0, dragSrc = null;
+let items = [];
+let undoStack = [];
+let redoStack = [];
+let idCounter = 0;
+let dragSrc = null;
+
 const list    = document.getElementById('task-list');
 const input   = document.getElementById('task-input');
 const counter = document.getElementById('counter');
 const undoBtn = document.getElementById('undo-btn');
 const redoBtn = document.getElementById('redo-btn');
 
-function snap()         { return JSON.parse(JSON.stringify(items)); }
+function cloneItems() { return JSON.parse(JSON.stringify(items)); }
 function pushHistory(b) { undoStack.push(b); redoStack = []; updateTB(); }
-function updateTB()     { undoBtn.disabled = !undoStack.length; redoBtn.disabled = !redoStack.length; }
-function undo() { if (!undoStack.length) return; redoStack.push(snap()); items = undoStack.pop(); render(); updateTB(); }
-function redo() { if (!redoStack.length) return; undoStack.push(snap()); items = redoStack.pop(); render(); updateTB(); }
+function updateTB() { undoBtn.disabled = !undoStack.length; redoBtn.disabled = !redoStack.length; }
+function undo() { if (!undoStack.length) return; redoStack.push(cloneItems()); items = undoStack.pop(); render(); updateTB(); }
+function redo() { if (!redoStack.length) return; undoStack.push(cloneItems()); items = redoStack.pop(); render(); updateTB(); }
 
 const DRAG_SVG  = `<svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>`;
 const X_SVG     = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="1" y1="1" x2="7" y2="7"/><line x1="7" y1="1" x2="1" y2="7"/></svg>`;
 const CHECK_SVG = `<svg width="9" height="7" viewBox="0 0 9 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1,3.5 3.5,6 8,1"/></svg>`;
+
+// ════════════════════════════════════
+// DATA HELPERS
+// ════════════════════════════════════
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function setDoneRecursive(task, done) {
+  task.done = done;
+  if (Array.isArray(task.children)) {
+    task.children.forEach(child => setDoneRecursive(child, done));
+  }
+}
+
+function countTasks(arr = items) {
+  let total = 0;
+  let done = 0;
+  arr.forEach(node => {
+    if (node.type === 'task') {
+      total += 1;
+      if (node.done) done += 1;
+      if (node.children && node.children.length) {
+        const sub = countTasks(node.children);
+        total += sub.total;
+        done += sub.done;
+      }
+    }
+  });
+  return { total, done };
+}
+
+function updateCounter() {
+  const stats = countTasks(items);
+  counter.innerHTML = stats.total ? `<b>${stats.done}</b> / ${stats.total}` : '';
+}
+
+function getLocation(id, arr = items, parentTask = null) {
+  for (let i = 0; i < arr.length; i++) {
+    const node = arr[i];
+    if (node.id === id) {
+      return { container: arr, index: i, node, parentTask };
+    }
+    if (node.type === 'task' && node.children && node.children.length) {
+      for (let j = 0; j < node.children.length; j++) {
+        const child = node.children[j];
+        if (child.id === id) {
+          return { container: node.children, index: j, node: child, parentTask: node };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function getTopLevelLocation(loc) {
+  if (!loc) return null;
+  if (!loc.parentTask) return loc;
+  return getLocation(loc.parentTask.id);
+}
+
+function isNestableTask(node) {
+  return node && node.type === 'task' && (!node.children || !node.children.length);
+}
+
+function removeAtLocation(loc) {
+  return loc.container.splice(loc.index, 1)[0];
+}
+
+function insertAt(container, index, node) {
+  container.splice(index, 0, node);
+}
+
+function afterRemovalIndex(container, beforeIndex, sourceLoc) {
+  if (sourceLoc.container === container && sourceLoc.index < beforeIndex) return beforeIndex - 1;
+  return beforeIndex;
+}
 
 // ════════════════════════════════════
 // RENDER
@@ -371,19 +523,32 @@ function render(newId = null) {
       <div class="empty-label">nothing yet — start typing</div>`;
     list.appendChild(e);
   } else {
-    items.forEach(it => {
-      const el = it.type === 'spacer' ? mkSpacer(it) : mkTask(it);
-      if (it.id === newId) el.classList.add('new');
-      list.appendChild(el);
-    });
+    items.forEach(node => renderNode(node, list, 0));
   }
   updateCounter();
+  updateTB();
 }
 
-function mkTask(item) {
+function renderNode(node, parentEl, depth) {
+  if (node.type === 'spacer') {
+    const el = mkSpacer(node);
+    parentEl.appendChild(el);
+    return;
+  }
+
+  const el = mkTask(node, depth);
+  parentEl.appendChild(el);
+
+  if (Array.isArray(node.children) && node.children.length) {
+    node.children.forEach(child => renderNode(child, parentEl, depth + 1));
+  }
+}
+
+function mkTask(item, depth = 0) {
   const el = document.createElement('div');
-  el.className = 'task-item' + (item.done ? ' done' : '');
+  el.className = 'task-item' + (item.done ? ' done' : '') + (depth > 0 ? ' child' : '');
   el.dataset.id = item.id;
+  el.dataset.depth = String(depth);
   el.draggable = false;
   el.innerHTML = `
     <div class="drag-handle">${DRAG_SVG}</div>
@@ -395,16 +560,20 @@ function mkTask(item) {
     <button class="del-btn">${X_SVG}</button>`;
 
   el.querySelector('input[type=checkbox]').addEventListener('change', e => {
-    const b = snap(); item.done = e.target.checked; pushHistory(b);
-    el.classList.toggle('done', item.done);
-    updateCounter();
+    const b = cloneItems();
+    setDoneRecursive(item, e.target.checked);
+    pushHistory(b);
+    render();
   });
+
   el.querySelector('.del-btn').addEventListener('click', () => del(item.id));
+
   const txt = el.querySelector('.task-text');
   el.addEventListener('dblclick', e => {
     if (e.target.closest('.cb-wrap,.del-btn,.drag-handle')) return;
     editTask(item, txt);
   });
+
   setupDrag(el, item);
   return el;
 }
@@ -425,16 +594,30 @@ function mkSpacer(item) {
 function editTask(item, el) {
   el.contentEditable = 'true';
   el.focus();
-  const r = document.createRange(); r.selectNodeContents(el); r.collapse(false);
-  const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
-  const b = snap(); let saved = false;
+  const r = document.createRange();
+  r.selectNodeContents(el);
+  r.collapse(false);
+  const s = window.getSelection();
+  s.removeAllRanges();
+  s.addRange(r);
+
+  const b = cloneItems();
+  let saved = false;
+
   function save() {
-    if (saved) return; saved = true;
+    if (saved) return;
+    saved = true;
     el.contentEditable = 'false';
     const t = el.textContent.trim();
-    if (t && t !== item.text) { item.text = t; pushHistory(b); }
-    else el.textContent = item.text;
+    if (t && t !== item.text) {
+      item.text = t;
+      pushHistory(b);
+    } else {
+      el.textContent = item.text;
+    }
+    render();
   }
+
   el.addEventListener('blur', save, { once: true });
   el.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
@@ -445,15 +628,20 @@ function editTask(item, el) {
 function setupDrag(el, item) {
   const h = el.querySelector('.drag-handle');
   h.addEventListener('mousedown', () => { el.draggable = true; });
+
   el.addEventListener('dragstart', e => {
-    dragSrc = item.id; e.dataTransfer.effectAllowed = 'move';
+    dragSrc = item.id;
+    e.dataTransfer.effectAllowed = 'move';
     setTimeout(() => el.classList.add('dragging'), 0);
   });
+
   el.addEventListener('dragend', () => {
-    el.draggable = false; el.classList.remove('dragging');
-    document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x => x.classList.remove('drag-over-top','drag-over-bot'));
+    el.draggable = false;
+    el.classList.remove('dragging');
+    document.querySelectorAll('.drag-over-top,.drag-over-bot').forEach(x => x.classList.remove('drag-over-top', 'drag-over-bot'));
     dragSrc = null;
   });
+
   el.addEventListener('dragover', e => {
     e.preventDefault();
     if (!dragSrc || dragSrc === item.id) return;
@@ -461,55 +649,128 @@ function setupDrag(el, item) {
     el.classList.toggle('drag-over-top', e.clientY < mid);
     el.classList.toggle('drag-over-bot', e.clientY >= mid);
   });
-  el.addEventListener('dragleave', () => el.classList.remove('drag-over-top','drag-over-bot'));
+
+  el.addEventListener('dragleave', () => el.classList.remove('drag-over-top', 'drag-over-bot'));
+
   el.addEventListener('drop', e => {
     e.preventDefault();
     if (!dragSrc || dragSrc === item.id) return;
-    const mid = el.getBoundingClientRect().top + el.offsetHeight / 2;
-    const b = snap();
-    const si = items.findIndex(x => x.id === dragSrc);
-    const [moved] = items.splice(si, 1);
-    const ti = items.findIndex(x => x.id === item.id);
-    items.splice(e.clientY >= mid ? ti + 1 : ti, 0, moved);
-    pushHistory(b); render();
-    el.classList.remove('drag-over-top','drag-over-bot');
+
+    const sourceLoc = getLocation(dragSrc);
+    const targetLocBefore = getLocation(item.id);
+    if (!sourceLoc || !targetLocBefore) return;
+
+    const dropAfter = e.clientY >= (el.getBoundingClientRect().top + el.offsetHeight / 2);
+    const b = cloneItems();
+    const moved = removeAtLocation(sourceLoc);
+
+    const targetLoc = getLocation(item.id);
+    if (!targetLoc) {
+      items = b;
+      render();
+      return;
+    }
+
+    // Tasks that already have children stay one-layer deep: they can be reordered top-level,
+    // but they are never nested as children under another task.
+    if (moved.type === 'task' && moved.children && moved.children.length) {
+      const topTarget = getTopLevelLocation(targetLoc);
+      if (!topTarget) return;
+      const container = topTarget.container;
+      let insertIndex = dropAfter ? topTarget.index + 1 : topTarget.index;
+      insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
+      insertAt(container, insertIndex, moved);
+      pushHistory(b);
+      render();
+      return;
+    }
+
+    if (moved.type === 'task') {
+      if (!targetLoc.parentTask) {
+        const parentTask = targetLoc.node;
+        parentTask.children = parentTask.children || [];
+        parentTask.children.push(moved);
+      } else {
+        const container = targetLoc.container;
+        let insertIndex = dropAfter ? targetLoc.index + 1 : targetLoc.index;
+        insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
+        insertAt(container, insertIndex, moved);
+      }
+      pushHistory(b);
+      render();
+      return;
+    }
+
+    // Spacers remain top-level separators.
+    const topTarget = getTopLevelLocation(targetLoc);
+    if (!topTarget) return;
+    const container = topTarget.container;
+    let insertIndex = dropAfter ? topTarget.index + 1 : topTarget.index;
+    insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
+    insertAt(container, insertIndex, moved);
+    pushHistory(b);
+    render();
   });
 }
 
+// ════════════════════════════════════
+// ACTIONS
+// ════════════════════════════════════
 function addTask() {
   const text = input.value.trim();
   if (!text) { input.focus(); return; }
-  const b = snap();
+  const b = cloneItems();
   const it = { id: ++idCounter, type: 'task', text, done: false };
-  items.push(it); pushHistory(b); render(it.id);
-  input.value = ''; input.focus();
-}
-function addSpacer() {
-  const b = snap();
-  const it = { id: ++idCounter, type: 'spacer' };
-  items.push(it); pushHistory(b); render(it.id);
+  items.push(it);
+  pushHistory(b);
+  render(it.id);
+  input.value = '';
   input.focus();
 }
+
+function addSpacer() {
+  const b = cloneItems();
+  const it = { id: ++idCounter, type: 'spacer' };
+  items.push(it);
+  pushHistory(b);
+  render(it.id);
+  input.focus();
+}
+
 function del(id) {
-  const b = snap(); items = items.filter(x => x.id !== id); pushHistory(b); render();
+  const loc = getLocation(id);
+  if (!loc) return;
+  const b = cloneItems();
+  removeAtLocation(loc);
+  pushHistory(b);
+  render();
 }
-
-function updateCounter() {
-  const tasks = items.filter(x => x.type === 'task');
-  const done  = tasks.filter(x => x.done).length;
-  counter.innerHTML = tasks.length ? `<b>${done}</b> / ${tasks.length}` : '';
-}
-
-function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 input.addEventListener('keydown', e => { if (e.key === 'Enter') addTask(); });
 document.getElementById('add-btn').addEventListener('click', addTask);
 document.getElementById('spacer-btn').addEventListener('click', addSpacer);
 undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
+
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey||e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
-  if ((e.ctrlKey||e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+});
+
+list.addEventListener('dragover', e => e.preventDefault());
+list.addEventListener('drop', e => {
+  if (!dragSrc) return;
+  const sourceLoc = getLocation(dragSrc);
+  if (!sourceLoc) return;
+  const sourceNode = sourceLoc.node;
+  if (sourceNode.type !== 'task') return;
+
+  const b = cloneItems();
+  const moved = removeAtLocation(sourceLoc);
+  items.push(moved);
+  pushHistory(b);
+  render();
+  dragSrc = null;
 });
 
 // ── INIT ──
