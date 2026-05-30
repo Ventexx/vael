@@ -19,31 +19,31 @@ body { overflow-x: hidden; -webkit-font-smoothing: antialiased; }
    THEME TOKENS
 ══════════════════════════════════════════════════ */
 body.theme-focus {
-  --bg:           #0d1117;
-  --bg2:          #111820;
-  --bg3:          #16202c;
-  --surface:      #1b2736;
-  --border:       #1f3040;
-  --border2:      #243545;
-  --group-line:   rgba(255,255,255,0.09);
+  --bg:           #0a0a0a;
+  --bg2:          #0f0f0f;
+  --bg3:          #141414;
+  --surface:      #161616;
+  --border:       #1e1e1e;
+  --border2:      #252525;
+  --group-line:   rgba(255,255,255,0.05);
   --accent:       #00c9b1;
   --accent-dim:   #009e8c;
   --accent-faint: rgba(0,201,177,0.06);
-  --text:         #dce8f0;
-  --text-mid:     #7a9aaf;
-  --text-dim:     #3d5668;
-  --done-text:    #3a5566;
-  --done-strike:  #2a4455;
-  --red:          #e05c6a;
-  --red-bg:       rgba(224,92,106,0.1);
-  --chrome:       rgba(13,17,23,0.96);
-  --chrome-border:rgba(255,255,255,0.06);
-  --radius:       10px;
-  --radius-lg:    16px;
-  --font-ui:      'Syne', sans-serif;
+  --text:         #d4d4d4;
+  --text-mid:     #666666;
+  --text-dim:     #3a3a3a;
+  --done-text:    #3d3d3d;
+  --done-strike:  #2e2e2e;
+  --red:          #c75f6a;
+  --red-bg:       rgba(199,95,106,0.08);
+  --chrome:       rgba(10,10,10,0.97);
+  --chrome-border:rgba(255,255,255,0.05);
+  --radius:       5px;
+  --radius-lg:    7px;
+  --font-ui:      'DM Mono', monospace;
   --font-mono:    'DM Mono', monospace;
   background: var(--bg); color: var(--text);
-  font-family: var(--font-ui); font-size: 15px; cursor: default;
+  font-family: var(--font-ui); font-size: 13.5px; cursor: default;
 }
 
 body.theme-minimal {
@@ -102,7 +102,7 @@ body.theme-paper {
   font-family: var(--font-ui); font-size: 15px; cursor: default;
 }
 
-body.theme-focus .glow-bg { background: radial-gradient(ellipse, rgba(0,201,177,0.08) 0%, transparent 70%); }
+body.theme-focus .glow-bg { display: none; }
 body.theme-minimal .glow-bg { display: none; }
 body.theme-paper .glow-bg { background: radial-gradient(ellipse, rgba(63,95,122,0.08) 0%, transparent 72%); top: -20vh; }
 
@@ -115,6 +115,7 @@ body.theme-paper .glow-bg { background: radial-gradient(ellipse, rgba(63,95,122,
   opacity: 0.025;
 }
 body.theme-paper .noise-overlay { opacity: 0.018; }
+body.theme-focus .noise-overlay { opacity: 0; }
 .glow-bg {
   position: fixed; top: -25vh; left: 50%;
   transform: translateX(-50%);
@@ -155,10 +156,10 @@ header { width: 100%; display: flex; align-items: center; padding: 44px 0 36px; 
 .input-bar {
   display: flex; align-items: stretch; position: relative;
   background: var(--surface); border: 1px solid var(--border2); border-radius: var(--radius-lg); overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.03);
+  box-shadow: 0 1px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.02);
   transition: box-shadow 0.25s, border-color 0.25s;
 }
-body.theme-focus .input-bar:focus-within { border-color: rgba(0,201,177,0.35); box-shadow: 0 4px 32px rgba(0,0,0,0.4), 0 0 20px rgba(0,201,177,0.06); }
+body.theme-focus .input-bar:focus-within { border-color: rgba(0,201,177,0.25); box-shadow: none; }
 body.theme-minimal .input-bar:focus-within { border-color: var(--accent); }
 body.theme-paper .input-bar:focus-within { border-color: rgba(63,95,122,0.35); box-shadow: 0 4px 28px rgba(0,0,0,0.12), 0 0 18px rgba(63,95,122,0.06); }
 
@@ -173,7 +174,7 @@ body.theme-paper .input-bar:focus-within { border-color: rgba(63,95,122,0.35); b
   background: rgba(255,255,255,0.05); border: 1px solid var(--border);
   color: var(--accent); font-size: 13px; font-weight: 600; font-family: var(--font-ui); cursor: pointer;
 }
-body.theme-focus .bar-btn.add-btn { background: rgba(0,201,177,0.1); border: 1px solid rgba(0,201,177,0.2); }
+body.theme-focus .bar-btn.add-btn { background: transparent; border: 1px solid var(--border2); }
 body.theme-paper .bar-btn.add-btn { background: rgba(63,95,122,0.08); border: 1px solid rgba(63,95,122,0.18); color: var(--accent); }
 .bar-btn.add-btn:hover { background: var(--accent-faint); border-color: var(--accent); }
 
@@ -198,13 +199,6 @@ body.theme-paper .bar-btn.add-btn { background: rgba(63,95,122,0.08); border: 1p
 .task-item.drag-over-top { border-top: 2px solid var(--accent) !important; }
 .task-item.drag-over-bot { border-bottom: 2px solid var(--accent) !important; }
 .task-item.dragging { opacity: 0.25; }
-
-.task-item.child {
-  margin-left: 18px;
-  padding-left: 18px;
-  border-left: 1px solid var(--group-line);
-}
-.task-item.child:hover { background: var(--bg3); }
 
 .drag-handle { opacity: 0; color: var(--text-dim); display: flex; align-items: center; transition: opacity 0.12s; flex-shrink: 0; padding: 2px; cursor: grab; }
 .task-item:hover .drag-handle, .spacer-item:hover .drag-handle { opacity: 1; }
@@ -298,16 +292,75 @@ body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
 .theme-btn.active { color: var(--accent); background: var(--accent-faint); }
 .theme-btn.active::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--accent); opacity: 0.6; }
 
+#help-btn {
+  position: fixed; bottom: 0; right: 0; z-index: 10000;
+  width: 34px; height: 34px;
+  background: none; border: none; border-left: 1px solid var(--chrome-border);
+  color: var(--text-dim); font-family: var(--font-mono); font-size: 11px;
+  cursor: default; display: flex; align-items: center; justify-content: center;
+}
+#help-tooltip {
+  position: fixed; bottom: 42px; right: 8px; z-index: 10001;
+  background: var(--bg2); border: 1px solid var(--border2);
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-mid);
+  padding: 12px 16px; line-height: 2;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+#help-btn:hover + #help-tooltip, #help-tooltip:hover { opacity: 1; }
+#help-tooltip .sk-key { color: var(--text-dim); }
+#help-tooltip .sk-desc { color: var(--text-mid); margin-left: 8px; }
+
 #save-toast { position: fixed; bottom: 46px; right: 28px; font-family: var(--font-mono); font-size: 9px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); }
+
+/* ══════════════════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════════════════ */
+#sidebar {
+  position: fixed; top: 0; left: 0; bottom: 0; z-index: 9998;
+  width: 240px;
+  background: var(--bg2);
+  border-right: 1px solid var(--chrome-border);
+  transform: translateX(-100%);
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+#sidebar.open {
+  transform: translateX(0);
+  pointer-events: all;
+}
+
+#menu-btn {
+  position: fixed; top: 16px; left: 16px; z-index: 9999;
+  background: none; border: 1px solid var(--border);
+  color: var(--text-dim); width: 30px; height: 30px;
+  border-radius: var(--radius); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 4px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+#menu-btn:hover { color: var(--accent); border-color: var(--border2); background: var(--accent-faint); }
+#menu-btn span {
+  display: block; width: 12px; height: 1.5px;
+  background: currentColor; border-radius: 2px;
+  transition: background 0.15s;
+}
+
 </style>
 </head>
 <body class="theme-focus">
 
 <div class="noise-overlay"></div>
 <div class="glow-bg"></div>
+
+<button id="menu-btn" title="Menu" aria-label="Toggle sidebar">
+  <span></span><span></span><span></span>
+</button>
+
+<div id="sidebar"></div>
 
 <div id="app">
   <header>
@@ -342,6 +395,16 @@ body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
   <button class="theme-btn active" data-theme="focus">focus</button>
   <button class="theme-btn" data-theme="minimal">minimal</button>
   <button class="theme-btn" data-theme="paper">paper</button>
+</div>
+
+<button id="help-btn">?</button>
+<div id="help-tooltip">
+  <div><span class="sk-key">enter</span><span class="sk-desc">add task</span></div>
+  <div><span class="sk-key">double-click</span><span class="sk-desc">edit task</span></div>
+  <div><span class="sk-key">esc</span><span class="sk-desc">cancel edit</span></div>
+  <div><span class="sk-key">ctrl+z</span><span class="sk-desc">undo</span></div>
+  <div><span class="sk-key">ctrl+y</span><span class="sk-desc">redo</span></div>
+  <div><span class="sk-key">drag handle</span><span class="sk-desc">reorder</span></div>
 </div>
 
 <script>
@@ -440,26 +503,10 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-function setDoneRecursive(task, done) {
-  task.done = done;
-  if (Array.isArray(task.children)) {
-    task.children.forEach(child => setDoneRecursive(child, done));
-  }
-}
-
 function countTasks(arr = items) {
-  let total = 0;
-  let done = 0;
+  let total = 0, done = 0;
   arr.forEach(node => {
-    if (node.type === 'task') {
-      total += 1;
-      if (node.done) done += 1;
-      if (node.children && node.children.length) {
-        const sub = countTasks(node.children);
-        total += sub.total;
-        done += sub.done;
-      }
-    }
+    if (node.type === 'task') { total++; if (node.done) done++; }
   });
   return { total, done };
 }
@@ -469,32 +516,11 @@ function updateCounter() {
   counter.innerHTML = stats.total ? `<b>${stats.done}</b> / ${stats.total}` : '';
 }
 
-function getLocation(id, arr = items, parentTask = null) {
-  for (let i = 0; i < arr.length; i++) {
-    const node = arr[i];
-    if (node.id === id) {
-      return { container: arr, index: i, node, parentTask };
-    }
-    if (node.type === 'task' && node.children && node.children.length) {
-      for (let j = 0; j < node.children.length; j++) {
-        const child = node.children[j];
-        if (child.id === id) {
-          return { container: node.children, index: j, node: child, parentTask: node };
-        }
-      }
-    }
+function getLocation(id) {
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].id === id) return { container: items, index: i, node: items[i] };
   }
   return null;
-}
-
-function getTopLevelLocation(loc) {
-  if (!loc) return null;
-  if (!loc.parentTask) return loc;
-  return getLocation(loc.parentTask.id);
-}
-
-function isNestableTask(node) {
-  return node && node.type === 'task' && (!node.children || !node.children.length);
 }
 
 function removeAtLocation(loc) {
@@ -523,32 +549,26 @@ function render(newId = null) {
       <div class="empty-label">nothing yet — start typing</div>`;
     list.appendChild(e);
   } else {
-    items.forEach(node => renderNode(node, list, 0));
+    items.forEach(node => renderNode(node, list));
   }
   updateCounter();
   updateTB();
 }
 
-function renderNode(node, parentEl, depth) {
+function renderNode(node, parentEl) {
   if (node.type === 'spacer') {
     const el = mkSpacer(node);
     parentEl.appendChild(el);
     return;
   }
-
-  const el = mkTask(node, depth);
+  const el = mkTask(node);
   parentEl.appendChild(el);
-
-  if (Array.isArray(node.children) && node.children.length) {
-    node.children.forEach(child => renderNode(child, parentEl, depth + 1));
-  }
 }
 
-function mkTask(item, depth = 0) {
+function mkTask(item) {
   const el = document.createElement('div');
-  el.className = 'task-item' + (item.done ? ' done' : '') + (depth > 0 ? ' child' : '');
+  el.className = 'task-item' + (item.done ? ' done' : '');
   el.dataset.id = item.id;
-  el.dataset.depth = String(depth);
   el.draggable = false;
   el.innerHTML = `
     <div class="drag-handle">${DRAG_SVG}</div>
@@ -561,7 +581,7 @@ function mkTask(item, depth = 0) {
 
   el.querySelector('input[type=checkbox]').addEventListener('change', e => {
     const b = cloneItems();
-    setDoneRecursive(item, e.target.checked);
+    item.done = e.target.checked;
     pushHistory(b);
     render();
   });
@@ -654,60 +674,25 @@ function setupDrag(el, item) {
 
   el.addEventListener('drop', e => {
     e.preventDefault();
+    e.stopPropagation();
     if (!dragSrc || dragSrc === item.id) return;
 
     const sourceLoc = getLocation(dragSrc);
-    const targetLocBefore = getLocation(item.id);
-    if (!sourceLoc || !targetLocBefore) return;
+    const targetLoc = getLocation(item.id);
+    if (!sourceLoc || !targetLoc) return;
 
     const dropAfter = e.clientY >= (el.getBoundingClientRect().top + el.offsetHeight / 2);
+    const srcIdx = sourceLoc.index;
+    let tgtIdx = dropAfter ? targetLoc.index + 1 : targetLoc.index;
+
+    // Adjust for the gap left by removing the source
+    if (srcIdx < tgtIdx) tgtIdx--;
+
+    if (srcIdx === tgtIdx) return;
+
     const b = cloneItems();
-    const moved = removeAtLocation(sourceLoc);
-
-    const targetLoc = getLocation(item.id);
-    if (!targetLoc) {
-      items = b;
-      render();
-      return;
-    }
-
-    // Tasks that already have children stay one-layer deep: they can be reordered top-level,
-    // but they are never nested as children under another task.
-    if (moved.type === 'task' && moved.children && moved.children.length) {
-      const topTarget = getTopLevelLocation(targetLoc);
-      if (!topTarget) return;
-      const container = topTarget.container;
-      let insertIndex = dropAfter ? topTarget.index + 1 : topTarget.index;
-      insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
-      insertAt(container, insertIndex, moved);
-      pushHistory(b);
-      render();
-      return;
-    }
-
-    if (moved.type === 'task') {
-      if (!targetLoc.parentTask) {
-        const parentTask = targetLoc.node;
-        parentTask.children = parentTask.children || [];
-        parentTask.children.push(moved);
-      } else {
-        const container = targetLoc.container;
-        let insertIndex = dropAfter ? targetLoc.index + 1 : targetLoc.index;
-        insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
-        insertAt(container, insertIndex, moved);
-      }
-      pushHistory(b);
-      render();
-      return;
-    }
-
-    // Spacers remain top-level separators.
-    const topTarget = getTopLevelLocation(targetLoc);
-    if (!topTarget) return;
-    const container = topTarget.container;
-    let insertIndex = dropAfter ? topTarget.index + 1 : topTarget.index;
-    insertIndex = afterRemovalIndex(container, insertIndex, sourceLoc);
-    insertAt(container, insertIndex, moved);
+    const [moved] = items.splice(srcIdx, 1);
+    items.splice(tgtIdx, 0, moved);
     pushHistory(b);
     render();
   });
@@ -761,16 +746,20 @@ list.addEventListener('dragover', e => e.preventDefault());
 list.addEventListener('drop', e => {
   if (!dragSrc) return;
   const sourceLoc = getLocation(dragSrc);
-  if (!sourceLoc) return;
-  const sourceNode = sourceLoc.node;
-  if (sourceNode.type !== 'task') return;
-
+  if (!sourceLoc || sourceLoc.node.type !== 'task') return;
   const b = cloneItems();
   const moved = removeAtLocation(sourceLoc);
   items.push(moved);
   pushHistory(b);
   render();
   dragSrc = null;
+});
+
+// ── SIDEBAR ──
+const menuBtn = document.getElementById('menu-btn');
+const sidebar = document.getElementById('sidebar');
+menuBtn.addEventListener('click', () => {
+  sidebar.classList.toggle('open');
 });
 
 // ── INIT ──
