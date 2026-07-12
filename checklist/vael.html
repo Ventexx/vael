@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>VANTA</title>
+<title>VAEL</title>
 <link rel="icon" type="image/png" href="./icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap" rel="stylesheet">
@@ -124,7 +124,7 @@ body.theme-focus .noise-overlay { opacity: 0; }
 header { width: 100%; display: flex; align-items: center; padding: 44px 0 36px; max-width: 680px; }
 .logo { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; color: var(--text); font-family: var(--font-ui); line-height: 1; text-transform: lowercase; }
 .logo-dot { color: var(--accent); }
-.header-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); letter-spacing: 0.5px; margin-left: 8px; margin-top: 1px; }
+.logo-name { color: var(--text-mid); font-size: .78em; font-weight: 500; margin-left: 6px; opacity: .9; }
 
 .toolbar { margin-left: auto; display: flex; gap: 4px; align-items: center; }
 .tb-btn {
@@ -411,8 +411,7 @@ body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
 
 <div id="app">
   <header>
-    <div class="logo">vanta<span class="logo-dot">.</span></div>
-    <div class="header-meta" id="header-meta">// today</div>
+    <div class="logo">vael<span class="logo-dot">.</span><span class="logo-name">checklist</span></div>
     <div class="toolbar">
       <button class="tb-btn" id="clean-btn" title="Remove completed tasks" disabled>
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -466,7 +465,18 @@ const ALL_THEMES = ['focus', 'minimal', 'paper'];
 
 function loadSettingsSync() {
   try {
-    const raw = localStorage.getItem('vanta_settings');
+    // One-time migration: this app used to be branded "vanta." and stored
+    // settings under 'vanta_settings'. If the new key is empty but the old
+    // one has data, carry it over so the rename doesn't reset anyone's
+    // theme. Harmless no-op once the new key exists.
+    let raw = localStorage.getItem('vael_settings');
+    if (!raw) {
+      const legacy = localStorage.getItem('vanta_settings');
+      if (legacy) {
+        raw = legacy;
+        localStorage.setItem('vael_settings', legacy);
+      }
+    }
     if (raw) {
       const d = JSON.parse(raw);
       if (d.theme && ALL_THEMES.includes(d.theme)) return d;
@@ -476,7 +486,7 @@ function loadSettingsSync() {
 }
 
 function saveSettings(settings) {
-  try { localStorage.setItem('vanta_settings', JSON.stringify(settings)); flashToast(); } catch(e) {}
+  try { localStorage.setItem('vael_settings', JSON.stringify(settings)); flashToast(); } catch(e) {}
 }
 
 function flashToast() {
@@ -794,9 +804,21 @@ document.addEventListener('keydown', e => {
 let currentProfileId = null;
 let isDirty = false;
 
-const PROFILES_KEY = 'vanta_profiles';
+const PROFILES_KEY = 'vael_profiles';
+const LEGACY_PROFILES_KEY = 'vanta_profiles'; // pre-rename key, read once below for migration
 function loadProfiles() {
-  try { return JSON.parse(localStorage.getItem(PROFILES_KEY)) || { profiles: [], counter: 0 }; }
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw) return JSON.parse(raw);
+    // One-time migration: carry over profiles saved under the old "vanta."
+    // branding so the rename doesn't wipe out anyone's saved lists.
+    const legacy = localStorage.getItem(LEGACY_PROFILES_KEY);
+    if (legacy) {
+      localStorage.setItem(PROFILES_KEY, legacy);
+      return JSON.parse(legacy);
+    }
+    return { profiles: [], counter: 0 };
+  }
   catch(e) { return { profiles: [], counter: 0 }; }
 }
 function saveProfilesStore(store) { localStorage.setItem(PROFILES_KEY, JSON.stringify(store)); }
@@ -934,7 +956,7 @@ document.getElementById('sb-export-btn').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify({ items, profileId: currentProfileId }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'vanta-checklist.json';
+  a.download = 'vael-checklist.json';
   a.click();
   URL.revokeObjectURL(a.href);
 });

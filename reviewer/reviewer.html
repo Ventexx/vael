@@ -1,0 +1,1628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vael. // reviewer</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg2: #111111;
+    --bg3: #181818;
+    --bg4: #1e1e1e;
+    --bg5: #252525;
+    --border: #2a2a2a;
+    --border2: #333333;
+    --accent: #00d4a0;
+    --accent-dim: #00a07a;
+    --accent-faint: rgba(0,212,160,0.08);
+    --accent-subtle: rgba(0,212,160,0.3);
+    --gold: #e8b84b;
+    --red: #ff6b6b;
+    --red-dim: #8b3333;
+    --red-faint: rgba(139,51,51,0.16);
+    --text: #c8c8c8;
+    --text-dim: #666;
+    --text-bright: #e8e8e8;
+    --font: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --titlebar-h: 44px;
+    --sidebar-w: 240px;
+    --statusbar-h: 26px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 12px; }
+  #app { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+  button { font-family: var(--font); }
+  svg { display: block; }
+
+  /* ---------------------------------------------------------------- TOPBAR */
+  #topbar {
+    height: var(--titlebar-h); flex-shrink: 0; display: flex; align-items: center;
+    background: var(--bg); border-bottom: 1px solid var(--border); padding: 0 10px; gap: 10px;
+    -webkit-app-region: drag; z-index: 400;
+  }
+  .titlebar-logo { font-size: 13px; font-weight: 700; color: var(--text-bright); letter-spacing: -0.5px; flex-shrink: 0; -webkit-app-region: no-drag; }
+  .titlebar-logo span { color: var(--accent); }
+  #topbar-mid { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; }
+  #topbar-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; -webkit-app-region: no-drag; }
+
+  .tb-btn {
+    height: 28px; padding: 0 10px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text);
+    border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 11px;
+    transition: all .12s; position: relative;
+  }
+  .tb-btn:hover:not(:disabled) { background: var(--bg4); border-color: var(--accent-dim); color: var(--accent); }
+  .tb-btn:disabled { opacity: .35; cursor: default; }
+  .tb-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .tb-btn.icon-only { width: 28px; padding: 0; justify-content: center; }
+  .tb-btn.active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .tb-btn.danger { border-color: var(--red-dim); }
+  .tb-btn.danger:hover:not(:disabled) { background: var(--red-faint); color: var(--red); border-color: var(--red-dim); }
+  .tb-badge {
+    min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--red-dim); color: #ffdada;
+    font-size: 9.5px; display: flex; align-items: center; justify-content: center; font-weight: 700;
+  }
+  .tb-badge.gold { background: var(--gold); color: #1a1200; }
+  .tb-sep { width: 1px; height: 18px; background: var(--border2); flex-shrink: 0; margin: 0 4px; }
+
+  .winbtn {
+    width: 28px; height: 24px; border-radius: 3px; border: 1px solid var(--border2); background: var(--bg3);
+    cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-dim);
+    transition: all 0.1s; -webkit-app-region: no-drag;
+  }
+  .winbtn:hover { background: var(--bg4); color: var(--text); }
+  .winbtn.close:hover { background: #6e2020; border-color: #8b3333; color: #ffaaaa; }
+  .winbtn svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---------------------------------------------------------------- MAIN */
+  #main-row { flex: 1; display: flex; overflow: hidden; position: relative; min-height: 0; }
+
+  /* SIDEBAR */
+  #sidebar { width: var(--sidebar-w); background: var(--bg3); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; transition: width .15s ease; }
+  #sidebar.collapsed { width: 34px; }
+  #sidebar.collapsed .sb-title, #sidebar.collapsed #sb-list { display: none; }
+  #sidebar.collapsed .sb-head { justify-content: center; padding: 10px 0; }
+  #sidebar.collapsed #btn-toggle-sidebar svg { transform: rotate(180deg); }
+  .sb-head { display: flex; align-items: center; gap: 6px; padding: 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .sb-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  #btn-toggle-sidebar {
+    flex-shrink: 0; width: 18px; height: 18px; padding: 0; border: none; background: transparent;
+    color: var(--text-dim);
+  }
+  #btn-toggle-sidebar:hover { background: var(--bg4); color: var(--accent); border-color: transparent; }
+  #btn-toggle-sidebar svg { width: 11px; height: 11px; transition: transform .15s ease; }
+  #sb-list { flex: 1; overflow-y: auto; padding: 6px 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  #sb-list::-webkit-scrollbar { width: 8px; }
+  #sb-list::-webkit-scrollbar-track { background: transparent; }
+  #sb-list::-webkit-scrollbar-thumb { background: var(--bg5); border-radius: 5px; border: 2px solid var(--bg3); background-clip: padding-box; }
+  #sb-list::-webkit-scrollbar-thumb:hover { background: var(--border2); background-clip: padding-box; }
+  .sb-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+    padding: 9px 10px; border-radius: 5px; border: 1px solid var(--border2); background: var(--bg4);
+    color: var(--text); cursor: pointer; font-size: 11px; text-align: left; transition: all .1s;
+  }
+  .sb-item:hover { border-color: var(--accent-dim); }
+  .sb-item.active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .sb-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .sb-item-count { flex-shrink: 0; font-size: 10px; color: var(--text-dim); background: var(--bg3); border-radius: 3px; padding: 1px 6px; min-width: 16px; text-align: center; }
+  .sb-item.active .sb-item-count { color: var(--accent); }
+  .sb-item.flagged-item { border-color: var(--gold); }
+  .sb-item-flag-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); flex-shrink: 0; }
+  .sb-empty { color: var(--text-dim); font-size: 10.5px; text-align: center; padding: 24px 10px; line-height: 1.6; }
+  .sb-empty button { margin-top: 10px; }
+
+  /* Collapsible group headers (folders grouped by parent, flagged sets grouped by folder) */
+  .sb-group-header {
+    display: flex; align-items: center; gap: 6px; width: 100%; padding: 7px 8px; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .05em; border-radius: 4px; margin-top: 4px;
+  }
+  .sb-group-header:first-child { margin-top: 0; }
+  .sb-group-header:hover { color: var(--text-bright); background: var(--bg4); }
+  .sb-group-chevron { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .12s; flex-shrink: 0; }
+  .sb-group-header.collapsed .sb-group-chevron { transform: rotate(-90deg); }
+  .sb-group-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; font-weight: 700; }
+  .sb-group-children { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 6px 8px; margin: 0 0 2px 6px; border-left: 1px solid var(--border); }
+
+  /* Sidebar footer -- settings / hotkeys / review-mode toggle, always
+     reachable at the bottom of the folder panel. In the collapsed sidebar
+     there's no room for a 3-across row, so it becomes a 2-item vertical
+     stack (mode toggle only makes sense with folders visible, so it's
+     hidden there) using column-reverse to flip the display order without
+     needing separate collapsed markup. */
+  #sb-foot { flex-shrink: 0; border-top: 1px solid var(--border); }
+  #sidebar.collapsed #sb-foot { margin-top: auto; border-top: none; }
+  .sb-foot-row { display: flex; align-items: center; justify-content: space-around; padding: 8px; gap: 6px; }
+  #sidebar.collapsed .sb-foot-row { flex-direction: column-reverse; padding: 10px 0; gap: 10px; }
+  #sidebar.collapsed #btn-mode-toggle { display: none; }
+  .sb-foot-btn {
+    width: 28px; height: 28px; border-radius: 5px; border: 1px solid var(--border2); background: var(--bg4);
+    color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all .12s; flex-shrink: 0;
+  }
+  .sb-foot-btn:hover { border-color: var(--accent-dim); color: var(--accent); background: var(--bg5); }
+  .sb-foot-btn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .sb-foot-btn.active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+
+  /* Settings ("folder"), hotkeys ("?"), and rescan (reload) buttons keep the
+     normal bordered sb-foot-btn look (matching the mode-toggle button) when
+     the sidebar is expanded. Only when collapsed do they shrink down to
+     match #btn-toggle-sidebar's plain, borderless style. */
+  #sidebar.collapsed #btn-settings, #sidebar.collapsed #btn-hotkeys, #sidebar.collapsed #btn-rescan {
+    width: 18px; height: 18px; border: none; background: transparent; color: var(--text-dim);
+  }
+  #sidebar.collapsed #btn-settings:hover, #sidebar.collapsed #btn-hotkeys:hover, #sidebar.collapsed #btn-rescan:hover { border-color: transparent; background: var(--bg4); color: var(--accent); }
+  #sidebar.collapsed #btn-settings svg, #sidebar.collapsed #btn-hotkeys svg, #sidebar.collapsed #btn-rescan svg { width: 11px; height: 11px; }
+
+  /* CANVAS */
+  #canvas-col { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative; }
+  #canvas-header { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+    border-bottom: 1px solid var(--border); background: transparent; flex-shrink: 0; }
+  #ch-title { font-size: 10.5px; color: var(--text-dim); font-weight: 600; flex-shrink: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; min-width: 0; letter-spacing: .02em; }
+  #ch-sub { font-size: 10px; color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; }
+  #ch-sub::before { content: '\2014'; margin-right: 8px; opacity: .5; }
+  #ch-actions { display: flex; gap: 3px; flex-shrink: 0; }
+  #btn-rightclick-mode { margin-right: 10px; }
+  #ch-actions .tb-btn.icon-only.active { border-color: var(--border2); color: var(--text); }
+  #ch-actions .tb-btn.icon-only { width: 20px; height: 20px; background: transparent; border-color: transparent; color: var(--text-dim); }
+  #ch-actions .tb-btn.icon-only:hover:not(:disabled) { background: var(--bg4); border-color: var(--border2); color: var(--accent); }
+  #ch-actions .tb-btn.icon-only svg { width: 11px; height: 11px; }
+
+  #canvas-wrap { flex: 1; position: relative; overflow-y: auto; overflow-x: hidden; min-height: 0;
+    background: radial-gradient(ellipse 1100px 600px at 50% 0%, #161616 0%, var(--bg) 70%); }
+  #canvas-wrap::-webkit-scrollbar { width: 9px; }
+  #canvas-wrap::-webkit-scrollbar-track { background: transparent; }
+  #canvas-wrap::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 5px; border: 2px solid var(--bg); background-clip: padding-box; }
+  #canvas-wrap::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); background-clip: padding-box; }
+  #groups-list { display: flex; flex-direction: column; gap: 2px; padding: 12px 16px 16px; }
+  #canvas-placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
+    gap: 10px; color: var(--text-dim); text-align: center; z-index: 2; pointer-events: none;
+  }
+  #canvas-placeholder svg { width: 34px; height: 34px; stroke: currentColor; fill: none; stroke-width: 1.3; opacity: .5; }
+  #canvas-placeholder.hidden { display: none; }
+
+  /* LOADING OVERLAY -- darkens the canvas while every set in a newly opened
+     folder is pre-loaded (since everything now expands by default). */
+  #canvas-loading {
+    position: absolute; inset: 0; background: rgba(5,5,5,0.78); backdrop-filter: blur(1px); z-index: 55;
+    display: flex; align-items: center; justify-content: center; transition: opacity .15s;
+  }
+  #canvas-loading.hidden { display: none; }
+  .cl-box { width: 240px; text-align: center; }
+  .cl-title { font-size: 11px; color: var(--text); margin-bottom: 10px; }
+  .cl-bar { height: 4px; border-radius: 2px; background: var(--bg4); overflow: hidden; }
+  .cl-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width .15s ease; }
+  .cl-sub { font-size: 10px; color: var(--text-dim); margin-top: 8px; }
+
+  /* GROUP SECTIONS (accordion list, replaces the old draggable canvas) --
+     styled to match the simple folder-list pattern: a plain header row,
+     with contents shown via indent + a left separator line rather than a
+     boxed card. */
+  .group-section { background: transparent; overflow: visible; flex-shrink: 0; }
+  .group-section-header {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px; cursor: pointer; background: transparent;
+    border: none; border-left: 2px solid transparent; width: 100%; text-align: left; font-family: var(--font);
+    transition: background .1s, border-color .1s; border-radius: 4px;
+  }
+  .group-section-header:hover { background: var(--bg4); border-left-color: var(--accent-dim); }
+  .group-chevron { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round;
+    stroke-linejoin: round; color: var(--text-dim); flex-shrink: 0; transition: transform .12s; }
+  .group-section.expanded .group-chevron { transform: rotate(90deg); }
+  .group-section-title { flex: 1; font-size: 11.5px; font-weight: 700; color: var(--text-bright); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .group-section-count { font-size: 10px; color: var(--text-dim); background: var(--bg3); border-radius: 3px; padding: 2px 7px; flex-shrink: 0; }
+  .group-section-flag-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); flex-shrink: 0; }
+  .group-section.flagged-item .group-section-title { color: var(--gold); }
+  .group-section-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .group-section-body {
+    display: none; margin: 2px 0 12px 10px; padding: 6px 0 6px 14px; border-left: 1px solid var(--border);
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px;
+  }
+  .group-section.expanded .group-section-body { display: grid; }
+  .group-section-loading { color: var(--text-dim); font-size: 10.5px; padding: 4px 2px; }
+
+  /* GENERAL REVIEW -- image "wall". Every image in the folder is laid out
+     in a flowing justified strip: each tile is pinned to a fixed height and
+     its width simply follows the source image's own aspect ratio, so
+     portrait/landscape/square images all sit next to each other cleanly
+     without cropping, letterboxing, or a rigid grid. */
+  #wall-list { display: none; flex-wrap: wrap; align-content: flex-start; gap: 8px; padding: 12px 16px 40px; }
+  #wall-list.active { display: flex; }
+  .wall-tile {
+    position: relative; height: 210px; border-radius: 6px; overflow: hidden; cursor: zoom-in; flex-shrink: 0;
+    background: var(--bg2); border: 2px solid transparent; box-shadow: 0 4px 14px rgba(0,0,0,.3);
+    transition: transform .12s ease, box-shadow .12s ease; animation: tileIn .3s ease both;
+  }
+  .wall-tile:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(0,0,0,.45); z-index: 2; }
+  .wall-tile img { height: 100%; width: auto; display: block; }
+  /* Iteration highlight -- a colored border + soft outer glow only. The
+     border sits around the tile so it never touches the image's own
+     pixels; a translucent color wash used to be layered on top of the
+     image via blend-mode, which technically made the tint more visible but
+     also meant the artwork itself was constantly being recolored, which
+     defeats the purpose of a *review* tool. Saturation/lightness are tuned
+     down from the very first pass too, so it reads as "this tile belongs to
+     a set" without shouting. Each distinct set still gets its own hue so
+     two highlighted sets sitting right next to each other stay
+     distinguishable. */
+  .wall-tile.iter-hl { border-width: 2px; border-color: var(--wtint); box-shadow: 0 4px 16px rgba(0,0,0,.35), 0 0 10px var(--wtint-glow); }
+  .wall-tile.marked { border-color: var(--red-dim); }
+  .wall-tile.marked .tile-x-overlay { display: flex; }
+  .wall-tile .tile-iter-badge.small { font-size: 8.5px; padding: 1px 5px; }
+  /* Top-left badge cluster on wall tiles: flag dot + iteration number share
+     this one corner slot, same spot the iteration number uses alone in the
+     per-set (iteration) view. */
+  .wall-badges { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 4px; z-index: 2; }
+  .wall-badges .tile-iter-badge { position: static; top: auto; left: auto; }
+  .wall-flag-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--gold); flex-shrink: 0;
+    box-shadow: 0 0 5px rgba(232,184,75,.7), 0 0 0 1px rgba(0,0,0,.4);
+  }
+  .mark-btn {
+    position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 4px;
+    border: 1px solid var(--border2); background: rgba(10,10,10,.7); color: var(--text-dim); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .12s, color .12s, border-color .12s;
+    z-index: 3;
+  }
+  .wall-tile:hover .mark-btn, .wall-tile.marked .mark-btn { opacity: 1; }
+  .mark-btn:hover { color: var(--red); border-color: var(--red-dim); }
+  .wall-tile.marked .mark-btn { color: var(--red); border-color: var(--red-dim); }
+  .mark-btn svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; }
+
+  .img-tile {
+    position: relative; border: 1px solid var(--border2); border-radius: 7px; overflow: hidden;
+    background: #000; display: flex; flex-direction: column; box-shadow: 0 4px 18px rgba(0,0,0,.35);
+    transition: border-color .15s, transform .15s ease, box-shadow .15s ease;
+    animation: tileIn .3s ease both;
+  }
+  .img-tile:hover {
+    border-color: var(--accent-dim); transform: translateY(-3px);
+    box-shadow: 0 12px 28px rgba(0,0,0,.5), 0 0 0 1px var(--accent-subtle), 0 0 22px rgba(0,212,160,.14);
+  }
+  .img-tile.marked { border-color: var(--red-dim); }
+  .img-tile.marked:hover { border-color: var(--red); box-shadow: 0 12px 28px rgba(0,0,0,.5), 0 0 0 1px var(--red-dim), 0 0 22px rgba(255,107,107,.14); }
+  @keyframes tileIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) { .img-tile { animation: none; } }
+  /* No fixed square crop -- the wrapper's height simply follows the image's
+     own rendered height, so portrait, landscape and square sources are all
+     shown in full. Zooming (focus overlay) remains available for detail. */
+  .img-tile-imgwrap { position: relative; width: 100%; cursor: zoom-in; background: var(--bg2); overflow: hidden; display: flex; }
+  .img-tile-imgwrap img { width: 100%; height: auto; display: block; }
+  .tile-iter-badge {
+    position: absolute; top: 6px; left: 6px; background: rgba(10,10,10,.75); border: 1px solid var(--border2);
+    color: var(--text-bright); font-size: 9.5px; padding: 2px 6px; border-radius: 3px; letter-spacing: .02em;
+  }
+  .tile-x-overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(110,32,32,0.4);
+  }
+  .img-tile.marked .tile-x-overlay { display: flex; }
+  .tile-x-overlay svg { width: 52px; height: 52px; stroke: var(--red); fill: none; stroke-width: 2; stroke-linecap: round; }
+  .img-tile:hover .mark-btn, .img-tile.marked .mark-btn { opacity: 1; }
+  .img-tile.marked .mark-btn { color: var(--red); border-color: var(--red-dim); }
+
+  /* FOCUS / ZOOM OVERLAY */
+  #focus-overlay {
+    position: absolute; inset: 0; background: rgba(5,5,5,0.92); z-index: 60; display: none;
+    align-items: center; justify-content: center; flex-direction: column;
+  }
+  #focus-overlay.open { display: flex; }
+  #focus-name { font-size: 10.5px; color: var(--text-dim); letter-spacing: .02em; margin-bottom: 12px; max-width: 82%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; }
+  #focus-img-wrap { position: relative; max-width: 82%; max-height: 78%; display: flex; align-items: center; justify-content: center; }
+  #focus-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 12px 48px rgba(0,0,0,.6); }
+  .focus-x-overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(110,32,32,0.35); border-radius: 6px;
+  }
+  #focus-img-wrap.marked .focus-x-overlay { display: flex; }
+  .focus-x-overlay svg { width: 90px; height: 90px; stroke: var(--red); fill: none; stroke-width: 1.6; stroke-linecap: round; }
+  .focus-nav-btn {
+    position: absolute; top: 50%; transform: translateY(-50%); width: 42px; height: 42px; border-radius: 50%;
+    border: 1px solid var(--border2); background: var(--bg3); color: var(--text); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; opacity: .85;
+  }
+  .focus-nav-btn:hover { background: var(--bg4); border-color: var(--accent-dim); color: var(--accent); opacity: 1; }
+  .focus-nav-btn svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; }
+  #focus-prev { left: 24px; }
+  #focus-next { right: 24px; }
+  #focus-close {
+    position: absolute; top: 18px; right: 22px; width: 30px; height: 30px; border-radius: 5px;
+    border: 1px solid var(--border2); background: var(--bg3); color: var(--text-dim); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #focus-close:hover { color: var(--text); border-color: var(--accent-dim); }
+  #focus-close svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+  #focus-footer { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+  #focus-counter { font-size: 11px; color: var(--text-dim); }
+  .focus-mark-btn {
+    display: flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 5px; border: 1px solid var(--border2);
+    background: var(--bg3); color: var(--text); cursor: pointer; font-size: 11px;
+  }
+  .focus-mark-btn:hover { border-color: var(--red-dim); color: var(--red); }
+  .focus-mark-btn.marked { background: var(--red-faint); border-color: var(--red-dim); color: var(--red); }
+  .focus-mark-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+  /* STATUS BAR */
+  #statusbar {
+    height: var(--statusbar-h); background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; padding: 0 12px; flex-shrink: 0;
+    font-size: 10px; color: var(--text-dim);
+  }
+  #statusbar b { color: var(--text); }
+
+  /* MODALS */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 1000; display: none;
+    align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    width: 440px; max-width: 90vw; max-height: 80vh; background: var(--bg2); border: 1px solid var(--border2);
+    border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,.6); display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .modal-title { font-size: 12.5px; font-weight: 700; color: var(--text-bright); }
+  .modal-close { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border2); background: var(--bg3);
+    color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .modal-close:hover { color: var(--text); border-color: var(--accent-dim); }
+  .modal-close svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+  .modal-body { padding: 14px 16px; overflow-y: auto; flex: 1; }
+  .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0; }
+
+  .folder-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border2);
+    background: var(--bg3); border-radius: 5px; margin-bottom: 6px; }
+  .folder-row-path { flex: 1; font-size: 10.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folder-row-remove { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border2); background: var(--bg4);
+    color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .folder-row-remove:hover { background: #6e2020; border-color: #8b3333; color: #ffaaaa; }
+  .folder-row-remove svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .add-folder-btn {
+    width: 100%; padding: 9px; border: 1px dashed var(--border2); background: transparent; color: var(--text-dim);
+    border-radius: 5px; cursor: pointer; font-family: var(--font); font-size: 11px; display: flex; align-items: center;
+    justify-content: center; gap: 6px; margin-top: 4px;
+  }
+  .add-folder-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+  .add-folder-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .modal-empty { font-size: 10.5px; color: var(--text-dim); text-align: center; padding: 16px 0; }
+
+  .confirm-text { font-size: 11.5px; color: var(--text); line-height: 1.6; }
+  .confirm-text b { color: var(--red); }
+  .btn-primary, .btn-secondary, .btn-danger {
+    padding: 7px 14px; border-radius: 5px; cursor: pointer; font-family: var(--font); font-size: 11px; border: 1px solid var(--border2);
+  }
+  .btn-secondary { background: var(--bg3); color: var(--text); }
+  .btn-secondary:hover { background: var(--bg4); }
+  .btn-primary { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .btn-primary:hover { background: rgba(0,212,160,0.16); }
+  .btn-danger { background: var(--red-faint); color: var(--red); border-color: var(--red-dim); }
+  .btn-danger:hover { background: rgba(139,51,51,0.28); }
+
+  .flag-group-row { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--border2);
+    background: var(--bg3); border-radius: 5px; margin-bottom: 6px; }
+  .flag-group-row .fg-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); flex-shrink: 0; }
+  .flag-group-row .fg-info { flex: 1; min-width: 0; }
+  .flag-group-row .fg-base { font-size: 11px; color: var(--text-bright); font-weight: 600; }
+  .flag-group-row button { flex-shrink: 0; }
+
+  /* Hotkeys modal */
+  .hk-group-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 6px; }
+  .hk-group-title:first-child { margin-top: 0; }
+  .hk-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 2px; font-size: 11.5px; color: var(--text); border-bottom: 1px solid var(--border); }
+  .hk-row:last-child { border-bottom: none; }
+  .hk-row span { flex: 1; }
+  .hk-row kbd { background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; padding: 2px 7px; color: var(--accent); font-family: var(--font); font-size: 10px; flex-shrink: 0; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- TOPBAR -->
+  <div id="topbar">
+    <div class="titlebar-logo">vael.<span>reviewer</span></div>
+    <div id="topbar-mid"></div>
+    <div id="topbar-actions">
+      <button class="tb-btn" id="btn-flagged" title="Sets flagged for requeue">
+        <svg viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>
+        <span>Flagged</span>
+        <span class="tb-badge gold" id="flagged-count" style="display:none">0</span>
+      </button>
+      <button class="tb-btn danger" id="btn-execute" disabled title="Delete all marked images">
+        <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        <span>Execute</span>
+        <span class="tb-badge" id="marked-count" style="display:none">0</span>
+      </button>
+      <div class="tb-sep"></div>
+      <button class="winbtn" id="win-min"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"></line></svg></button>
+      <button class="winbtn" id="win-max"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"></rect></svg></button>
+      <button class="winbtn close" id="win-close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"></line><line x1="9" y1="1" x2="1" y2="9"></line></svg></button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div id="main-row">
+    <div id="sidebar">
+      <div class="sb-head">
+        <div class="sb-title" id="sb-title">Folders</div>
+        <button class="tb-btn icon-only" id="btn-toggle-sidebar" title="Collapse folder panel">
+          <svg viewBox="0 0 24 24"><polyline points="15 6 9 12 15 18"></polyline></svg>
+        </button>
+      </div>
+      <div id="sb-list"></div>
+      <div id="sb-foot">
+        <div class="sb-foot-row">
+          <button class="sb-foot-btn" id="btn-hotkeys" title="Keyboard shortcuts">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.7-2.5 2.1-2.5 3.6"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          </button>
+          <button class="sb-foot-btn" id="btn-settings" title="Watched folders">
+            <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          </button>
+          <button class="sb-foot-btn" id="btn-rescan" title="Rescan now">
+            <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          </button>
+          <button class="sb-foot-btn" id="btn-mode-toggle" title="Switch to general review">
+            <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="canvas-col">
+      <div id="canvas-header">
+        <div id="ch-title">&mdash;</div>
+        <div id="ch-sub"></div>
+        <div id="ch-actions">
+          <button class="tb-btn icon-only" id="btn-rightclick-mode" title="Right-click marks for deletion instead of flagging">
+            <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
+          </button>
+          <button class="tb-btn icon-only" id="btn-expand-all" title="Expand all sets" style="display:none">
+            <svg viewBox="0 0 24 24"><polyline points="7 13 12 18 17 13"></polyline><polyline points="7 6 12 11 17 6"></polyline></svg>
+          </button>
+          <button class="tb-btn icon-only" id="btn-collapse-all" title="Collapse all sets" style="display:none">
+            <svg viewBox="0 0 24 24"><polyline points="7 11 12 6 17 11"></polyline><polyline points="7 18 12 13 17 18"></polyline></svg>
+          </button>
+        </div>
+      </div>
+      <div id="canvas-wrap">
+        <div id="canvas-placeholder">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="M21 15l-5-5L5 21"></path></svg>
+          <div id="placeholder-text">Pick a character on the left to review its sets here.</div>
+        </div>
+        <div id="groups-list"></div>
+        <div id="wall-list"></div>
+
+        <!-- LOADING OVERLAY (pre-loading every set's images on folder entry) -->
+        <div id="canvas-loading" class="hidden">
+          <div class="cl-box">
+            <div class="cl-title" id="cl-title">Loading sets&hellip;</div>
+            <div class="cl-bar"><div class="cl-bar-fill" id="cl-bar-fill"></div></div>
+            <div class="cl-sub" id="cl-sub">0 / 0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FOCUS OVERLAY -- lives outside #canvas-wrap (the scrollable element)
+           so it always covers the canvas area itself, regardless of scroll
+           position, instead of being clipped to wherever the scroll happened
+           to be when it opened. -->
+      <div id="focus-overlay">
+        <button id="focus-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+        <button class="focus-nav-btn" id="focus-prev"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg></button>
+        <div id="focus-name"></div>
+        <div id="focus-img-wrap">
+          <img id="focus-img" src="">
+          <div class="focus-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>
+        </div>
+        <button class="focus-nav-btn" id="focus-next"><svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg></button>
+        <div id="focus-footer">
+          <span id="focus-counter">1 / 1</span>
+          <button class="focus-mark-btn" id="focus-mark-btn">
+            <svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg>
+            <span id="focus-mark-label">Mark for deletion</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div id="statusbar">
+    <div id="status-left">&mdash;</div>
+    <div id="status-right"></div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-backdrop" id="modal-settings">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Watched folders</div>
+      <button class="modal-close" id="settings-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:10.5px;color:var(--text-dim);line-height:1.6;margin-bottom:10px;">
+        Every folder below is searched recursively for requeued image sets. Subfolders starting with <b style="color:var(--text)">.</b> or <b style="color:var(--text)">!</b> are skipped.
+      </div>
+      <div id="folder-list"></div>
+      <button class="add-folder-btn" id="btn-add-folder">
+        <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        Add folder&hellip;
+      </button>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-primary" id="settings-rescan">Rescan now</button>
+    </div>
+  </div>
+</div>
+
+<!-- FLAGGED MODAL -->
+<div class="modal-backdrop" id="modal-flagged">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Sets flagged for requeue</div>
+      <button class="modal-close" id="flagged-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body" id="flagged-list"></div>
+  </div>
+</div>
+
+<!-- HOTKEYS MODAL -->
+<div class="modal-backdrop" id="modal-hotkeys">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Keyboard shortcuts</div>
+      <button class="modal-close" id="hotkeys-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="hk-group-title">Reviewing a folder</div>
+      <div class="hk-row"><span>Expand / collapse a set</span><kbd>click its header</kbd></div>
+      <div class="hk-row"><span>Zoom into an image</span><kbd>click image</kbd></div>
+      <div class="hk-row"><span>Mark / unmark image for deletion</span><kbd>hover + X, or the &times; button</kbd></div>
+      <div class="hk-row"><span>Mark every image in a set</span><kbd>trash icon</kbd></div>
+      <div class="hk-row"><span>Flag / unflag a set for requeue</span><kbd>flag icon</kbd></div>
+      <div class="hk-group-title">Zoomed view</div>
+      <div class="hk-row"><span>Switch to previous / next iteration</span><kbd>&larr; / &rarr;</kbd></div>
+      <div class="hk-row"><span>Mark / unmark focused image</span><kbd>X</kbd></div>
+      <div class="hk-row"><span>Flag / unflag this set</span><kbd>F</kbd></div>
+      <div class="hk-row"><span>Close zoom</span><kbd>esc</kbd></div>
+    </div>
+  </div>
+</div>
+
+<!-- CONFIRM EXECUTE MODAL -->
+<div class="modal-backdrop" id="modal-confirm">
+  <div class="modal" style="width:380px">
+    <div class="modal-head">
+      <div class="modal-title">Confirm delete</div>
+      <button class="modal-close" id="confirm-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-text" id="confirm-text"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-secondary" id="confirm-cancel">Cancel</button>
+      <button class="btn-danger" id="confirm-go">Move to trash</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const api = window.electronAPI;
+
+// ---------------------------------------------------------------- STATE
+let config = { folders: [] };
+let reviewMode = 'iteration';      // 'iteration' (default, requeue review) | 'general' (browse everything)
+let scanResults = [];              // iteration mode: [{dir, groups:{base:[{name,iter}]}}] -- only sets w/ 2+ files
+let scanResultsAll = [];           // general mode:   [{dir, groups:{base:[{name,iter}]}, order:[{base,name,iter}]}] -- every set
+let flaggedList = [];              // [{dir, bases:[...]}]
+let flaggedKeys = new Set();       // `${dir}||${base}`
+
+let currentFolder = null;          // dir of the character currently shown in the canvas
+let imageCache = {};               // key -> [{name, iter, dataUrl}], loaded lazily per set
+let expandedGroups = new Set();    // keys currently expanded in the canvas list
+let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
+let markedForDeletion = {};        // key -> Set(filenames)
+let rightClickMarks = false;       // false: right-click flags the set (default) | true: right-click marks that image for deletion
+
+let collapsedFolderHeaders = new Set(); // parent dir keys collapsed in the Folders sidebar
+let collapsedFlagHeaders = new Set();   // folder dirs collapsed in the Flagged modal
+
+let focusDir = null, focusBase = null, focusGroupKey = null, focusIndex = -1;
+let hoveredTile = null; // {dir, base, name} of the tile currently under the mouse (set/wall view), so X can mark it without clicking
+
+const key = (dir, base) => dir + '||' + base;
+
+// Manual flags (via the flag button) stick even if the user later unmarks
+// some checkboxes -- only auto-flags (from "all marked") clear themselves.
+const manualFlags = new Set();
+
+// Highlight palette for the general review wall -- a per-set border/glow
+// color only (nothing is drawn over the image itself). Saturated enough to
+// actually read against the dark tiles, but mid-lightness rather than
+// blown-out so it stays a quiet marker rather than a distraction. Spread
+// around the hue wheel so adjacent highlighted sets are still easy to tell
+// apart. Cycles if a folder has more sets than colors.
+const WALL_TINT_HUES = [4, 28, 48, 92, 152, 190, 214, 262, 292, 330, 12, 60];
+function tintColorForIndex(i) {
+  const hue = WALL_TINT_HUES[i % WALL_TINT_HUES.length];
+  return {
+    solid: 'hsl(' + hue + ', 65%, 50%)',
+    glow: 'hsla(' + hue + ', 65%, 50%, 0.45)',
+  };
+}
+
+// ---------------------------------------------------------------- INIT
+async function init() {
+  bindWindowControls();
+  bindTopbar();
+  bindFocusOverlay();
+  bindModals();
+  bindGlobalHotkeys();
+  document.getElementById('btn-rightclick-mode').onclick = () => {
+    rightClickMarks = !rightClickMarks;
+    const btn = document.getElementById('btn-rightclick-mode');
+    btn.classList.toggle('active', rightClickMarks);
+    btn.title = rightClickMarks ? 'Right-click marks for deletion (click to flag instead)' : 'Right-click marks for deletion instead of flagging';
+  };
+  document.getElementById('btn-expand-all').onclick = () => setAllExpanded(true);
+  document.getElementById('btn-collapse-all').onclick = () => setAllExpanded(false);
+  document.getElementById('btn-toggle-sidebar').onclick = () => document.getElementById('sidebar').classList.toggle('collapsed');
+  document.getElementById('btn-mode-toggle').onclick = toggleReviewMode;
+  updateModeToggleButton();
+
+  config = await api.getConfig();
+  await refreshAll(); // always rescan every watched folder on startup
+}
+
+async function refreshAll() {
+  if (reviewMode === 'general') {
+    scanResultsAll = await api.scanAll();
+  } else {
+    scanResults = await api.scan();
+  }
+  flaggedList = await api.getFlags();
+  flaggedKeys = new Set();
+  for (const f of flaggedList) for (const b of f.bases) flaggedKeys.add(key(f.dir, b));
+  updateFlaggedBadge();
+  renderFoldersList();
+  if (currentFolder) {
+    if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
+    else renderGroupsCanvas(currentFolder);
+  }
+  updateStatusbar();
+}
+
+// ---------------------------------------------------------------- REVIEW MODE SWITCH
+const ICON_GRID = '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>';
+const ICON_LAYERS = '<svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>';
+
+function updateModeToggleButton() {
+  const btn = document.getElementById('btn-mode-toggle');
+  const goingToGeneral = reviewMode === 'iteration';
+  // Icon shown is always the *next* state's icon, per the button's job of
+  // indicating what pressing it will switch to.
+  btn.innerHTML = goingToGeneral ? ICON_GRID : ICON_LAYERS;
+  btn.title = goingToGeneral
+    ? 'Switch to general review \u2014 browse every image in every folder'
+    : 'Switch to iteration review \u2014 only sets that need a requeue decision';
+  btn.classList.toggle('active', reviewMode === 'general');
+}
+
+function toggleReviewMode() {
+  reviewMode = reviewMode === 'iteration' ? 'general' : 'iteration';
+  currentFolder = null;
+  closeFocus();
+  updateModeToggleButton();
+
+  document.getElementById('groups-list').style.display = '';
+  document.getElementById('groups-list').innerHTML = '';
+  document.getElementById('wall-list').classList.remove('active');
+  document.getElementById('wall-list').innerHTML = '';
+  document.getElementById('canvas-loading').classList.add('hidden');
+  document.getElementById('btn-expand-all').style.display = 'none';
+  document.getElementById('btn-collapse-all').style.display = 'none';
+  document.getElementById('ch-title').textContent = '\u2014';
+  document.getElementById('ch-sub').textContent = '';
+  document.getElementById('placeholder-text').textContent = reviewMode === 'general'
+    ? 'Pick a folder on the left to browse every image in it.'
+    : 'Pick a character on the left to review its sets here.';
+  document.getElementById('canvas-placeholder').classList.remove('hidden');
+
+  refreshAll();
+}
+
+function markedCountTotal() {
+  let n = 0;
+  for (const k in markedForDeletion) n += markedForDeletion[k].size;
+  return n;
+}
+function updateMarkedBadge() {
+  const n = markedCountTotal();
+  const badge = document.getElementById('marked-count');
+  const btn = document.getElementById('btn-execute');
+  if (n > 0) { badge.style.display = 'flex'; badge.textContent = n; btn.disabled = false; }
+  else { badge.style.display = 'none'; btn.disabled = true; }
+}
+function updateFlaggedBadge() {
+  const n = flaggedKeys.size;
+  const badge = document.getElementById('flagged-count');
+  if (n > 0) { badge.style.display = 'flex'; badge.textContent = n; }
+  else badge.style.display = 'none';
+}
+
+// ---------------------------------------------------------------- TOPBAR / WINDOW
+function bindWindowControls() {
+  document.getElementById('win-min').onclick = () => api.minimize();
+  document.getElementById('win-max').onclick = () => api.maximize();
+  document.getElementById('win-close').onclick = () => api.close();
+}
+
+function bindTopbar() {
+  document.getElementById('btn-settings').onclick = openSettings;
+  document.getElementById('btn-hotkeys').onclick = () => document.getElementById('modal-hotkeys').classList.add('open');
+  document.getElementById('btn-flagged').onclick = openFlaggedModal;
+  document.getElementById('btn-execute').onclick = openExecuteConfirm;
+}
+
+function updateStatusbar() {
+  if (reviewMode === 'general') {
+    const totalFolders = scanResultsAll.length;
+    const totalImages = scanResultsAll.reduce((n, f) => n + f.order.length, 0);
+    document.getElementById('status-left').innerHTML =
+      '<b>' + config.folders.length + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalFolders + '</b> folders &nbsp;&middot;&nbsp; <b>' + totalImages + '</b> images &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
+  } else {
+    const totalGroups = scanResults.reduce((n, f) => n + Object.keys(f.groups).length, 0);
+    document.getElementById('status-left').innerHTML =
+      '<b>' + config.folders.length + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalGroups + '</b> sets need review &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
+  }
+  document.getElementById('status-right').innerHTML = markedCountTotal() > 0 ? '<b>' + markedCountTotal() + '</b> marked for deletion' : '';
+}
+
+function splitPath(p) { return p.split(/[\\\/]/).filter(Boolean); }
+function leafName(p) { const parts = splitPath(p); return parts[parts.length - 1] || p; }
+function parentDirKey(p) { const parts = splitPath(p); parts.pop(); return parts.join('/') || p; }
+function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+// ---------------------------------------------------------------- SIDEBAR (folders / characters only)
+function emptyStateHtml(msg, btnLabel) {
+  return '<div class="sb-empty">' + msg + '<br><button id="sb-empty-btn" class="add-folder-btn" style="margin-top:10px;">' + btnLabel + '</button></div>';
+}
+
+function renderFoldersList() {
+  if (reviewMode === 'general') {
+    renderFoldersListGeneral();
+    return;
+  }
+  document.getElementById('sb-title').textContent = 'Folders';
+  const list = document.getElementById('sb-list');
+  list.innerHTML = '';
+  if (!config.folders.length) {
+    list.innerHTML = emptyStateHtml('No folders watched yet.', 'Add folders');
+    document.getElementById('sb-empty-btn') && (document.getElementById('sb-empty-btn').onclick = openSettings);
+    return;
+  }
+  if (!scanResults.length) {
+    list.innerHTML = '<div class="sb-empty">No requeued sets found.<br>Nothing here needs review right now.</div>';
+    return;
+  }
+
+  const groups = new Map(); // parentKey -> { label, items:[folderResult] }
+  for (const f of scanResults) {
+    const pk = parentDirKey(f.dir);
+    if (!groups.has(pk)) groups.set(pk, { label: leafName(pk), items: [] });
+    groups.get(pk).items.push(f);
+  }
+
+  for (const [pk, group] of groups) {
+    const collapsed = collapsedFolderHeaders.has(pk);
+    const totalCount = group.items.reduce((n, f) => n + Object.keys(f.groups).length, 0);
+    const header = document.createElement('button');
+    header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
+    header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+      '<span class="sb-group-label">' + escapeHtml(group.label) + '</span>' +
+      '<span class="sb-item-count">' + totalCount + '</span>';
+    header.title = pk;
+    header.onclick = () => {
+      if (collapsedFolderHeaders.has(pk)) collapsedFolderHeaders.delete(pk); else collapsedFolderHeaders.add(pk);
+      renderFoldersList();
+    };
+    list.appendChild(header);
+
+    if (!collapsed) {
+      const childWrap = document.createElement('div');
+      childWrap.className = 'sb-group-children';
+      for (const f of group.items) {
+        const count = Object.keys(f.groups).length;
+        const hasFlag = [...flaggedKeys].some(k => k.startsWith(f.dir + '||'));
+        const item = document.createElement('button');
+        item.className = 'sb-item' + (hasFlag ? ' flagged-item' : '') + (f.dir === currentFolder ? ' active' : '');
+        item.innerHTML = '<span class="sb-item-name">' + escapeHtml(leafName(f.dir)) + '</span>' +
+          (hasFlag ? '<span class="sb-item-flag-dot"></span>' : '') +
+          '<span class="sb-item-count">' + count + '</span>';
+        item.title = f.dir;
+        item.onclick = () => renderGroupsCanvas(f.dir);
+        childWrap.appendChild(item);
+      }
+      list.appendChild(childWrap);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- SIDEBAR (general review -- all folders, no drill-down)
+function renderFoldersListGeneral() {
+  document.getElementById('sb-title').textContent = 'Folders';
+  const list = document.getElementById('sb-list');
+  list.innerHTML = '';
+  if (!config.folders.length) {
+    list.innerHTML = emptyStateHtml('No folders watched yet.', 'Add folders');
+    document.getElementById('sb-empty-btn') && (document.getElementById('sb-empty-btn').onclick = openSettings);
+    return;
+  }
+  if (!scanResultsAll.length) {
+    list.innerHTML = '<div class="sb-empty">No images found in any watched folder.</div>';
+    return;
+  }
+
+  const groups = new Map(); // parentKey -> { label, items:[folderResult] }
+  for (const f of scanResultsAll) {
+    const pk = parentDirKey(f.dir);
+    if (!groups.has(pk)) groups.set(pk, { label: leafName(pk), items: [] });
+    groups.get(pk).items.push(f);
+  }
+
+  for (const [pk, group] of groups) {
+    const collapsed = collapsedFolderHeaders.has(pk);
+    const totalCount = group.items.reduce((n, f) => n + f.order.length, 0);
+    const header = document.createElement('button');
+    header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
+    header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+      '<span class="sb-group-label">' + escapeHtml(group.label) + '</span>' +
+      '<span class="sb-item-count">' + totalCount + '</span>';
+    header.title = pk;
+    header.onclick = () => {
+      if (collapsedFolderHeaders.has(pk)) collapsedFolderHeaders.delete(pk); else collapsedFolderHeaders.add(pk);
+      renderFoldersListGeneral();
+    };
+    list.appendChild(header);
+
+    if (!collapsed) {
+      const childWrap = document.createElement('div');
+      childWrap.className = 'sb-group-children';
+      for (const f of group.items) {
+        const item = document.createElement('button');
+        item.className = 'sb-item' + (f.dir === currentFolder ? ' active' : '');
+        item.innerHTML = '<span class="sb-item-name">' + escapeHtml(leafName(f.dir)) + '</span>' +
+          '<span class="sb-item-count">' + f.order.length + '</span>';
+        item.title = f.dir;
+        item.onclick = () => openGeneralFolder(f.dir);
+        childWrap.appendChild(item);
+      }
+      list.appendChild(childWrap);
+    }
+  }
+}
+
+function openGeneralFolder(dir) {
+  renderGeneralCanvas(dir); // sets currentFolder and rebuilds the wall
+  renderFoldersList();      // only to refresh the .active highlight -- the list itself is unchanged
+}
+
+// In general review the top-left badge identifies *which set* a tile
+// belongs to rather than which iteration it is (the iteration count matters
+// in the per-set reviewer, not here). Sets are named "..._[Letter]_[Number]"
+// right before the ComfyUI iteration suffix that scanAllDir already strips
+// into `base` -- e.g. base "base_B_9" (from "base_B_9_00001_.png") becomes
+// "B9". Anything that doesn't follow that convention falls back to showing
+// its raw base name as-is (e.g. "B2-Split_00001_.png" -> "B2-Split").
+const SET_LABEL_RE = /_([A-Za-z])_(\d+)$/;
+function setLabel(base) {
+  const m = base.match(SET_LABEL_RE);
+  return m ? (m[1].toUpperCase() + m[2]) : base;
+}
+
+// ---------------------------------------------------------------- CANVAS (general review): the image wall
+function renderGeneralCanvas(dir) {
+  currentFolder = dir;
+  const folderData = scanResultsAll.find(f => f.dir === dir);
+  const order = folderData ? folderData.order : [];
+  const bases = folderData ? Object.keys(folderData.groups) : [];
+
+  document.getElementById('ch-title').textContent = leafName(dir);
+  document.getElementById('ch-sub').textContent = order.length + ' image' + (order.length === 1 ? '' : 's') + ' \u00b7 ' + bases.length + ' set' + (bases.length === 1 ? '' : 's');
+  document.getElementById('placeholder-text').textContent = 'No images in this folder.';
+  document.getElementById('canvas-placeholder').classList.toggle('hidden', order.length > 0);
+  document.getElementById('btn-expand-all').style.display = 'none';
+  document.getElementById('btn-collapse-all').style.display = 'none';
+
+  document.getElementById('groups-list').style.display = 'none';
+  document.getElementById('groups-list').innerHTML = '';
+  const wall = document.getElementById('wall-list');
+  wall.classList.add('active');
+  wall.innerHTML = '';
+
+  // Assign a highlight tint to every multi-image set, in the order it first
+  // appears while scanning through the wall.
+  const tintForBase = {};
+  let tintIdx = 0;
+  for (const base of Object.keys(folderData ? folderData.groups : {}).sort()) {
+    if (folderData.groups[base].length > 1) tintForBase[base] = tintColorForIndex(tintIdx++);
+  }
+
+  renderFoldersList();
+  loadWallImagesWithProgress(dir, order, tintForBase);
+}
+
+async function loadWallImagesWithProgress(dir, order, tintForBase) {
+  const overlay = document.getElementById('canvas-loading');
+  const fill = document.getElementById('cl-bar-fill');
+  const sub = document.getElementById('cl-sub');
+  const bases = [...new Set(order.map(o => o.base))];
+
+  if (bases.length) {
+    overlay.classList.remove('hidden');
+    fill.style.width = '0%';
+    sub.textContent = '0 / ' + bases.length + ' sets';
+    // Let the overlay actually paint before doing the work below -- if every
+    // set here is already cached this would otherwise resolve synchronously
+    // back-to-back and the overlay would never get a chance to show, making
+    // a revisit look like a silent freeze instead of a load.
+    await new Promise(r => requestAnimationFrame(r));
+    if (currentFolder !== dir) return;
+
+    const total = bases.length;
+    let done = 0;
+    const CONCURRENCY = 4;
+    let idx = 0;
+    async function worker() {
+      while (idx < bases.length) {
+        const base = bases[idx++];
+        if (currentFolder !== dir) return; // navigated away mid-load
+        await ensureImagesLoaded(dir, base);
+        done++;
+        fill.style.width = Math.round((done / total) * 100) + '%';
+        sub.textContent = done + ' / ' + total + ' sets';
+        // Yield periodically so the progress bar can actually paint, even
+        // when every set here resolves instantly from cache.
+        await new Promise(r => requestAnimationFrame(r));
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+    if (currentFolder !== dir) return;
+    overlay.classList.add('hidden');
+  }
+
+  if (currentFolder === dir) renderWallTiles(dir, order, tintForBase);
+}
+
+function renderWallTiles(dir, order, tintForBase) {
+  const wall = document.getElementById('wall-list');
+  wall.innerHTML = '';
+  for (const item of order) {
+    const k = key(dir, item.base);
+    const images = imageCache[k] || [];
+    const idxInGroup = images.findIndex(im => im.name === item.name);
+    const imgEntry = idxInGroup >= 0 ? images[idxInGroup] : null;
+    if (!imgEntry) continue;
+    const marked = (markedForDeletion[k] || new Set()).has(item.name);
+    const flagged = flaggedKeys.has(k);
+
+    const tile = document.createElement('div');
+    tile.className = 'wall-tile' + (marked ? ' marked' : '');
+    tile.dataset.dir = dir; tile.dataset.base = item.base; tile.dataset.name = item.name;
+
+    const tint = tintForBase[item.base];
+    if (tint) {
+      tile.classList.add('iter-hl');
+      tile.style.setProperty('--wtint', tint.solid);
+      tile.style.setProperty('--wtint-glow', tint.glow);
+    }
+
+    tile.innerHTML =
+      '<img src="' + (imgEntry.dataUrl || '') + '">' +
+      '<div class="wall-badges">' +
+        (flagged ? '<span class="wall-flag-dot" title="Flagged for requeue"></span>' : '') +
+        '<div class="tile-iter-badge small" title="' + escapeHtml(item.base) + '">' + escapeHtml(setLabel(item.base)) + '</div>' +
+      '</div>' +
+      '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
+      '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+
+    tile.querySelector('img').onclick = () => openFocus(dir, item.base, idxInGroup);
+    tile.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, item.base, item.name); };
+    tile.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, item.base, item.name); });
+    tile.addEventListener('mouseenter', () => { hoveredTile = { dir, base: item.base, name: item.name }; });
+    tile.addEventListener('mouseleave', () => { if (hoveredTile && hoveredTile.dir === dir && hoveredTile.base === item.base && hoveredTile.name === item.name) hoveredTile = null; });
+
+    wall.appendChild(tile);
+  }
+}
+
+function updateWallTileMark(dir, base, name) {
+  const el = document.querySelector('.wall-tile[data-dir="' + CSS.escape(dir) + '"][data-base="' + CSS.escape(base) + '"][data-name="' + CSS.escape(name) + '"]');
+  if (!el) return;
+  const marked = (markedForDeletion[key(dir, base)] || new Set()).has(name);
+  el.classList.toggle('marked', marked);
+}
+
+// Flagging applies to a whole base (every iteration), so every wall tile
+// sharing that dir+base needs its dot toggled, not just one image.
+function updateWallTileFlag(dir, base) {
+  const flagged = flaggedKeys.has(key(dir, base));
+  const tiles = document.querySelectorAll('.wall-tile[data-dir="' + CSS.escape(dir) + '"][data-base="' + CSS.escape(base) + '"]');
+  tiles.forEach(el => {
+    const badges = el.querySelector('.wall-badges');
+    if (!badges) return;
+    let dot = badges.querySelector('.wall-flag-dot');
+    if (flagged && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'wall-flag-dot';
+      dot.title = 'Flagged for requeue';
+      badges.insertBefore(dot, badges.firstChild);
+    } else if (!flagged && dot) {
+      dot.remove();
+    }
+  });
+}
+
+// ---------------------------------------------------------------- CANVAS: all sets for a folder, as an accordion list
+function renderGroupsCanvas(dir) {
+  currentFolder = dir;
+  const folderData = scanResults.find(f => f.dir === dir);
+  const bases = folderData ? Object.keys(folderData.groups).sort() : [];
+
+  document.getElementById('wall-list').classList.remove('active');
+  document.getElementById('groups-list').style.display = '';
+
+  document.getElementById('ch-title').textContent = leafName(dir);
+  document.getElementById('ch-sub').textContent = bases.length + ' set' + (bases.length === 1 ? '' : 's') + ' to review';
+  document.getElementById('placeholder-text').textContent = 'No sets left to review in this folder.';
+  document.getElementById('canvas-placeholder').classList.toggle('hidden', bases.length > 0);
+  document.getElementById('btn-expand-all').style.display = bases.length ? 'flex' : 'none';
+  document.getElementById('btn-collapse-all').style.display = bases.length ? 'flex' : 'none';
+
+  // Every set expands by default. Sections are built here as shells only
+  // (header + placeholder body) -- loadAllImagesWithProgress fills in each
+  // body afterward, behind the loading overlay, whether or not the images
+  // happen to already be cached from a previous visit.
+  expandedGroups = new Set(bases.map(b => key(dir, b)));
+
+  groupSectionEls.clear();
+  const list = document.getElementById('groups-list');
+  list.innerHTML = '';
+  for (const base of bases) {
+    const section = buildGroupSection(dir, base, folderData.groups[base], false);
+    list.appendChild(section);
+  }
+
+  renderFoldersList();
+  loadAllImagesWithProgress(dir, bases);
+}
+
+// Pre-loads every set's images for the folder just opened, showing a
+// darkened overlay with a progress bar/count while the sets are built.
+// Every base is included in the progress count (not just ones missing from
+// cache) and the loop yields a frame between sets -- otherwise a revisit
+// where everything is already cached renders synchronously in one go, the
+// overlay never gets a chance to paint, and the folder switch looks like an
+// unindicated freeze instead of a load.
+async function loadAllImagesWithProgress(dir, bases) {
+  const overlay = document.getElementById('canvas-loading');
+  const fill = document.getElementById('cl-bar-fill');
+  const sub = document.getElementById('cl-sub');
+
+  if (!bases.length) { overlay.classList.add('hidden'); return; }
+
+  overlay.classList.remove('hidden');
+  fill.style.width = '0%';
+  sub.textContent = '0 / ' + bases.length + ' sets';
+  await new Promise(r => requestAnimationFrame(r));
+  if (currentFolder !== dir) return;
+
+  const total = bases.length;
+  let done = 0;
+  const CONCURRENCY = 4;
+  let idx = 0;
+
+  async function worker() {
+    while (idx < bases.length) {
+      const base = bases[idx++];
+      if (currentFolder !== dir) return; // navigated away mid-load
+      await ensureImagesLoaded(dir, base);
+      if (currentFolder !== dir) return;
+      done++;
+      fill.style.width = Math.round((done / total) * 100) + '%';
+      sub.textContent = done + ' / ' + total + ' sets';
+      const k = key(dir, base);
+      const section = groupSectionEls.get(k);
+      if (section && expandedGroups.has(k)) renderGroupBody(dir, base, section.querySelector('.group-section-body'));
+      // Yield periodically so the progress bar can actually paint, even
+      // when every set here resolves instantly from cache.
+      await new Promise(r => requestAnimationFrame(r));
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  if (currentFolder === dir) overlay.classList.add('hidden');
+}
+
+function buildGroupSection(dir, base, entries, renderNow = true) {
+  const k = key(dir, base);
+  const expanded = expandedGroups.has(k);
+  const isFlagged = flaggedKeys.has(k);
+
+  const section = document.createElement('div');
+  section.className = 'group-section' + (expanded ? ' expanded' : '') + (isFlagged ? ' flagged-item' : '');
+
+  const header = document.createElement('div');
+  header.className = 'group-section-header';
+  header.setAttribute('role', 'button');
+  header.setAttribute('tabindex', '0');
+  header.innerHTML =
+    '<svg class="group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+    '<span class="group-section-title">' + escapeHtml(base) + '</span>' +
+    (isFlagged ? '<span class="group-section-flag-dot"></span>' : '') +
+    '<span class="group-section-count">' + entries.length + ' iteration' + (entries.length === 1 ? '' : 's') + '</span>';
+  header.onclick = () => toggleGroupSection(dir, base);
+  header.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleGroupSection(dir, base); } };
+
+  const actions = document.createElement('div');
+  actions.className = 'group-section-actions';
+  actions.onclick = (e) => e.stopPropagation();
+
+  const flagBtn = document.createElement('button');
+  flagBtn.className = 'tb-btn icon-only group-flag-btn' + (isFlagged ? ' active' : '');
+  flagBtn.title = isFlagged ? 'Flagged for requeue \u2014 click to unflag' : 'Flag this set for requeue';
+  flagBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"></path><line x1="4" y1="22" x2="4" y2="15"></line></svg>';
+  flagBtn.onclick = () => onFlagManualClick(dir, base);
+
+  const markBtn = document.createElement('button');
+  markBtn.className = 'tb-btn icon-only';
+  markBtn.title = 'Mark all images in this set for deletion';
+  markBtn.innerHTML = '<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>';
+  markBtn.onclick = () => markAllForDeletion(dir, base);
+
+  actions.appendChild(flagBtn);
+  actions.appendChild(markBtn);
+  header.appendChild(actions);
+
+  const body = document.createElement('div');
+  body.className = 'group-section-body';
+
+  section.appendChild(header);
+  section.appendChild(body);
+
+  groupSectionEls.set(k, section);
+  if (expanded) {
+    if (renderNow && imageCache[k]) renderGroupBody(dir, base, body);
+    else body.innerHTML = '<div class="group-section-loading">loading iterations\u2026</div>';
+  }
+
+  return section;
+}
+
+function activeFolderData(dir) {
+  const arr = reviewMode === 'general' ? scanResultsAll : scanResults;
+  return arr.find(f => f.dir === dir);
+}
+
+async function ensureImagesLoaded(dir, base) {
+  const k = key(dir, base);
+  if (!imageCache[k]) {
+    const folderData = activeFolderData(dir);
+    const entries = (folderData && folderData.groups[base]) || [];
+    const images = [];
+    for (const e of entries) {
+      const dataUrl = await api.readImage(dir, e.name);
+      images.push({ name: e.name, iter: e.iter, dataUrl });
+    }
+    imageCache[k] = images;
+  }
+  return imageCache[k];
+}
+
+async function populateGroupBody(dir, base, body) {
+  const k = key(dir, base);
+  if (!imageCache[k]) body.innerHTML = '<div class="group-section-loading">loading iterations\u2026</div>';
+  await ensureImagesLoaded(dir, base);
+  renderGroupBody(dir, base, body);
+}
+
+function renderGroupBody(dir, base, body) {
+  const k = key(dir, base);
+  const images = imageCache[k] || [];
+  const marked = markedForDeletion[k] || new Set();
+  body.innerHTML = '';
+  images.forEach((img, idx) => {
+    const tile = document.createElement('div');
+    tile.className = 'img-tile' + (marked.has(img.name) ? ' marked' : '');
+    tile.dataset.name = img.name;
+
+    const imgwrap = document.createElement('div');
+    imgwrap.className = 'img-tile-imgwrap';
+    imgwrap.innerHTML =
+      '<img src="' + (img.dataUrl || '') + '">' +
+      '<div class="tile-iter-badge">' + img.iter + '</div>' +
+      '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
+      '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+    imgwrap.querySelector('img').onclick = () => openFocus(dir, base, idx);
+    imgwrap.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, base, img.name); };
+    imgwrap.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, base, img.name); });
+
+    tile.dataset.dir = dir; tile.dataset.base = base;
+    tile.addEventListener('mouseenter', () => { hoveredTile = { dir, base, name: img.name }; });
+    tile.addEventListener('mouseleave', () => { if (hoveredTile && hoveredTile.dir === dir && hoveredTile.base === base && hoveredTile.name === img.name) hoveredTile = null; });
+
+    tile.appendChild(imgwrap);
+    body.appendChild(tile);
+  });
+}
+
+function toggleGroupSection(dir, base) {
+  const k = key(dir, base);
+  const section = groupSectionEls.get(k);
+  if (!section) return;
+  const nowExpanded = !expandedGroups.has(k);
+  if (nowExpanded) expandedGroups.add(k); else expandedGroups.delete(k);
+  section.classList.toggle('expanded', nowExpanded);
+  if (nowExpanded) populateGroupBody(dir, base, section.querySelector('.group-section-body'));
+}
+
+function setAllExpanded(flag) {
+  if (!currentFolder) return;
+  const folderData = scanResults.find(f => f.dir === currentFolder);
+  if (!folderData) return;
+  for (const base of Object.keys(folderData.groups)) {
+    const k = key(currentFolder, base);
+    const section = groupSectionEls.get(k);
+    if (!section) continue;
+    if (flag) expandedGroups.add(k); else expandedGroups.delete(k);
+    section.classList.toggle('expanded', flag);
+    if (flag) populateGroupBody(currentFolder, base, section.querySelector('.group-section-body'));
+  }
+}
+
+// Patches just the flag state on one group's header in place -- toggling
+// the section's "flagged-item" class, the header's flag dot, and the flag
+// button's active state -- without touching the image tiles underneath.
+// This used to go through refreshGroupUI(), which rebuilt the *entire*
+// section (header + every img-tile, re-decoding every data URL) just to
+// flip a flag dot, which is what caused the visible stutter every time a
+// set was (un)flagged. The general-review wall never had this problem
+// because it already patched its flag dot in place via updateWallTileFlag;
+// this brings the iteration view in line with that.
+function updateGroupFlagUI(dir, base) {
+  const k = key(dir, base);
+  const section = groupSectionEls.get(k);
+  if (!section) return;
+  const isFlagged = flaggedKeys.has(k);
+  section.classList.toggle('flagged-item', isFlagged);
+
+  const header = section.querySelector('.group-section-header');
+  let dot = header.querySelector('.group-section-flag-dot');
+  if (isFlagged && !dot) {
+    dot = document.createElement('span');
+    dot.className = 'group-section-flag-dot';
+    header.insertBefore(dot, header.querySelector('.group-section-count'));
+  } else if (!isFlagged && dot) {
+    dot.remove();
+  }
+
+  const flagBtn = section.querySelector('.group-flag-btn');
+  if (flagBtn) {
+    flagBtn.classList.toggle('active', isFlagged);
+    flagBtn.title = isFlagged ? 'Flagged for requeue \u2014 click to unflag' : 'Flag this set for requeue';
+  }
+}
+
+// Patches the "marked for deletion" state on one image tile in place,
+// mirroring updateWallTileMark() for the general-review wall -- avoids
+// rebuilding the whole section (and re-decoding every image) for a single
+// tile's mark toggle.
+function updateGroupTileMark(dir, base, name) {
+  const k = key(dir, base);
+  const section = groupSectionEls.get(k);
+  if (!section) return;
+  const marked = (markedForDeletion[k] || new Set()).has(name);
+  const tile = section.querySelector('.img-tile[data-name="' + CSS.escape(name) + '"]');
+  if (tile) tile.classList.toggle('marked', marked);
+}
+
+// Patches mark state across every tile in a group at once (used by "mark
+// all"), still without rebuilding the section or its images.
+function updateGroupBodyMarks(dir, base) {
+  const k = key(dir, base);
+  const section = groupSectionEls.get(k);
+  if (!section) return;
+  const marked = markedForDeletion[k] || new Set();
+  section.querySelectorAll('.img-tile').forEach(tile => {
+    tile.classList.toggle('marked', marked.has(tile.dataset.name));
+  });
+}
+
+// ---------------------------------------------------------------- MARKING / FLAGGING
+async function toggleMark(dir, base, name) {
+  const k = key(dir, base);
+  const set = markedForDeletion[k] || (markedForDeletion[k] = new Set());
+  if (set.has(name)) set.delete(name); else set.add(name);
+
+  if (reviewMode === 'general') updateWallTileMark(dir, base, name);
+  else updateGroupTileMark(dir, base, name);
+  if (focusGroupKey === k) updateFocusView();
+  updateMarkedBadge();
+  updateStatusbar();
+  await syncAutoFlag(dir, base);
+}
+
+async function markAllForDeletion(dir, base) {
+  const k = key(dir, base);
+  const images = await ensureImagesLoaded(dir, base);
+  if (!images.length) return;
+  const set = markedForDeletion[k] || (markedForDeletion[k] = new Set());
+  const allAlreadyMarked = images.every(i => set.has(i.name));
+  if (allAlreadyMarked) set.clear(); else images.forEach(i => set.add(i.name));
+
+  if (!expandedGroups.has(k)) toggleGroupSection(dir, base); else updateGroupBodyMarks(dir, base);
+  if (focusGroupKey === k) updateFocusView();
+  updateMarkedBadge();
+  updateStatusbar();
+  await syncAutoFlag(dir, base);
+}
+
+async function onImageRightClick(dir, base, name) {
+  if (rightClickMarks) await toggleMark(dir, base, name);
+  else await onFlagManualClick(dir, base);
+}
+
+async function onFlagManualClick(dir, base) {
+  const k = key(dir, base);
+  if (flaggedKeys.has(k)) {
+    await api.unflagGroup(dir, base);
+    flaggedKeys.delete(k);
+    manualFlags.delete(k);
+  } else {
+    await api.flagGroup(dir, base);
+    flaggedKeys.add(k);
+    manualFlags.add(k);
+  }
+  flaggedList = await api.getFlags();
+  updateFlaggedBadge();
+  updateGroupFlagUI(dir, base);
+  updateWallTileFlag(dir, base);
+  renderFoldersList();
+  updateStatusbar();
+}
+
+async function syncAutoFlag(dir, base) {
+  const k = key(dir, base);
+  const images = imageCache[k] || [];
+  const set = markedForDeletion[k] || new Set();
+  const allMarked = images.length > 0 && images.every(i => set.has(i.name));
+
+  if (allMarked && !flaggedKeys.has(k)) {
+    await api.flagGroup(dir, base);
+    flaggedKeys.add(k);
+    updateGroupFlagUI(dir, base);
+    updateWallTileFlag(dir, base);
+    renderFoldersList();
+  } else if (!allMarked && flaggedKeys.has(k) && !manualFlags.has(k)) {
+    await api.unflagGroup(dir, base);
+    flaggedKeys.delete(k);
+    updateGroupFlagUI(dir, base);
+    updateWallTileFlag(dir, base);
+    renderFoldersList();
+  }
+  flaggedList = await api.getFlags();
+  updateFlaggedBadge();
+}
+
+// ---------------------------------------------------------------- FOCUS / ZOOM
+function openFocus(dir, base, idx) {
+  focusDir = dir; focusBase = base; focusGroupKey = key(dir, base); focusIndex = idx;
+  document.getElementById('focus-overlay').classList.add('open');
+  updateFocusView();
+}
+function closeFocus() {
+  focusDir = null; focusBase = null; focusGroupKey = null; focusIndex = -1;
+  document.getElementById('focus-overlay').classList.remove('open');
+}
+function updateFocusView() {
+  const images = imageCache[focusGroupKey] || [];
+  const img = images[focusIndex];
+  if (!img) return;
+  document.getElementById('focus-img').src = img.dataUrl || '';
+  document.getElementById('focus-name').textContent = img.name;
+  document.getElementById('focus-counter').textContent = (focusIndex + 1) + ' / ' + images.length;
+  const marked = (markedForDeletion[focusGroupKey] || new Set()).has(img.name);
+  document.getElementById('focus-img-wrap').classList.toggle('marked', marked);
+  const mb = document.getElementById('focus-mark-btn');
+  mb.classList.toggle('marked', marked);
+  document.getElementById('focus-mark-label').textContent = marked ? 'Unmark' : 'Mark for deletion';
+}
+
+function bindFocusOverlay() {
+  document.getElementById('focus-close').onclick = closeFocus;
+  document.getElementById('focus-prev').onclick = () => stepFocus(-1);
+  document.getElementById('focus-next').onclick = () => stepFocus(1);
+  document.getElementById('focus-mark-btn').onclick = () => {
+    if (focusIndex < 0) return;
+    const img = (imageCache[focusGroupKey] || [])[focusIndex];
+    if (img) toggleMark(focusDir, focusBase, img.name);
+  };
+  document.getElementById('focus-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'focus-overlay') closeFocus();
+  });
+  document.getElementById('focus-img-wrap').addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (focusIndex < 0) return;
+    const img = (imageCache[focusGroupKey] || [])[focusIndex];
+    if (img) onImageRightClick(focusDir, focusBase, img.name);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (focusIndex < 0) return;
+    if (e.key === 'ArrowLeft') { stepFocus(-1); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { stepFocus(1); e.preventDefault(); }
+    else if (e.key === 'Escape') { closeFocus(); }
+    else if (e.key === 'f' || e.key === 'F') { onFlagManualClick(focusDir, focusBase); }
+    else if (e.key === 'x' || e.key === 'X' || e.key === 'Delete') {
+      const img = (imageCache[focusGroupKey] || [])[focusIndex];
+      if (img) toggleMark(focusDir, focusBase, img.name);
+    }
+  });
+}
+function stepFocus(dir) {
+  const images = imageCache[focusGroupKey] || [];
+  if (!images.length) return;
+  focusIndex = (focusIndex + dir + images.length) % images.length;
+  updateFocusView();
+}
+
+// ---------------------------------------------------------------- GLOBAL HOTKEYS (Esc closes any open modal)
+function bindGlobalHotkeys() {
+  document.addEventListener('keydown', (e) => {
+    const openModal = document.querySelector('.modal-backdrop.open');
+    if (openModal && e.key === 'Escape') openModal.classList.remove('open');
+
+    // X while hovering a tile in the set/wall views marks it for deletion,
+    // same as clicking its mark button -- but only when the zoom overlay
+    // isn't open (that has its own X handler for the focused image).
+    if (focusIndex < 0 && hoveredTile && (e.key === 'x' || e.key === 'X' || e.key === 'Delete')) {
+      toggleMark(hoveredTile.dir, hoveredTile.base, hoveredTile.name);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- SETTINGS MODAL
+function openSettings() {
+  renderFolderList();
+  document.getElementById('modal-settings').classList.add('open');
+}
+function renderFolderList() {
+  const list = document.getElementById('folder-list');
+  list.innerHTML = '';
+  if (!config.folders.length) { list.innerHTML = '<div class="modal-empty">No folders yet.</div>'; return; }
+  for (const dir of config.folders) {
+    const row = document.createElement('div');
+    row.className = 'folder-row';
+    row.innerHTML = '<span class="folder-row-path" title="' + escapeHtml(dir) + '">' + escapeHtml(dir) + '</span>' +
+      '<button class="folder-row-remove"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+    row.querySelector('.folder-row-remove').onclick = async () => {
+      config = await api.removeFolder(dir);
+      renderFolderList();
+      await refreshAll();
+    };
+    list.appendChild(row);
+  }
+}
+function bindModals() {
+  document.getElementById('settings-close').onclick = () => document.getElementById('modal-settings').classList.remove('open');
+  document.getElementById('btn-add-folder').onclick = async () => {
+    config = await api.addFolder();
+    renderFolderList();
+    await refreshAll();
+  };
+  document.getElementById('settings-rescan').onclick = async () => { await refreshAll(); };
+  document.getElementById('btn-rescan').onclick = async () => { await refreshAll(); };
+
+  document.getElementById('flagged-close').onclick = () => document.getElementById('modal-flagged').classList.remove('open');
+  document.getElementById('hotkeys-close').onclick = () => document.getElementById('modal-hotkeys').classList.remove('open');
+  document.getElementById('confirm-close').onclick = closeConfirm;
+  document.getElementById('confirm-cancel').onclick = closeConfirm;
+  document.getElementById('confirm-go').onclick = executeDelete;
+
+  [document.getElementById('modal-settings'), document.getElementById('modal-flagged'), document.getElementById('modal-hotkeys'), document.getElementById('modal-confirm')].forEach(m => {
+    m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); });
+  });
+}
+
+function openFlaggedModal() {
+  const body = document.getElementById('flagged-list');
+  body.innerHTML = '';
+  if (!flaggedList.length) {
+    body.innerHTML = '<div class="modal-empty">Nothing flagged for requeue.</div>';
+    document.getElementById('modal-flagged').classList.add('open');
+    return;
+  }
+  for (const f of flaggedList) {
+    const collapsed = collapsedFlagHeaders.has(f.dir);
+    const header = document.createElement('button');
+    header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
+    header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+      '<span class="sb-group-label">' + escapeHtml(leafName(f.dir)) + '</span>' +
+      '<span class="sb-item-count">' + f.bases.length + '</span>';
+    header.title = f.dir;
+    header.onclick = () => {
+      if (collapsedFlagHeaders.has(f.dir)) collapsedFlagHeaders.delete(f.dir); else collapsedFlagHeaders.add(f.dir);
+      openFlaggedModal();
+    };
+    body.appendChild(header);
+
+    if (!collapsed) {
+      const childWrap = document.createElement('div');
+      childWrap.className = 'sb-group-children';
+      for (const base of f.bases) {
+        const row = document.createElement('div');
+        row.className = 'flag-group-row';
+        row.innerHTML = '<span class="fg-dot"></span><div class="fg-info"><div class="fg-base">' + escapeHtml(base) + '</div></div>' +
+          '<button class="tb-btn">Unflag</button>';
+        row.querySelector('button').onclick = async () => {
+          await api.unflagGroup(f.dir, base);
+          manualFlags.delete(key(f.dir, base));
+          await refreshAll();
+          openFlaggedModal();
+        };
+        childWrap.appendChild(row);
+      }
+      body.appendChild(childWrap);
+    }
+  }
+  document.getElementById('modal-flagged').classList.add('open');
+}
+
+// ---------------------------------------------------------------- EXECUTE
+function openExecuteConfirm() {
+  const n = markedCountTotal();
+  if (!n) return;
+  document.getElementById('confirm-text').innerHTML =
+    'This will move <b>' + n + ' image' + (n === 1 ? '' : 's') + '</b> to the trash across all reviewed sets. This can\'t be undone from inside the app. Continue?';
+  document.getElementById('modal-confirm').classList.add('open');
+}
+function closeConfirm() { document.getElementById('modal-confirm').classList.remove('open'); }
+
+async function executeDelete() {
+  const items = [];
+  for (const k in markedForDeletion) {
+    const [dir] = k.split('||');
+    for (const name of markedForDeletion[k]) items.push({ dir, name });
+  }
+  closeConfirm();
+  const results = await api.deleteFiles(items);
+  const failed = results.filter(r => !r.ok);
+
+  // Flags are intentionally left alone here. A flag is a session-level
+  // marker the user set explicitly, and it should persist across executes
+  // regardless of whether every image in that group got trashed -- it's
+  // just text, so there's no cost to keeping it around. Flags only clear
+  // when the user unflags manually or the app closes (flags live in main.js
+  // memory and are wiped on restart).
+  markedForDeletion = {};
+  imageCache = {};
+  expandedGroups.clear();
+  closeFocus();
+  await refreshAll(); // rescans, so deleted sets disappear and remaining ones reload fresh
+  updateMarkedBadge();
+
+  if (failed.length) {
+    alert(failed.length + ' file' + (failed.length === 1 ? '' : 's') + ' could not be moved to the trash:\n' + failed.map(f => f.name).join('\n'));
+  }
+}
+
+init();
+</script>
+</body>
+</html>

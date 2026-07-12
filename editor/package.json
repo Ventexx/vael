@@ -1,0 +1,33 @@
+{
+  "name": "vael-editor",
+  "version": "1.0.1",
+  "description": "vael. — minimal dark image editor",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.vael.editor",
+    "productName": "editor.",
+    "icon": "icon.png",
+    "files": ["editor.html", "main.js", "preload.js", "icon.png"],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "include": "installer.nsh"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Graphics",
+      "icon": "icon.png"
+    }
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

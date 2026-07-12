@@ -1,0 +1,33 @@
+{
+  "name": "vael-reviewer",
+  "version": "1.0.0",
+  "description": "vael. reviewer — find and resolve requeued ComfyUI image sets",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.vael.reviewer",
+    "productName": "reviewer.",
+    "icon": "icon.png",
+    "files": ["reviewer.html", "main.js", "preload.js", "icon.png"],
+    "win": {
+      "target": "nsis",
+      "icon": "icon.png"
+    },
+    "nsis": {
+      "include": "installer.nsh"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Graphics",
+      "icon": "icon.png"
+    }
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  }
+}

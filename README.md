@@ -1,107 +1,44 @@
-# vanta. // to-do
+# vael.
 
 <!-- cover -->
-![vanta cover](./screenshotcover.png)
+![vael cover](./vael.png)
 
 ---
 
-A minimal checklist app. Single HTML file, no dependencies, no server — just open it in a browser.
+A small collection of minimal, single-purpose desktop tools. 
+These apps are primarily built for myself to solve specific workflow challenges.
 
 ---
 
-## features
+## the tools
 
-- **tasks** — add, check off, edit in-place, delete
-- **separators** — visual dividers to group tasks into sections
-- **drag to reorder** — grab the handle on any item and drop it where you want
-- **undo / redo** — full history via Ctrl+Z / Ctrl+Y
-- **profiles** — save named snapshots of your list; switch between them from the sidebar
-- **import / export** — back up or restore your list as a `.json` file
-- **themes** — three built-in themes: *focus*, *minimal*, *paper*
-- **persistent settings** — last-used theme is saved to `localStorage` (or `vanta.settings.json` via the File System Access API)
-- **zero dependencies** — one self-contained `.html` file
+### [checklist ›](./checklist/checklist.md)
+![checklist cover](./checklist/cover.png)
+A minimal to-do app for managing tasks with ease. Add, edit, reorder, and organize your tasks in a clean, distraction-free interface.
 
----
+### [editor ›](./editor/editor.md)
+![editor cover](./editor/cover.png)
+A dark, workflow-specific image editor built for one job: pixelating or blurring parts of a large batch of images, fast.
 
-## getting started
+### [indexer ›](./indexer/indexer.md)
+![indexer cover](./indexer/cover.png)
+A desktop app for browsing, searching, and editing structured data paired with visual assets — built for scanning folders of image + JSON pairs (e.g. AI-generated images with their prompt/tag metadata) into a fast, searchable visual library. Windows and Linux, with partial Wayland support.
 
-```bash
-# no install needed — just open the file
-open vanta.html
-```
-
-Or drop it on any static file server. Works entirely offline.
+### [reviewer ›](./reviewer/reviewer.md)
+![reviewer cover](./reviewer/cover.png)
+An image reviewer built to find and resolve requeued ComfyUI image sets. Point it at your output folders and it groups regenerated iterations of the same image together so you can quickly decide what to keep and what to trash.
 
 ---
 
-## keyboard shortcuts
+## contributing
 
-| key | action |
-|---|---|
-| `Enter` | add task |
-| `Ctrl+Enter` | add separator |
-| `/` | focus task input |
-| `Double-click` | edit task text / rename profile |
-| `Esc` | cancel edit |
-| `Ctrl+Z` | undo |
-| `Ctrl+Y` | redo |
-| `Ctrl+S` | save to current profile |
-| `Ctrl+M` | toggle sidebar |
-| drag handle | reorder item |
-
----
-
-## profiles
-
-Profiles are named snapshots of your task list, stored in `localStorage`.
-
-- **save** — press `+` in the sidebar, or hit `Ctrl+S` at any time
-- **open** — click the arrow `›` next to any profile name
-- **rename** — double-click a profile name in the sidebar
-- **delete** — click the `×` next to a profile
-- **export** — downloads a `vanta-checklist.json` file of your current list
-- **import** — loads a previously exported `.json` file
-
----
-
-## themes
-
-Switch themes from the bar at the bottom of the screen.
-
-| name | description |
-|---|---|
-| `focus` | near-black, teal accent — high contrast for deep work |
-| `minimal` | dark grey, white accent — neutral and quiet |
-| `paper` | warm cream, slate accent — easy on the eyes |
-
-Theme preference is saved automatically.
-
----
-
-## file structure
-
-```
-vanta.html              — the entire app (HTML + CSS + JS)
-icon.png                — favicon
-screenshotcover.png     — cover image (used in this README)
-```
-
----
-
-## local storage keys
-
-| key | contents |
-|---|---|
-| `vanta_settings` | `{ theme: string }` |
-| `vanta_profiles` | `{ profiles: Profile[], counter: number }` |
-
-Profiles are stored as plain JSON arrays. Each profile holds a copy of the `items` array at save time.
+Issues and pull requests are welcome. Please open an issue before submitting larger changes.
 
 ---
 
 ## license
 
-This project is licensed under [Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/).
+All projects in this collection are licensed under [Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/).
 
 You are free to use, share, and adapt this software for non-commercial purposes, provided appropriate credit is given. Commercial use is not permitted.
 
@@ -109,4 +46,4 @@ You are free to use, share, and adapt this software for non-commercial purposes,
 
 ## disclaimer
 
-This app is provided as-is, without warranty of any kind. The developer makes no guarantees regarding data integrity, loss, or corruption. You are solely responsible for any data you enter, store, or manage using this application, and for any consequences arising from its use. Use at your own risk.
+These apps are provided as-is, without warranty of any kind. The developer makes no guarantees regarding data integrity, loss, or corruption. You are solely responsible for any data you enter, store, or manage using these applications, and for any consequences arising from their use. Use at your own risk.

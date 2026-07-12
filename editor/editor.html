@@ -1,0 +1,3389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vael. // editor</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg2: #111111;
+    --bg3: #181818;
+    --bg4: #1e1e1e;
+    --bg5: #252525;
+    --border: #2a2a2a;
+    --border2: #333333;
+    --accent: #00d4a0;
+    --accent-dim: #00a07a;
+    --accent-faint: rgba(0,212,160,0.08);
+    --accent-subtle: rgba(0,212,160,0.3);
+    --gold: #e8b84b;
+    --text: #c8c8c8;
+    --text-dim: #666;
+    --text-bright: #e8e8e8;
+    --font: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --toolbar-w: 44px;
+    --titlebar-h: 34px;
+    --action-row-h: 48px;
+    --topbar-left-col: 116px;
+    --topbar-right-col: 112px;
+    --statusbar-h: 26px;
+    --gallery-w: 190px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 12px; }
+  #app { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+
+  /* TOPBAR — one grid, not two stacked bars. Left/right columns are each
+     split top/bottom (logo+winbtns / quick-actions+history); the middle
+     column — the filmstrip — spans both rows, so images get the full
+     combined height instead of being boxed into a single row, and there's
+     no dead space next to the logo or the window controls. */
+  #topbar {
+    display: grid; grid-template-columns: var(--topbar-left-col) 1fr var(--topbar-right-col);
+    grid-template-rows: var(--titlebar-h) var(--action-row-h);
+    background: var(--bg); border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 400;
+    -webkit-app-region: drag;
+  }
+  #topbar-logo-cell { grid-column: 1; grid-row: 1; display: flex; align-items: center; padding: 0 0 0 12px; pointer-events: none; }
+  #topbar-actions-cell { grid-column: 1; grid-row: 2; display: flex; align-items: center; padding: 0 8px; }
+  /* no-drag: this cell hosts the scrolling filmstrip. If the drag region
+     from #topbar were allowed to show through the gaps between thumbnails,
+     every time the mouse crossed one of those gaps while wheel-scrolling
+     the strip, the OS would treat it as a potential window-drag gesture,
+     which is what caused the scroll stutter. Taking the whole cell out of
+     the drag region (not just each .fs-thumb) fixes that for good. */
+  #topbar-filmstrip-cell { grid-column: 2; grid-row: 1 / 3; min-width: 0; overflow: hidden; -webkit-app-region: no-drag; }
+  #topbar-winbtns-cell { grid-column: 3; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0 8px; }
+  #topbar-history-cell { grid-column: 3; grid-row: 2; display: flex; align-items: center; justify-content: flex-end; padding: 0 8px; }
+  .titlebar-logo { font-size: 13px; font-weight: 700; color: var(--text-bright); letter-spacing: -0.5px; }
+  .titlebar-logo span { color: var(--accent); }
+  .winbtn {
+    width: 28px; height: 20px; border-radius: 3px; border: 1px solid var(--border2); background: var(--bg3);
+    cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-dim);
+    transition: all 0.1s;
+  }
+  .winbtn:hover { background: var(--bg4); color: var(--text); }
+  .winbtn.close:hover { background: #6e2020; border-color: #8b3333; color: #ffaaaa; }
+  .winbtn svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .winbtn { -webkit-app-region: no-drag; }
+
+  .quick-actions {
+    display: flex; align-items: center; gap: 3px; flex-shrink: 0; background: var(--bg2);
+    border: 1px solid var(--border2); border-radius: 6px; padding: 4px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 2px 4px rgba(0,0,0,0.3);
+    -webkit-app-region: no-drag;
+  }
+  .qa-btn {
+    width: 28px; height: 28px; border: 1px solid transparent; background: transparent; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center; color: var(--text-dim); cursor: pointer;
+    position: relative; transition: all .12s; flex-shrink: 0;
+  }
+  .qa-btn:hover { background: var(--bg4); color: var(--text); border-color: var(--border2); }
+  .qa-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .qa-btn .tool-tooltip { left: 50%; top: calc(100% + 8px); transform: translateX(-50%); }
+  /* A dedicated class (NOT the .history-mini-btn used by the undo/redo
+     buttons in the history dock — that one is flex:1 and was stretching
+     this button edge-to-edge). */
+  .history-toggle-btn {
+    width: 24px; height: 24px; flex-shrink: 0; border: 1px solid var(--border2); background: var(--bg2);
+    border-radius: 4px; display: flex; align-items: center; justify-content: center; color: var(--text-dim);
+    cursor: pointer; position: relative; transition: all .12s;
+    -webkit-app-region: no-drag;
+  }
+  .history-toggle-btn:hover { background: var(--bg4); color: var(--text); }
+  .history-toggle-btn.active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .history-toggle-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .history-toggle-btn .tool-tooltip { left: auto; right: 0; top: calc(100% + 8px); transform: none; }
+
+  /* MAIN ROW */
+  #main-row { flex: 1; display: flex; overflow: hidden; position: relative; }
+
+  /* TOOLBAR */
+  #toolbar {
+    width: var(--toolbar-w); background: var(--bg2); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; align-items: center; padding: 8px 0; gap: 4px;
+    flex-shrink: 0; z-index: 80;
+  }
+  .tool-btn {
+    width: 30px; height: 30px; border: 1px solid transparent; background: transparent; border-radius: 5px;
+    display: flex; align-items: center; justify-content: center; color: var(--text-dim); cursor: pointer;
+    position: relative; transition: all .12s; flex-shrink: 0;
+  }
+  .tool-btn:hover { background: var(--bg4); color: var(--text); }
+  .tool-btn.active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .tool-btn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .tool-sep { width: 22px; height: 1px; background: var(--border2); margin: 4px 0; flex-shrink: 0; }
+  .tool-tooltip {
+    position: absolute; left: calc(100% + 8px); top: 50%; transform: translateY(-50%);
+    background: var(--bg5); border: 1px solid var(--border2); color: var(--text-bright); font-size: 10px;
+    padding: 3px 7px; border-radius: 3px; white-space: nowrap; opacity: 0; pointer-events: none;
+    transition: opacity .12s; z-index: 500;
+  }
+  .tool-btn:hover .tool-tooltip, .qa-btn:hover .tool-tooltip, .history-toggle-btn:hover .tool-tooltip { opacity: 1; }
+  /* Auto-advance + hotkey guide live pinned to the bottom of the toolbar,
+     out of the way of the tools but always one click away. */
+  .toolbar-bottom { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; }
+
+  /* FILMSTRIP — lives in the topbar's middle column now, spanning both
+     rows, between the quick-actions and
+     the mini history button. */
+  #filmstrip-track {
+    width: 100%; height: 100%; min-width: 0; display: flex; align-items: center; gap: 6px;
+    overflow-x: auto; overflow-y: hidden;
+    /* No CSS `scroll-behavior: smooth` here on purpose: with it on, every
+       single wheel tick (a trackpad can fire dozens per second) queues its
+       own smoothed scroll animation that the next tick immediately
+       interrupts, which is what made this feel janky rather than fluid.
+       Wheel-driven scrolling below sets scrollLeft directly (instant,
+       1:1 with input); smooth easing is applied explicitly, only for the
+       "jump to active thumbnail" case, via scrollIntoView's own
+       `behavior: 'smooth'` option. */
+    /* Top/bottom padding is intentionally uneven (not 10px/10px): hiding the
+       scrollbar just below reclaims the strip of height it used to occupy,
+       and rather than let the thumbnails simply grow into all of it, part
+       of that reclaimed space is spent as extra top padding so the whole
+       row sits a little lower in the cell — same overall cell height as
+       before, nothing added, just reallocated. */
+    padding: 15px 8px 5px; margin: 0;
+    /* Hide the scrollbar itself — the strip still scrolls (wheel handler
+       below + native drag), it just doesn't need a visible scrollbar to do
+       it, and showing one here only ate into the thumbnail height. */
+    scrollbar-width: none;      /* Firefox */
+    -ms-overflow-style: none;   /* legacy Edge/IE */
+  }
+  #filmstrip-track::-webkit-scrollbar { display: none; width: 0; height: 0; }
+  /* Each thumb keeps the image's real aspect ratio (set inline per-image via
+     JS) instead of forcing every image into one uniform box shape — a
+     vertical shot reads as a tall sliver, a panorama as a wide strip. */
+  .fs-thumb {
+    position: relative; flex-shrink: 0; height: 100%; border-radius: 4px; overflow: hidden;
+    border: 1.5px solid var(--border2); cursor: pointer; background: #000; box-sizing: border-box;
+    -webkit-app-region: no-drag;
+  }
+  .fs-thumb canvas { width: 100%; height: 100%; display: block; }
+  .fs-thumb:hover { border-color: var(--accent-dim); }
+  .fs-thumb.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-faint); }
+  .fs-thumb.multi-selected { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+  .fs-dot { position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--gold); }
+  .fs-empty { font-size: 10px; color: var(--text-dim); padding: 0 8px; white-space: nowrap; -webkit-app-region: no-drag; }
+
+
+  /* CANVAS AREA — the subtle accent outline now wraps the entire canvas,
+     not just its shared edge with the gallery rail. */
+  #canvas-wrap {
+    flex: 1; position: relative; overflow: hidden; cursor: grab;
+    background: var(--bg); border: 1px solid var(--accent-subtle);
+  }
+  #canvas-wrap.grab-cursor { cursor: grab; }
+  #canvas-wrap.grabbing-cursor { cursor: grabbing; }
+  #canvas-wrap.tool-crosshair { cursor: crosshair; }
+  /* Large fixed-size layer, way bigger than any viewport, centered on the
+     image's origin and panned with the exact same transform as the image
+     itself — reads as an "infinite" checkerboard that's actually locked to
+     the image's pixel grid, rather than being clipped to the image's own
+     (opaque, so invisible-through) bounds. */
+  #grid-layer {
+    position: absolute; top: -3000px; left: -3000px; width: 6000px; height: 6000px;
+    background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px; background-position: 3000px 3000px;
+    pointer-events: none; z-index: 1;
+  }
+  #image-container { position: absolute; top: 0; left: 0; z-index: 2; }
+  #main-canvas { display: none; image-rendering: pixelated; box-shadow: 0 4px 32px rgba(0,0,0,0.6); }
+
+  /* Must paint above #grid-layer, or the grid lines show through the
+     "drop images here" prompt when the app opens with no image loaded. */
+  #drop-zone {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 10px; color: var(--text-dim); pointer-events: none; text-align: center;
+    z-index: 3;
+  }
+  #drop-zone.has-image { display: none; }
+  #canvas-wrap.dragover #drop-zone { color: var(--accent); }
+  .drop-icon svg { width: 38px; height: 38px; stroke: currentColor; fill: none; stroke-width: 1.2; }
+  .drop-hint-btn {
+    pointer-events: all; padding: 6px 14px; border: 1px solid var(--border2); border-radius: 4px;
+    background: var(--bg3); color: var(--text); cursor: pointer; font-family: var(--font); font-size: 11px;
+  }
+  .drop-hint-btn:hover { background: var(--bg4); border-color: var(--accent-dim); color: var(--accent); }
+
+  #sel-rect-el {
+    position: absolute; border: 1px dashed var(--accent); background: rgba(0,212,160,0.08);
+    pointer-events: none; display: none; z-index: 6;
+  }
+  #sel-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: none; z-index: 6; }
+  #sel-path-el { stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 4 3; fill: rgba(0,212,160,0.08); }
+  /* Committed selection(s) — rendered as a translucent mask fill rather than
+     a vector outline, since a union/subtract of multiple shapes (rect +
+     lasso, etc.) can't be described by one simple path. Lives inside
+     #image-container so it inherits the same pan/zoom transform as the
+     image, and paints above the image but below the live drag preview. */
+  #sel-mask-canvas { position: absolute; top: 0; left: 0; pointer-events: none; display: none; z-index: 4; }
+
+  /* FILTER PANELS */
+  .filter-panel {
+    position: absolute; top: 10px; left: 10px; width: 230px; background: var(--bg2);
+    border: 1px solid var(--border2); border-radius: 6px; box-shadow: 0 8px 28px rgba(0,0,0,.5);
+    padding: 10px; z-index: 150; display: none;
+  }
+  .filter-panel.open { display: block; }
+  .fp-head { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--text-bright); margin-bottom: 8px; font-weight: 600; }
+  .fp-close { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 15px; line-height: 1; }
+  .fp-close:hover { color: var(--text); }
+  .fp-label { font-size: 10px; color: var(--text-dim); margin-bottom: 4px; }
+  .fp-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .fp-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .fp-row input[type=number] {
+    width: 46px; background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+    border-radius: 3px; padding: 3px 4px; font-family: var(--font); font-size: 11px;
+  }
+  .fp-apply {
+    width: 100%; padding: 6px; border: 1px solid var(--accent-dim); background: var(--accent-faint);
+    color: var(--accent); border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 11px; margin-bottom: 8px;
+  }
+  .fp-apply:hover { background: rgba(0,212,160,0.16); }
+  .fp-apply:disabled { opacity: 0.5; cursor: default; pointer-events: none; }
+  .fp-apply:disabled:hover { background: var(--accent-faint); }
+  .fp-divider { height: 1px; background: var(--border); margin: 8px 0; }
+  .fp-presets-label { font-size: 10px; color: var(--text-dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .preset-row { display: flex; align-items: center; gap: 4px; padding: 4px 2px; border-bottom: 1px solid var(--border); }
+  .preset-row:last-child { border-bottom: none; }
+  .preset-val { font-size: 11px; color: var(--text); width: 38px; flex-shrink: 0; }
+  .preset-key {
+    flex: 1; font-size: 10px; color: var(--text-dim); background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 3px; padding: 3px 5px; text-align: center; cursor: pointer; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .preset-key:hover { border-color: var(--border2); color: var(--text); }
+  .preset-key.armed { color: var(--gold); border-color: var(--gold); }
+  .preset-btn {
+    width: 20px; height: 20px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text-dim);
+    border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0;
+  }
+  .preset-btn:hover { background: var(--bg4); color: var(--text); }
+  .preset-btn.danger:hover { background: #6e2020; color: #ffaaaa; border-color: #8b3333; }
+  .fp-add-preset {
+    width: 100%; margin-top: 6px; padding: 5px; border: 1px dashed var(--border2); background: transparent;
+    color: var(--text-dim); border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 10px;
+  }
+  .fp-add-preset:hover { color: var(--text); border-color: var(--accent-dim); }
+  .fp-empty { font-size: 10px; color: var(--text-dim); text-align: center; padding: 8px 0; }
+
+  /* HOTKEY GUIDE — read-only reference, lives bottom-left near the toolbar
+     rather than top-left like the pixelate/blur panels (which hold live
+     controls). Wider than the other filter panels, and its body scrolls,
+     since the full shortcut list is too long to always fit on screen. */
+  #panel-hotkeys { top: auto; bottom: 10px; left: 10px; width: 280px; max-height: 80vh; display: none; flex-direction: column; }
+  #panel-hotkeys.open { display: flex; }
+  #hotkey-guide-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 2px; }
+  .hk-group-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; margin: 8px 0 4px; }
+  .hk-group-title:first-of-type { margin-top: 0; }
+  .hk-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 2px; font-size: 11.5px; color: var(--text); }
+  .hk-row span { flex: 1; }
+  .hk-row kbd {
+    background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; padding: 1px 6px;
+    color: var(--accent); font-family: var(--font); font-size: 10px;
+  }
+
+  /* DOCKED PANELS — History stacked above Categories, split 2/3 (history) to
+     1/3 (categories) of the rail's vertical space. */
+  .dock-section { display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .dock-history { flex: 2 1 0; min-height: 0; border-bottom: 1px solid var(--border); }
+  .dock-history.collapsed { flex: 0 0 0; min-height: 0; overflow: hidden; border-bottom: none; }
+  .dock-gallery { flex: 1 1 0; min-height: 0; }
+  .dock-head { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .dock-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+  .dock-collapse-btn {
+    width: 18px; height: 18px; border-radius: 3px; border: 1px solid var(--border2); background: var(--bg3);
+    color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center;
+    font-size: 13px; line-height: 1; flex-shrink: 0;
+  }
+  .dock-collapse-btn:hover { background: var(--bg4); color: var(--text); border-color: var(--accent-dim); }
+  .history-mini-controls { display: flex; gap: 5px; padding: 7px 8px 5px; flex-shrink: 0; }
+  .history-mini-btn {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 5px;
+    border: 1px solid var(--border2); background: var(--bg3); color: var(--text); border-radius: 4px;
+    cursor: pointer; font-family: var(--font); font-size: 10px;
+  }
+  .history-mini-btn svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .history-mini-btn:hover:not(:disabled) { background: var(--bg4); border-color: var(--accent-dim); color: var(--accent); }
+  .history-mini-btn:disabled { opacity: .35; cursor: default; }
+  #history-list { flex: 1; overflow-y: auto; padding: 2px 6px 6px; display: flex; flex-direction: column; gap: 1px; }
+  .history-item {
+    padding: 4px 7px; border-radius: 4px; font-size: 10.5px; color: var(--text-dim); cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .history-item:hover { background: var(--bg4); color: var(--text); }
+  .history-item.current { background: var(--accent-faint); color: var(--accent); font-weight: 600; }
+  .history-item.future { opacity: .5; }
+  .history-empty { font-size: 10px; color: var(--text-dim); text-align: center; padding: 10px 0; }
+
+  /* GALLERY PANEL — a shade lighter than the toolbar/canvas, so the rail
+     visually stands out as its own region rather than blending into the
+     rest of the chrome. */
+  /* GALLERY PANEL — a shade lighter than the toolbar/canvas, so the rail
+     visually stands out as its own region rather than blending into the
+     rest of the chrome. A normal flex child of #main-row — it only spans
+     the canvas row's height, never the titlebar or action-row above it. */
+  #gallery-panel {
+    width: var(--gallery-w); background: var(--bg3); border-left: 1px solid var(--border);
+    box-shadow: -6px 0 16px -8px rgba(0,0,0,0.5) inset;
+    display: flex; flex-direction: column; flex-shrink: 0; transition: width .15s ease; overflow: hidden; z-index: 60;
+  }
+  #gallery-panel.state-hidden { width: 0; border-left: none; }
+  .gallery-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .gallery-title { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+  .gallery-head-actions { display: flex; align-items: center; gap: 8px; }
+  .gallery-save-all-icon {
+    width: 22px; height: 22px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border2); background: var(--bg3); color: var(--text-dim); border-radius: 4px; cursor: pointer;
+  }
+  .gallery-save-all-icon svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .gallery-save-all-icon:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--accent); }
+  .gallery-save-all-icon:disabled { opacity: .35; cursor: default; }
+
+  /* CATEGORIES — replaces the old flat "open images" list. Images with no
+     category sit unlabeled at the top (still functionally a bucket, just
+     not chromed like a real category); named categories are collapsible,
+     rename-by-double-click, and accept drag-and-drop from any thumbnail. */
+  .cat-add-row { padding: 8px 8px 0; flex-shrink: 0; }
+  .cat-add-input {
+    width: 100%; background: var(--bg3); border: 1px dashed var(--border2); color: var(--text);
+    border-radius: 4px; padding: 5px 8px; font-family: var(--font); font-size: 11px; box-sizing: border-box;
+  }
+  .cat-add-input:focus { outline: none; border-color: var(--accent-dim); border-style: solid; }
+  /* Each category is a full-width row, stacked in a vertical list — not a
+     wrapped row of pills. Name sits on the left, image count on the right,
+     both inside the same button. The "All" row is always present, pinned to
+     the top, and represents every open image regardless of category. */
+  #category-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 4px; }
+  .cat-pill {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%; padding: 8px 10px; border-radius: 5px; box-sizing: border-box;
+    border: 1px solid var(--border2); background: var(--bg3); color: var(--text); cursor: pointer;
+    font-size: 11px; font-family: var(--font); user-select: none; transition: all .1s;
+  }
+  .cat-pill:hover { border-color: var(--accent-dim); }
+  .cat-pill.filter-active { background: var(--accent-faint); color: var(--accent); border-color: var(--accent-dim); }
+  .cat-pill.drag-over { box-shadow: 0 0 0 2px var(--accent) inset; background: var(--accent-faint); }
+  .cat-pill.cat-all { font-weight: 600; }
+  .cat-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; flex: 1; text-align: left; }
+  .cat-pill-count {
+    flex-shrink: 0; font-size: 10px; color: var(--text-dim); background: var(--bg4);
+    border-radius: 3px; padding: 1px 6px; min-width: 16px; text-align: center;
+  }
+  .cat-pill.filter-active .cat-pill-count { color: var(--accent); }
+  .cat-rename-input {
+    background: var(--bg4); border: 1px solid var(--accent-dim); color: var(--text-bright);
+    border-radius: 3px; padding: 2px 5px; font-family: var(--font); font-size: 10.5px; width: 100%;
+  }
+  .cat-rename-input:focus { outline: none; }
+  .gallery-empty { color: var(--text-dim); font-size: 10px; text-align: center; padding: 20px 8px; width: 100%; }
+
+  /* CONTEXT MENU (category right-click: save all / rename / delete) */
+  #context-menu {
+    position: fixed; z-index: 2000; display: none; background: var(--bg4); border: 1px solid var(--border2);
+    border-radius: 6px; padding: 4px; min-width: 160px; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  #context-menu.open { display: block; }
+  #context-menu button {
+    display: block; width: 100%; text-align: left; padding: 7px 10px; border: none; background: none;
+    color: var(--text); border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 11px;
+  }
+  #context-menu button:hover { background: var(--bg5); color: var(--accent); }
+  #context-menu button.danger:hover { background: #6e2020; color: #ffaaaa; }
+  #context-menu .cm-sep { height: 1px; background: var(--border2); margin: 4px 2px; }
+
+  /* STATUS BAR */
+  #statusbar {
+    height: var(--statusbar-h); background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 10px; gap: 14px; flex-shrink: 0; font-size: 10px; color: var(--text-dim); z-index: 80;
+    position: relative;
+  }
+  /* Thin progress line along the top edge of the status bar, shown only
+     while a batch of images is being decoded in the background (folder
+     open, drag-drop of many files). Kept out of normal flow so it never
+     shifts the status text/zoom box around. */
+  #sb-progress-track {
+    position: absolute; left: 0; top: -1px; height: 2px; width: 100%;
+    background: transparent; pointer-events: none; overflow: hidden;
+  }
+  #sb-progress-fill {
+    height: 100%; width: 0%; background: var(--accent); transition: width .1s linear;
+  }
+  #sb-file { cursor: pointer; color: var(--text); flex-shrink: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sb-file:hover { color: var(--accent); text-decoration: underline; }
+  #sb-status { flex: 1; text-align: center; transition: color .15s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sb-status.ok { color: var(--accent); }
+  #sb-status.fail { color: #ff6b6b; }
+  #sb-zoom {
+    width: 46px; background: var(--bg3); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: 3px; padding: 2px 4px; font-family: var(--font); font-size: 10px; text-align: right; flex-shrink: 0;
+  }
+
+  /* OVERLAYS */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 1000; }
+  .overlay.open { display: flex; }
+  .overlay-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; padding: 16px; width: 280px; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+  .meta-title { font-size: 12px; color: var(--text-bright); margin-bottom: 10px; font-weight: 600; word-break: break-all; }
+  .meta-row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 11px; }
+  .meta-key { color: var(--text-dim); flex-shrink: 0; }
+  .meta-val { color: var(--text); text-align: right; word-break: break-all; }
+  .meta-sep { height: 1px; background: var(--border); margin: 6px 0; }
+  .overlay-close { width: 100%; margin-top: 10px; padding: 6px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text); border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 11px; }
+  .overlay-close:hover { background: var(--bg4); }
+  /* FULL METADATA — collapsed by default; the raw dump is only read off
+     disk and parsed the first time this is opened (see toggleFullMeta), so
+     it costs nothing for people who never click it. */
+  .meta-full-toggle {
+    width: 100%; margin-top: 8px; padding: 6px; border: 1px solid var(--border2); background: var(--bg3);
+    color: var(--text-dim); border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 10px;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+  }
+  .meta-full-toggle:hover { background: var(--bg4); color: var(--text); }
+  .meta-full-toggle svg { width: 10px; height: 10px; stroke: currentColor; fill: none; stroke-width: 2; transition: transform .12s; }
+  .meta-full-toggle.open svg { transform: rotate(180deg); }
+  #meta-full-body {
+    display: none; margin-top: 8px; max-height: 260px; overflow-y: auto;
+    border-top: 1px solid var(--border); padding-top: 6px;
+  }
+  #meta-full-body.open { display: block; }
+  #meta-full-body .meta-row { padding: 3px 0; gap: 14px; }
+  #meta-full-body .meta-key { word-break: break-word; }
+  /* Some embedded metadata (e.g. a ComfyUI/A1111 generation-prompt JSON
+     blob stuffed into a PNG tEXt chunk) can run to thousands of characters
+     — squeezing that into the key/value row layout above is unreadable.
+     Anything long gets its own full-width, resizable, scrollable textarea
+     instead. Not trying to be pretty here, just usable: this path is rare
+     and purely functional — copy/paste and "make the box bigger" is the
+     whole job. */
+  .meta-full-longval { margin: 6px 0 10px; }
+  .meta-full-longval .meta-key { display: block; margin-bottom: 4px; font-size: 10px; }
+  .meta-full-longval textarea {
+    width: 100%; min-height: 90px; max-height: 320px; resize: vertical;
+    background: var(--bg); border: 1px solid var(--border2); border-radius: 4px;
+    color: var(--text); font-family: var(--font); font-size: 10px; line-height: 1.5;
+    padding: 6px; white-space: pre-wrap; word-break: break-word;
+    user-select: text; -webkit-user-select: text;
+  }
+  .meta-full-loading { font-size: 10px; color: var(--text-dim); text-align: center; padding: 8px 0; }
+  /* A bit wider than the other overlays specifically — the full-metadata
+     textareas above read a lot better with the extra room. */
+  #overlay-meta .overlay-box { width: 320px; }
+  .confirm-msg { font-size: 11px; color: var(--text); margin-bottom: 14px; line-height: 1.5; }
+  .confirm-btns { display: flex; gap: 8px; }
+  .confirm-btns button { flex: 1; padding: 7px; border-radius: 4px; cursor: pointer; font-family: var(--font); font-size: 11px; border: 1px solid var(--border2); background: var(--bg3); color: var(--text); }
+  .confirm-btns button.danger { border-color: #8b3333; color: #ffaaaa; }
+  .confirm-btns button.danger:hover { background: #6e2020; }
+  .confirm-btns button.primary { border-color: var(--accent-dim); background: var(--accent-faint); color: var(--accent); }
+  .confirm-btns button.primary:hover { background: rgba(0,212,160,0.16); }
+  .confirm-btns button:not(.danger):not(.primary):hover { background: var(--bg4); }
+  select.cat-add-input { cursor: pointer; }
+
+  /* HIDE ALL UI */
+  body.ui-hidden #toolbar, body.ui-hidden #statusbar, body.ui-hidden #gallery-panel,
+  body.ui-hidden .filter-panel.open {
+    display: none !important;
+  }
+  /* Collapse the topbar down to just the window-control row — logo and
+     winbtns stay reachable, everything else (quick-actions, filmstrip,
+     history) goes away with the rest of the UI. */
+  body.ui-hidden #topbar { grid-template-rows: var(--titlebar-h) 0; }
+  body.ui-hidden #topbar-actions-cell, body.ui-hidden #topbar-filmstrip-cell, body.ui-hidden #topbar-history-cell {
+    display: none;
+  }
+  body.ui-hidden #canvas-wrap { border: none; }
+
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- TOPBAR — one grid instead of two stacked rows. Left and right columns
+       are each split top/bottom (logo+winbtns / quick-actions+history), but
+       the middle column — the filmstrip — spans both rows, so it gets the
+       full combined height instead of being boxed into a single row. -->
+  <div id="topbar">
+    <div id="topbar-logo-cell">
+      <span class="titlebar-logo">vael.<span>editor</span></span>
+    </div>
+    <div id="topbar-actions-cell">
+      <div class="quick-actions">
+        <button class="qa-btn" id="tool-open" onclick="triggerFileOpen()">
+          <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span class="tool-tooltip">Open image(s)</span>
+        </button>
+        <button class="qa-btn" id="tool-open-folder" onclick="triggerOpenFolder()">
+          <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7V5a2 2 0 0 1 2-2h3l1.5 1.5"/></svg>
+          <span class="tool-tooltip">Open folder…</span>
+        </button>
+        <button class="qa-btn" id="tool-save" onclick="saveImage()">
+          <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+          <span class="tool-tooltip">Save (Ctrl+S)</span>
+        </button>
+      </div>
+    </div>
+    <div id="topbar-filmstrip-cell">
+      <div id="filmstrip-track" onwheel="onFilmstripWheel(event)"></div>
+    </div>
+    <div id="topbar-winbtns-cell">
+      <button class="winbtn" onclick="winAction('minimize')"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"/></svg></button>
+      <button class="winbtn" onclick="winAction('maximize')"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1"/></svg></button>
+      <button class="winbtn close" onclick="winAction('close')"><svg viewBox="0 0 10 10"><line x1="1.5" y1="1.5" x2="8.5" y2="8.5"/><line x1="8.5" y1="1.5" x2="1.5" y2="8.5"/></svg></button>
+    </div>
+    <div id="topbar-history-cell">
+      <button class="history-toggle-btn" id="tool-history" onclick="toggleHistoryPanel()">
+        <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></svg>
+        <span class="tool-tooltip">History</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="main-row">
+
+    <!-- TOOLBAR -->
+    <div id="toolbar">
+      <button class="tool-btn" id="tool-move" onclick="pressR()">
+        <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M12 3l-3 3m3-3 3 3M12 21l-3-3m3 3 3-3M3 12l3 3m-3-3 3-3M21 12l-3 3m3-3-3-3"/></svg>
+        <span class="tool-tooltip">Move (R)</span>
+      </button>
+      <button class="tool-btn" id="tool-select" onclick="pressS()">
+        <svg id="select-icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="1" stroke-dasharray="4 2"/></svg>
+        <span class="tool-tooltip" id="select-tooltip">Select: rect (S)</span>
+      </button>
+      <div class="tool-sep"></div>
+      <button class="tool-btn" id="tool-pixelate" onclick="toggleFilterPanel('pixelate')">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        <span class="tool-tooltip">Pixelate</span>
+      </button>
+      <button class="tool-btn" id="tool-blur" onclick="toggleFilterPanel('blur')">
+        <svg viewBox="0 0 24 24"><circle cx="8" cy="9" r="4"/><circle cx="17" cy="8" r="2.5"/><circle cx="13" cy="16" r="3"/></svg>
+        <span class="tool-tooltip">Bokeh blur</span>
+      </button>
+
+      <!-- Pinned to the bottom: auto-advance toggle + read-only hotkey guide -->
+      <div class="toolbar-bottom">
+        <button class="tool-btn active" id="tool-autoadvance" onclick="toggleAutoAdvance()">
+          <svg viewBox="0 0 24 24"><path d="M5 4l8 8-8 8V4z"/><path d="M15 4l8 8-8 8V4z"/></svg>
+          <span class="tool-tooltip" id="tool-autoadvance-tooltip">Auto-next after save: ON</span>
+        </button>
+        <button class="tool-btn" id="tool-hotkeys" onclick="toggleHotkeyGuide()">
+          <svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h0M10 10h0M14 10h0M18 10h0M6 14h4M14 14h4"/></svg>
+          <span class="tool-tooltip">Hotkey guide</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- CANVAS -->
+    <div id="canvas-wrap"
+         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
+         onmousedown="onCanvasMouseDown(event)" onwheel="onWheel(event)" ondblclick="onCanvasDblClick(event)">
+
+      <div id="drop-zone">
+        <div class="drop-icon"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+        <div>drop images here</div>
+        <button class="drop-hint-btn" onclick="triggerFileOpen()">open files…</button>
+      </div>
+
+      <div id="grid-layer"></div>
+      <div id="image-container"><canvas id="main-canvas"></canvas><canvas id="sel-mask-canvas"></canvas></div>
+
+      <div id="sel-rect-el"></div>
+      <svg id="sel-svg"><path id="sel-path-el"></path></svg>
+
+
+      <!-- PIXELATE PANEL (top-left of canvas, exactly like the original layout) -->
+      <div class="filter-panel" id="panel-pixelate">
+        <div class="fp-head">Pixelate <button class="fp-close" onclick="toggleFilterPanel('pixelate')">×</button></div>
+        <div class="fp-label">block size (px)</div>
+        <div class="fp-row">
+          <input type="range" id="pixelate-range" min="2" max="100" value="12" oninput="syncFilterValue('pixelate', this.value)">
+          <input type="number" id="pixelate-num" min="2" max="100" value="12" oninput="syncFilterValue('pixelate', this.value)">
+        </div>
+        <button class="fp-apply" onclick="runFilter('pixelate')">Apply to selection</button>
+        <div class="fp-divider"></div>
+        <div class="fp-presets-label">Presets</div>
+        <div id="pixelate-presets"></div>
+        <button class="fp-add-preset" onclick="addPreset('pixelate')">+ save current as preset</button>
+      </div>
+
+      <!-- BLUR PANEL -->
+      <div class="filter-panel" id="panel-blur">
+        <div class="fp-head">Bokeh Blur <button class="fp-close" onclick="toggleFilterPanel('blur')">×</button></div>
+        <div class="fp-label">radius (px)</div>
+        <div class="fp-row">
+          <input type="range" id="blur-range" min="1" max="50" value="6" oninput="syncFilterValue('blur', this.value)">
+          <input type="number" id="blur-num" min="1" max="50" value="6" oninput="syncFilterValue('blur', this.value)">
+        </div>
+        <button class="fp-apply" onclick="runFilter('blur')">Apply to selection</button>
+        <div class="fp-divider"></div>
+        <div class="fp-presets-label">Presets</div>
+        <div id="blur-presets"></div>
+        <button class="fp-add-preset" onclick="addPreset('blur')">+ save current as preset</button>
+      </div>
+
+      <!-- HOTKEY GUIDE (bottom-left, near the toolbar button that opens it) -->
+      <div class="filter-panel" id="panel-hotkeys">
+        <div class="fp-head">Hotkeys <button class="fp-close" onclick="toggleHotkeyGuide()">×</button></div>
+        <div id="hotkey-guide-body"></div>
+      </div>
+
+    </div>
+
+    <!-- History gets 2/3 of the vertical space, categories the remaining 1/3.
+         A normal flex child here — confined to the canvas row's height,
+         never reaching up into the action-row or titlebar above it. -->
+    <div id="gallery-panel" class="state-side">
+
+      <div class="dock-section dock-history" id="history-dock">
+        <div class="dock-head">
+          <span class="dock-title">history</span>
+          <button class="dock-collapse-btn" id="history-collapse-btn" onclick="toggleHistoryPanel()" title="Collapse history">▾</button>
+        </div>
+        <div class="history-mini-controls">
+          <button class="history-mini-btn" id="undo-btn" onclick="undo()" title="Undo (Ctrl+Z)">
+            <svg viewBox="0 0 24 24"><path d="M3 11V5M3 11h7a6 6 0 1 1 0 12H7"/></svg> Undo
+          </button>
+          <button class="history-mini-btn" id="redo-btn" onclick="redo()" title="Redo (Ctrl+Y)">
+            <svg viewBox="0 0 24 24"><path d="M21 11V5M21 11h-7a6 6 0 1 0 0 12h3"/></svg> Redo
+          </button>
+        </div>
+        <div id="history-list"></div>
+      </div>
+
+      <div class="dock-section dock-gallery">
+        <div class="gallery-head">
+          <span class="gallery-title">categories</span>
+          <div class="gallery-head-actions">
+            <button class="gallery-save-all-icon" id="save-all-btn" onclick="saveAllChanges()" disabled title="Save all changes (every open image)">
+              <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="cat-add-row">
+          <input type="text" id="new-category-input" class="cat-add-input" placeholder="+ new category…" onkeydown="onNewCategoryKeydown(event)">
+        </div>
+        <div id="category-list" oncontextmenu="onCategoryListContextMenu(event)"></div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- STATUS BAR -->
+  <div id="statusbar">
+    <div id="sb-progress-track"><div id="sb-progress-fill"></div></div>
+    <span id="sb-file" onclick="openMetaPanel()" title="Click for image info">—</span>
+    <span id="sb-status">Ready</span>
+    <input id="sb-zoom" type="text" value="" onchange="setZoomInput(this.value)" title="Zoom %">
+  </div>
+
+</div>
+
+<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="onFileInput(event)">
+
+<!-- METADATA OVERLAY -->
+<div class="overlay" id="overlay-meta" onclick="closeMetaPanel(event)">
+  <div class="overlay-box">
+    <div class="meta-title" id="meta-filename">—</div>
+    <div id="meta-body"></div>
+    <button class="meta-full-toggle" id="meta-full-toggle" onclick="toggleFullMeta()">
+      <span id="meta-full-toggle-label">show full metadata</span>
+      <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div id="meta-full-body"></div>
+    <button class="overlay-close" onclick="closeMetaPanelDirect()">close</button>
+  </div>
+</div>
+
+<!-- CONFIRM OVERLAY -->
+<div class="overlay" id="overlay-confirm">
+  <div class="overlay-box">
+    <div class="confirm-msg" id="confirm-msg"></div>
+    <div class="confirm-btns">
+      <button onclick="confirmAction('cancel')">cancel</button>
+      <button class="danger" onclick="confirmAction('close')">close anyway</button>
+    </div>
+  </div>
+</div>
+
+<!-- CATEGORY IMPORT PROMPT: shown after opening 2+ loose images at once (a
+     dropped/opened folder skips this entirely and is auto-named after the
+     folder). The input is pre-filled with a standard default name and
+     autofocused, so pressing Enter right away — without touching the field —
+     files the batch under that default name. Typing first and then Enter
+     uses the custom name instead. -->
+<div class="overlay" id="overlay-category-prompt">
+  <div class="overlay-box">
+    <div class="confirm-msg" id="category-prompt-msg">Name a category for these images:</div>
+    <input type="text" id="category-prompt-new-input" class="cat-add-input" placeholder="category name" onkeydown="onCategoryPromptInputKeydown(event)">
+    <div class="confirm-btns" style="margin-top:12px;">
+      <button onclick="categoryPromptAction('skip')">leave unsorted</button>
+      <button class="primary" onclick="categoryPromptAction('confirm')">ok</button>
+    </div>
+  </div>
+</div>
+
+<!-- CATEGORY CONTEXT MENU: right-click a category pill -->
+<div id="context-menu"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════════════════
+const state = {
+  images: [],
+  activeIdx: -1,
+  zoom: 1, panX: 0, panY: 0,
+  isDragging: false, lastMx: 0, lastMy: 0,
+  // Workflow always starts with a lasso selection, so that's the default
+  // tool/shape rather than move+rect — matches "lasso select -> pixelate ->
+  // save -> next image" out of the box, no setup needed each launch.
+  currentTool: 'select',   // 'move' | 'select'
+  selectShape: 'lasso',    // 'rect' | 'ellipse' | 'lasso'
+  sel: null, lassoPoints: [], isDrawing: false, drawStartX: 0, drawStartY: 0,
+  galleryState: 'side',    // 'hidden' | 'side' | 'expanded'
+  multiSelected: new Set(), // indices ctrl-clicked in the gallery for batch operations
+  categories: [],           // [{id, name, customName}] — persisted definitions
+  categoryFilter: null,     // category id currently limiting the filmstrip, or null for "all"
+  categoryRenamingId: null, // category id currently showing a rename input, or null
+  categoryDragIdx: null,    // image index currently being dragged onto a category, or null
+  uiHidden: false,
+  confirmCallback: null,
+  armingPreset: null,      // { type, idx } while capturing a hotkey
+  filterBusy: false,       // true while a bokeh blur worker job is in flight
+  autoAdvance: true,       // jump to the next image automatically after a save
+  historyCollapsed: false, // docked history panel collapsed to save side-rail space
+  _rafId: null, _dirtyTransform: false, _dirtySelDisplay: false, _statusThrottle: 0,
+  _importTotal: 0, _importDone: 0, // drives the "Importing images [x/y]" status + progress bar
+};
+
+const FILTER_DEFAULTS = { pixelate: 12, blur: 6 };
+const FILTER_RANGE = { pixelate: [2, 100], blur: [1, 50] };
+const SHAPES = ['rect', 'ellipse', 'lasso'];
+const SHAPE_ICONS = {
+  rect:    '<rect x="3" y="3" width="18" height="18" rx="1" stroke-dasharray="4 2"/>',
+  ellipse: '<ellipse cx="12" cy="12" rx="9" ry="7" stroke-dasharray="4 2"/>',
+  lasso:   '<path d="M6 12c0-3.3 2.7-6 6-6s6 2.7 6 6c0 2.5-1.5 4.6-3.7 5.5L12 21l-2.3-3.5C7.5 16.6 6 14.5 6 12z" stroke-dasharray="4 2"/>',
+};
+const GALLERY_STATES = ['hidden', 'side'];
+const RESERVED_COMBOS = new Set(['s','r','escape','h','f','0','1','+','=','-','c','ctrl+s','ctrl+a','ctrl+z','ctrl+y','ctrl+shift+z','arrowleft','arrowright']);
+
+let presets = { pixelate: [], blur: [] };
+
+// ════════════════════════════════════════════════════════════════════
+// DOM REFS
+// ════════════════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+const wrap = $('canvas-wrap');
+const displayCanvas = $('main-canvas');
+const displayCtx = displayCanvas.getContext('2d', { alpha: true });
+const imgCon = $('image-container');
+const gridLayer = $('grid-layer');
+const dropZone = $('drop-zone');
+const galleryPanel = $('gallery-panel');
+const selRectEl = $('sel-rect-el');
+const selSvg = $('sel-svg');
+const selPathEl = $('sel-path-el');
+const selMaskCanvas = $('sel-mask-canvas');
+const selMaskCtx = selMaskCanvas.getContext('2d');
+
+// ════════════════════════════════════════════════════════════════════
+// KEEP CANVAS CENTERED ON RESIZE
+// ════════════════════════════════════════════════════════════════════
+// Resizing the window (or toggling a side panel) changes #canvas-wrap's
+// size without moving the image, since panX/panY are absolute pixel
+// offsets from the wrap's own top-left corner — left alone, the image
+// drifts toward whichever corner didn't move. Shifting pan by exactly
+// half of whatever the wrap gained or lost on each axis keeps the same
+// point of the image under the center of the viewport: if it was
+// centered before the resize, it's still centered after; if the view had
+// been panned off-center, that same relative framing is preserved
+// instead of snapping back to center or sliding toward a corner.
+let _lastWrapW = wrap.clientWidth, _lastWrapH = wrap.clientHeight;
+const wrapResizeObserver = new ResizeObserver(() => {
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const dw = cw - _lastWrapW, dh = ch - _lastWrapH;
+  _lastWrapW = cw; _lastWrapH = ch;
+  if (!dw && !dh) return;
+  if (state.images.length && state.activeIdx >= 0) {
+    state.panX += dw / 2;
+    state.panY += dh / 2;
+    state._dirtyTransform = true;
+    if (state.sel) state._dirtySelDisplay = true;
+    scheduleRaf();
+  }
+});
+wrapResizeObserver.observe(wrap);
+
+// ════════════════════════════════════════════════════════════════════
+// RAF RENDER LOOP (batches pan/selection redraws for smooth dragging)
+// ════════════════════════════════════════════════════════════════════
+function scheduleRaf() {
+  if (state._rafId !== null) return;
+  state._rafId = requestAnimationFrame(rafFlush);
+}
+function rafFlush() {
+  state._rafId = null;
+  if (state._dirtyTransform) {
+    state._dirtyTransform = false;
+    imgCon.style.transition = 'none';
+    imgCon.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
+    gridLayer.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
+    const img = state.images[state.activeIdx];
+    displayCanvas.style.width  = (img?.w ?? 0) * state.zoom + 'px';
+    displayCanvas.style.height = (img?.h ?? 0) * state.zoom + 'px';
+    selMaskCanvas.style.width  = (img?.w ?? 0) * state.zoom + 'px';
+    selMaskCanvas.style.height = (img?.h ?? 0) * state.zoom + 'px';
+    updateGridSize();
+    const now = performance.now();
+    if (now - state._statusThrottle > 100) { state._statusThrottle = now; updateStatusBar(); }
+  }
+  if (state._dirtySelDisplay) {
+    state._dirtySelDisplay = false;
+    flushSelDisplay();
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// WINDOW CONTROLS
+// ════════════════════════════════════════════════════════════════════
+function winAction(action) {
+  if (window.electronAPI) { window.electronAPI[action]?.(); return; }
+  if (action === 'close') attemptClose();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// TOOLS — Select (S, cycles rect → ellipse → lasso) / Move (R, pan)
+// ════════════════════════════════════════════════════════════════════
+function updateSelectIcon() {
+  $('select-icon').innerHTML = SHAPE_ICONS[state.selectShape];
+  $('select-tooltip').textContent = `Select: ${state.selectShape} (S)`;
+}
+function updateToolActiveStates() {
+  $('tool-move').classList.toggle('active', state.currentTool === 'move');
+  $('tool-select').classList.toggle('active', state.currentTool === 'select');
+}
+function setTool(tool) {
+  state.currentTool = tool;
+  updateToolActiveStates();
+  wrap.classList.remove('grab-cursor', 'grabbing-cursor', 'tool-crosshair');
+  wrap.classList.add(tool === 'move' ? 'grab-cursor' : 'tool-crosshair');
+}
+function pressR() {
+  setTool('move');
+  setStatus('Tool: move', true);
+}
+function pressS() {
+  if (state.currentTool !== 'select') {
+    setTool('select');
+  } else {
+    const i = SHAPES.indexOf(state.selectShape);
+    state.selectShape = SHAPES[(i + 1) % SHAPES.length];
+    updateSelectIcon();
+  }
+  setStatus(`Tool: select (${state.selectShape})`, true);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// CANVAS COORDS / MOUSE HANDLING
+// ════════════════════════════════════════════════════════════════════
+function canvasToImageCoords(clientX, clientY) {
+  const rect = wrap.getBoundingClientRect();
+  return { x: (clientX - rect.left - state.panX) / state.zoom, y: (clientY - rect.top - state.panY) / state.zoom };
+}
+function onCanvasMouseDown(e) {
+  // Ignore clicks that originate from floating UI overlaid on the canvas
+  // (filter panels, drop-zone button) — without this, a click on e.g.
+  // "Apply to selection" bubbles up and gets treated as "start a new
+  // selection here", wiping the mask a moment before Apply runs.
+  if (e.target.closest('.filter-panel, .drop-hint-btn')) return;
+  if (e.button !== 0 && e.button !== 1) return;
+  if (!state.images.length || state.activeIdx < 0) return;
+  e.preventDefault();
+  if (state.currentTool === 'move' || e.button === 1) {
+    state.isDragging = true; state.lastMx = e.clientX; state.lastMy = e.clientY;
+    wrap.classList.add('grabbing-cursor');
+    return;
+  }
+  if (state.currentTool === 'select') {
+    state.isDrawing = true;
+    const pt = canvasToImageCoords(e.clientX, e.clientY);
+    state.drawStartX = pt.x; state.drawStartY = pt.y;
+    const img = state.images[state.activeIdx];
+    const ctrlHeld = e.ctrlKey || e.metaKey;
+    const combining = (ctrlHeld || e.shiftKey) && img && maskHasSelection(img.mask);
+    if (combining) {
+      // Keep the existing mask as a base and merge the new shape into it on
+      // mouseup, instead of wiping it — this is what lets rect + lasso (or
+      // any mix, across tool switches) build up multiple selected regions,
+      // or carve a piece back out of what's already selected.
+      state.selCombineMode = ctrlHeld ? 'add' : 'subtract';
+      state._selBaseMask = img.mask.slice();
+    } else {
+      state.selCombineMode = null;
+      state._selBaseMask = null;
+      clearSelection();
+    }
+    if (state.selectShape === 'lasso') state.lassoPoints = [[pt.x, pt.y]];
+  }
+}
+document.addEventListener('mousemove', e => {
+  if (state.isDragging) {
+    state.panX += e.clientX - state.lastMx;
+    state.panY += e.clientY - state.lastMy;
+    state.lastMx = e.clientX; state.lastMy = e.clientY;
+    state._dirtyTransform = true;
+    if (state.sel) state._dirtySelDisplay = true;
+    scheduleRaf();
+    return;
+  }
+  if (!state.isDrawing) return;
+  const pt = canvasToImageCoords(e.clientX, e.clientY);
+  if (state.selectShape === 'lasso') {
+    state.lassoPoints.push([pt.x, pt.y]);
+    state.sel = { x: pt.x, y: pt.y, w: 0, h: 0, type: 'lasso', points: state.lassoPoints };
+  } else {
+    let x = Math.min(state.drawStartX, pt.x), y = Math.min(state.drawStartY, pt.y);
+    let w = Math.abs(pt.x - state.drawStartX), h = Math.abs(pt.y - state.drawStartY);
+    state.sel = { x, y, w, h, type: state.selectShape };
+  }
+  state._dirtySelDisplay = true;
+  scheduleRaf();
+});
+document.addEventListener('mouseup', e => {
+  if (state.isDragging) {
+    state.isDragging = false;
+    wrap.classList.remove('grabbing-cursor');
+    if (state.currentTool === 'move') wrap.classList.add('grab-cursor');
+  }
+  if (state.isDrawing) {
+    state.isDrawing = false;
+    if (state.selectShape === 'lasso' && state.lassoPoints.length > 2) {
+      state.sel = { ...state.sel, points: [...state.lassoPoints] };
+    }
+    const img = state.images[state.activeIdx];
+    const tooSmall = state.sel && state.sel.w < 2 && state.sel.h < 2 && state.selectShape !== 'lasso';
+    if (tooSmall && !state.selCombineMode) {
+      clearSelection();
+    } else if (state.sel && img) {
+      if (state.selCombineMode && state._selBaseMask) {
+        const shapeMask = tooSmall ? makeMask(img.w, img.h) : buildMaskFromSel(state.sel, img.w, img.h);
+        img.mask = state.selCombineMode === 'add'
+          ? unionMasks(state._selBaseMask, shapeMask)
+          : subtractMasks(state._selBaseMask, shapeMask);
+        state.sel = null; // the combined result can't be drawn as one simple shape — the mask overlay takes over
+      } else if (!tooSmall) {
+        commitSelectionMask();
+        state.sel = null;
+      }
+      if (maskHasSelection(img.mask)) {
+        const shapeLabel = state.selCombineMode
+          ? (state.selCombineMode === 'add' ? 'Add to Selection' : 'Subtract from Selection')
+          : { rect: 'Rectangle Select', ellipse: 'Ellipse Select', lasso: 'Lasso Select' }[state.selectShape];
+        pushHistory(img, shapeLabel, { pixelsChanged: false });
+        renderGallery(); updateStatusBar();
+      } else {
+        clearSelection();
+      }
+      renderSelMaskOverlay();
+      setStatus('Selection made', true);
+    }
+    state.selCombineMode = null;
+    state._selBaseMask = null;
+    updateSelDisplay();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// SELECTION DISPLAY
+// ════════════════════════════════════════════════════════════════════
+function updateSelDisplay() { state._dirtySelDisplay = true; scheduleRaf(); }
+function flushSelDisplay() {
+  if (!state.sel || state.activeIdx < 0) {
+    selRectEl.style.display = 'none';
+    selSvg.style.display = 'none';
+    return;
+  }
+  const { x, y, w, h, type } = state.sel;
+  const nx = w >= 0 ? x : x + w;
+  const ny = h >= 0 ? y : y + h;
+  const nw = Math.abs(w), nh = Math.abs(h);
+  const sx = state.panX + nx * state.zoom, sy = state.panY + ny * state.zoom;
+  const sw = nw * state.zoom, sh = nh * state.zoom;
+  if (type === 'ellipse' || type === 'lasso') {
+    selRectEl.style.display = 'none';
+    selSvg.style.display = 'block';
+    if (type === 'lasso' && state.sel.points) {
+      const pts = state.sel.points.map(p => `${state.panX + p[0] * state.zoom},${state.panY + p[1] * state.zoom}`).join(' L ');
+      selPathEl.setAttribute('d', `M ${pts} Z`);
+    } else {
+      const cx = sx + sw / 2, cy = sy + sh / 2, rx = sw / 2, ry = sh / 2;
+      selPathEl.setAttribute('d', `M ${cx - rx},${cy} a ${rx},${ry} 0 1,0 ${rx * 2},0 a ${rx},${ry} 0 1,0 ${-rx * 2},0`);
+    }
+  } else {
+    selSvg.style.display = 'none';
+    selRectEl.style.display = 'block';
+    selRectEl.style.left = sx + 'px'; selRectEl.style.top = sy + 'px';
+    selRectEl.style.width = sw + 'px'; selRectEl.style.height = sh + 'px';
+  }
+}
+function clearSelection() {
+  state.sel = null;
+  state.lassoPoints = [];
+  const img = state.images[state.activeIdx];
+  if (img) img.mask = null;
+  updateSelDisplay();
+  renderSelMaskOverlay();
+}
+function selectAll() {
+  const img = state.images[state.activeIdx];
+  if (!img) { setStatus('No image open', false); return; }
+  state.sel = { x: 0, y: 0, w: img.w, h: img.h, type: 'rect' };
+  commitSelectionMask();
+  state.sel = null;
+  updateSelDisplay();
+  renderSelMaskOverlay();
+  pushHistory(img, 'Select All', { pixelsChanged: false });
+  renderGallery(); updateStatusBar();
+  setStatus('Selected entire image', true);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// MASK HELPERS — Uint8Array, 255 = selected
+// ════════════════════════════════════════════════════════════════════
+function makeMask(w, h) { return new Uint8Array(w * h); }
+function maskFillRect(mask, imgW, imgH, rx, ry, rw, rh, value) {
+  const x0 = Math.max(0, Math.floor(rx)), y0 = Math.max(0, Math.floor(ry));
+  const x1 = Math.min(imgW, Math.ceil(rx + rw)), y1 = Math.min(imgH, Math.ceil(ry + rh));
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) mask[y * imgW + x] = value;
+}
+function maskFillEllipse(mask, imgW, imgH, rx, ry, rw, rh, value) {
+  const cx = rx + rw / 2, cy = ry + rh / 2, a = rw / 2, b = rh / 2;
+  if (a <= 0 || b <= 0) return;
+  const x0 = Math.max(0, Math.floor(rx)), y0 = Math.max(0, Math.floor(ry));
+  const x1 = Math.min(imgW, Math.ceil(rx + rw)), y1 = Math.min(imgH, Math.ceil(ry + rh));
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const dx = (x + 0.5 - cx) / a, dy = (y + 0.5 - cy) / b;
+    if (dx * dx + dy * dy <= 1) mask[y * imgW + x] = value;
+  }
+}
+function maskFillPoly(mask, imgW, imgH, points, value) {
+  if (points.length < 3) return;
+  const minY = Math.max(0, Math.floor(Math.min(...points.map(p => p[1]))));
+  const maxY = Math.min(imgH - 1, Math.ceil(Math.max(...points.map(p => p[1]))));
+  for (let y = minY; y <= maxY; y++) {
+    const intersects = [];
+    const cy = y + 0.5;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const [x0, y0] = points[j], [x1, y1] = points[i];
+      if ((y0 <= cy && y1 > cy) || (y1 <= cy && y0 > cy)) intersects.push(x0 + (cy - y0) / (y1 - y0) * (x1 - x0));
+    }
+    intersects.sort((a, b) => a - b);
+    for (let k = 0; k < intersects.length - 1; k += 2) {
+      const x0 = Math.max(0, Math.floor(intersects[k])), x1 = Math.min(imgW, Math.ceil(intersects[k + 1]));
+      for (let x = x0; x < x1; x++) mask[y * imgW + x] = value;
+    }
+  }
+}
+function buildMaskFromSel(sel, imgW, imgH) {
+  const m = makeMask(imgW, imgH);
+  if (!sel) return m;
+  if (sel.type === 'rect') {
+    const rx = sel.w >= 0 ? sel.x : sel.x + sel.w, ry = sel.h >= 0 ? sel.y : sel.y + sel.h;
+    maskFillRect(m, imgW, imgH, rx, ry, Math.abs(sel.w), Math.abs(sel.h), 255);
+  } else if (sel.type === 'ellipse') {
+    const rx = sel.w >= 0 ? sel.x : sel.x + sel.w, ry = sel.h >= 0 ? sel.y : sel.y + sel.h;
+    maskFillEllipse(m, imgW, imgH, rx, ry, Math.abs(sel.w), Math.abs(sel.h), 255);
+  } else if (sel.type === 'lasso' && sel.points) {
+    maskFillPoly(m, imgW, imgH, sel.points, 255);
+  }
+  return m;
+}
+function commitSelectionMask() {
+  const img = state.images[state.activeIdx];
+  if (!img || !state.sel) return;
+  img.mask = buildMaskFromSel(state.sel, img.w, img.h);
+}
+function maskHasSelection(mask) {
+  if (!mask) return false;
+  for (let i = 0; i < mask.length; i++) if (mask[i]) return true;
+  return false;
+}
+function unionMasks(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = (a[i] || b[i]) ? 255 : 0;
+  return out;
+}
+function subtractMasks(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = (a[i] && !b[i]) ? 255 : 0;
+  return out;
+}
+// Renders the committed mask (which may be a union/subtraction of several
+// shapes, so it can't be drawn as a single vector path) as a translucent
+// fill on a canvas overlaid on the image. Only called on selection changes,
+// not per-frame, since scanning every pixel per repaint would be wasteful.
+function renderSelMaskOverlay() {
+  const img = state.images[state.activeIdx];
+  if (!img || !maskHasSelection(img.mask)) {
+    selMaskCanvas.style.display = 'none';
+    return;
+  }
+  if (selMaskCanvas.width !== img.w) selMaskCanvas.width = img.w;
+  if (selMaskCanvas.height !== img.h) selMaskCanvas.height = img.h;
+  const imageData = selMaskCtx.createImageData(img.w, img.h);
+  const data = imageData.data, mask = img.mask;
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i]) {
+      const o = i * 4;
+      data[o] = 0; data[o + 1] = 212; data[o + 2] = 160; data[o + 3] = 90;
+    }
+  }
+  selMaskCtx.putImageData(imageData, 0, 0);
+  selMaskCanvas.style.width = img.w * state.zoom + 'px';
+  selMaskCanvas.style.height = img.h * state.zoom + 'px';
+  selMaskCanvas.style.display = 'block';
+}
+function maskBounds(mask, imgW, imgH) {
+  let minX = imgW, minY = imgH, maxX = 0, maxY = 0;
+  for (let y = 0; y < imgH; y++) for (let x = 0; x < imgW; x++) {
+    if (mask[y * imgW + x]) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  }
+  return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PIXEL OPERATIONS — pixelate / gaussian blur (respect mask)
+// ════════════════════════════════════════════════════════════════════
+// Pure pixel-crunching core, same shape as bokehBlurCore below: (w, h,
+// srcData, mask, blockSize, bx0, by0, bx1, by1) -> Uint8ClampedArray. No
+// DOM/canvas access, so it can run on the main thread or be shipped
+// byte-for-byte into a Worker. Unlike blur, each block only ever reads/writes
+// pixels inside itself — there's no overlap between blocks — so bands can be
+// split with zero shared context, as long as each band's row range is a
+// whole multiple of blockSize away from the selection's top edge.
+function pixelateCore(w, h, srcData, mask, blockSize, bx0, by0, bx1, by1) {
+  const data = new Uint8ClampedArray(srcData);
+  for (let by = by0; by < by1; by += blockSize) {
+    for (let bx = bx0; bx < bx1; bx += blockSize) {
+      const bw = Math.min(blockSize, bx1 - bx), bh = Math.min(blockSize, by1 - by);
+      let r = 0, g = 0, b = 0, a = 0, count = 0;
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        const mi = (by + y) * w + (bx + x);
+        if (mask && !mask[mi]) continue;
+        const di = mi * 4;
+        r += data[di]; g += data[di + 1]; b += data[di + 2]; a += data[di + 3]; count++;
+      }
+      if (!count) continue;
+      r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count); a = Math.round(a / count);
+      for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+        const mi = (by + y) * w + (bx + x);
+        if (mask && !mask[mi]) continue;
+        const di = mi * 4;
+        data[di] = r; data[di + 1] = g; data[di + 2] = b; data[di + 3] = a;
+      }
+    }
+  }
+  return data;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PIXELATE WORKER POOL — same rationale as the bokeh pool below: keeps the
+// UI thread free during "apply pixelate" instead of freezing the app for
+// the full duration of the block-average pass.
+// ════════════════════════════════════════════════════════════════════
+const PIXELATE_POOL_SIZE = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4)));
+let _pixelatePool = null;
+let _pixelatePoolSeq = 0;
+const _pixelatePoolJobs = new Map();
+
+function getPixelatePool() {
+  if (_pixelatePool) return _pixelatePool;
+  const workerSrc = `
+    const pixelateCore = ${pixelateCore.toString()};
+    self.onmessage = (e) => {
+      const { id, w, h, data, mask, blockSize, bx0, by0, bx1, by1 } = e.data;
+      try {
+        const result = pixelateCore(w, h, new Uint8ClampedArray(data), mask ? new Uint8Array(mask) : null, blockSize, bx0, by0, bx1, by1);
+        self.postMessage({ id, ok: true, data: result.buffer }, [result.buffer]);
+      } catch (err) {
+        self.postMessage({ id, ok: false, error: String(err && err.message || err) });
+      }
+    };
+  `;
+  const blob = new Blob([workerSrc], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  _pixelatePool = [];
+  for (let i = 0; i < PIXELATE_POOL_SIZE; i++) {
+    const w = new Worker(url);
+    w.onmessage = (e) => {
+      const { id, ok, data, error } = e.data;
+      const job = _pixelatePoolJobs.get(id);
+      if (!job) return;
+      _pixelatePoolJobs.delete(id);
+      if (ok) job.resolve(new Uint8ClampedArray(data));
+      else job.reject(new Error(error || 'Worker error'));
+    };
+    w.onerror = (e) => {
+      for (const [id, job] of _pixelatePoolJobs) {
+        if (job.worker === w) { _pixelatePoolJobs.delete(id); job.reject(new Error(e.message || 'Worker error')); }
+      }
+    };
+    _pixelatePool.push(w);
+  }
+  return _pixelatePool;
+}
+function runPixelateBandOnWorker(worker, w, h, dataBuffer, maskBuffer, blockSize, bx0, by0, bx1, by1) {
+  return new Promise((resolve, reject) => {
+    const id = ++_pixelatePoolSeq;
+    _pixelatePoolJobs.set(id, { resolve, reject, worker });
+    const transfer = maskBuffer ? [dataBuffer, maskBuffer] : [dataBuffer];
+    worker.postMessage({ id, w, h, data: dataBuffer, mask: maskBuffer, blockSize, bx0, by0, bx1, by1 }, transfer);
+  });
+}
+// Splits the selection's vertical extent [by0, by1) into bands whose height
+// is always a whole multiple of blockSize away from by0, so no block ever
+// straddles a band boundary — that's what lets bands skip the overlap rows
+// the blur pool needs.
+function computePixelateBands(by0, by1, blockSize, poolSize) {
+  const totalRows = by1 - by0;
+  const minRowsPerBand = Math.max(blockSize * 2, 32);
+  let bands = Math.min(poolSize, Math.max(1, Math.floor(totalRows / minRowsPerBand)));
+  if (bands <= 1) return [{ y0: by0, y1: by1 }];
+  let bandH = Math.ceil((totalRows / bands) / blockSize) * blockSize;
+  if (bandH <= 0) bandH = blockSize;
+  const out = [];
+  for (let y0 = by0; y0 < by1; y0 += bandH) out.push({ y0, y1: Math.min(by1, y0 + bandH) });
+  return out;
+}
+async function runPixelateAsync(w, h, imageData, mask, blockSize, bounds) {
+  const pool = getPixelatePool();
+  const bx0 = bounds.x, by0 = bounds.y, bx1 = bounds.x + bounds.w, by1 = bounds.y + bounds.h;
+  const bands = computePixelateBands(by0, by1, blockSize, pool.length);
+  const srcData = imageData.data;
+  const dst = new Uint8ClampedArray(srcData); // untouched rows/pixels pass through as-is
+
+  const jobs = bands.map((band, i) => {
+    const subH = band.y1 - band.y0;
+    const subData = srcData.slice(band.y0 * w * 4, band.y1 * w * 4);
+    const subMask = mask ? mask.slice(band.y0 * w, band.y1 * w) : null;
+    const worker = pool[i % pool.length];
+    // Band-local coordinates: rows are relative to band.y0, x range unchanged.
+    return runPixelateBandOnWorker(worker, w, subH, subData.buffer, subMask ? subMask.buffer : null, blockSize, bx0, 0, bx1, subH)
+      .then(resultBand => { dst.set(resultBand, band.y0 * w * 4); });
+  });
+  await Promise.all(jobs);
+  return dst;
+}
+// Async, worker-pool-backed replacement for the old synchronous
+// pixelateSelection. Same effect on img — reads current pixels + mask,
+// writes the pixelated result back via putImageData — just non-blocking.
+async function pixelateSelection(img, blockSize) {
+  const { w, h, ctx, mask } = img;
+  const bounds = maskBounds(mask, w, h);
+  const src = ctx.getImageData(0, 0, w, h);
+  const resultData = await runPixelateAsync(w, h, src, mask, blockSize, bounds);
+  const dst = new ImageData(resultData, w, h);
+  ctx.putImageData(dst, 0, 0);
+  markDirty(img);
+}
+
+// "Quality" in a disc/bokeh blur isn't about the blur's reach — it's how
+// many concentric rings approximate the disc's falloff. One ring (quality 1)
+// is a single hard-edged circle: uniform weight, sharp cutoff at the radius.
+// Three rings blend nested circles of decreasing weight outward, so the
+// contribution tapers off instead of cutting off abruptly — same radius,
+// softer result. Fixed at 3 rings; not exposed as a setting.
+const BOKEH_RINGS = [
+  { ratio: 0.40, weight: 3 },
+  { ratio: 0.70, weight: 2 },
+  { ratio: 1.00, weight: 1 },
+];
+
+// Pure pixel-crunching core: (w, h, srcData, mask, radius) -> Uint8ClampedArray.
+// No DOM/canvas access, so this same source can run on the main thread or be
+// shipped into a Web Worker verbatim (see BOKEH_WORKER_SRC below) — both call
+// sites execute byte-for-byte the same code, so results are guaranteed
+// identical regardless of where it runs.
+//
+// Perf notes (output is bit-for-bit identical to the straightforward version —
+// these are mechanical speedups, not algorithm changes):
+//   - Ring half-widths are split into 3 typed arrays (halfW0/1/2) instead of an
+//     array-of-arrays, and the 3-ring loop is unrolled, removing per-pixel
+//     array-of-array indexing and a branch-per-ring.
+//   - The x0/x1 edge clamp (Math.max/Math.min) is skipped for the "interior"
+//     columns where clamping is a no-op — i.e. almost every column except a
+//     `half`-wide strip at the left/right edges.
+function bokehBlurCore(w, h, srcData, mask, radius) {
+  const data = srcData;
+  const dst = new Uint8ClampedArray(data.length);
+  dst.set(data);
+  const r = Math.max(1, Math.round(radius));
+  const n = w * h;
+
+  // Bright pixels get boosted so highlights bloom into round bokeh discs
+  // instead of being diluted by averaging with darker neighbors.
+  const weight = new Float64Array(n);
+  const wR = new Float64Array(n), wG = new Float64Array(n), wB = new Float64Array(n), wA = new Float64Array(n);
+  const THRESH = 190;
+  for (let i = 0; i < n; i++) {
+    const di = i * 4;
+    const R = data[di], G = data[di + 1], B = data[di + 2], A = data[di + 3];
+    const lum = 0.299 * R + 0.587 * G + 0.114 * B;
+    const wgt = lum > THRESH ? 1 + Math.pow((lum - THRESH) / (255 - THRESH), 2) * 5 : 1;
+    weight[i] = wgt;
+    wR[i] = R * wgt; wG[i] = G * wgt; wB[i] = B * wgt; wA[i] = A * wgt;
+  }
+
+  // Per row offset, the half-width of each of the 3 rings (-1 = ring doesn't
+  // reach this row at all). Built once per blur call, reused for every pixel.
+  // Split into typed arrays (one per ring) instead of an array-of-arrays —
+  // same values as the original ringHalfW[k] = [h0,h1,h2], just laid out for
+  // faster access in the hot loop below.
+  const kRows = 2 * r + 1;
+  const halfW0 = new Int32Array(kRows).fill(-1);
+  const halfW1 = new Int32Array(kRows).fill(-1);
+  const halfW2 = new Int32Array(kRows).fill(-1);
+  for (let k = 0; k < kRows; k++) {
+    const dy = k - r;
+    const ady = Math.abs(dy);
+    { const rk = BOKEH_RINGS[0].ratio * r; if (ady <= rk) halfW0[k] = Math.floor(Math.sqrt(Math.max(0, rk * rk - dy * dy))); }
+    { const rk = BOKEH_RINGS[1].ratio * r; if (ady <= rk) halfW1[k] = Math.floor(Math.sqrt(Math.max(0, rk * rk - dy * dy))); }
+    { const rk = BOKEH_RINGS[2].ratio * r; if (ady <= rk) halfW2[k] = Math.floor(Math.sqrt(Math.max(0, rk * rk - dy * dy))); }
+  }
+  const RW0 = BOKEH_RINGS[0].weight, RW1 = BOKEH_RINGS[1].weight, RW2 = BOKEH_RINGS[2].weight;
+
+  // Row-prefix-sum cache keyed by SOURCE row index (sy), not by kernel slot.
+  // As the destination row y advances by 1, the window of needed sy values
+  // shifts by 1 — almost all of them were already built for the previous y.
+  // A small ring of (2r+1) slots holds the currently-cached rows; we only
+  // ever build a row once and reuse it for every y that needs it, dropping
+  // this from O(w*h*r) row-builds to O(w*h) total (one new row per y, plus
+  // the initial window fill). The per-pixel range-query math below is
+  // byte-for-byte the same as the original implementation, so output is
+  // identical — only the bookkeeping that fills the prefix buffers changed.
+  const slotCount = kRows;
+  const prefR = [], prefG = [], prefB = [], prefA = [], prefWt = [];
+  for (let s = 0; s < slotCount; s++) {
+    prefR.push(new Float64Array(w + 1)); prefG.push(new Float64Array(w + 1)); prefB.push(new Float64Array(w + 1));
+    prefA.push(new Float64Array(w + 1)); prefWt.push(new Float64Array(w + 1));
+  }
+  const slotForSy = new Map();   // sy -> slot index currently holding it
+  const syInSlot = new Int32Array(slotCount).fill(-1); // slot index -> sy it holds
+  let nextSlot = 0; // round-robin eviction; always evicts the row no longer needed
+
+  function buildRow(sy) {
+    const slot = nextSlot;
+    nextSlot = (nextSlot + 1) % slotCount;
+    const evicted = syInSlot[slot];
+    if (evicted >= 0) slotForSy.delete(evicted);
+    syInSlot[slot] = sy;
+    slotForSy.set(sy, slot);
+
+    const rowBase = sy * w;
+    const pR = prefR[slot], pG = prefG[slot], pB = prefB[slot], pA = prefA[slot], pW = prefWt[slot];
+    let ar = 0, ag = 0, ab = 0, aa = 0, aw = 0;
+    pR[0] = 0; pG[0] = 0; pB[0] = 0; pA[0] = 0; pW[0] = 0;
+    for (let xx = 0; xx < w; xx++) {
+      const ii = rowBase + xx;
+      ar += wR[ii]; ag += wG[ii]; ab += wB[ii]; aa += wA[ii]; aw += weight[ii];
+      pR[xx + 1] = ar; pG[xx + 1] = ag; pB[xx + 1] = ab; pA[xx + 1] = aa; pW[xx + 1] = aw;
+    }
+    return slot;
+  }
+
+  function slotForRow(sy) {
+    const cached = slotForSy.get(sy);
+    return cached !== undefined ? cached : buildRow(sy);
+  }
+
+  // kSlot[k] = which slot currently holds the row needed at kernel offset k
+  // for the destination row about to be processed. Recomputed each y.
+  const kSlot = new Int32Array(kRows);
+  const lastW = w - 1;
+
+  for (let y = 0; y < h; y++) {
+    // Touch rows for this y's window in ascending sy order so that, when
+    // duplicates exist (clamped edge rows), the round-robin eviction below
+    // never evicts a row this same window still needs.
+    const sysThisRow = [];
+    for (let k = 0; k < kRows; k++) {
+      sysThisRow.push(Math.max(0, Math.min(h - 1, y + (k - r))));
+    }
+    const uniqueSys = [...new Set(sysThisRow)];
+    for (const sy of uniqueSys) slotForRow(sy);
+    for (let k = 0; k < kRows; k++) kSlot[k] = slotForSy.get(sysThisRow[k]);
+
+    const rowBase = y * w;
+
+    for (let x = 0; x < w; x++) {
+      const mi = rowBase + x;
+      if (mask && !mask[mi]) continue;
+      let totR = 0, totG = 0, totB = 0, totA = 0, totW = 0;
+
+      for (let k = 0; k < kRows; k++) {
+        const slot = kSlot[k];
+        const pR = prefR[slot], pG = prefG[slot], pB = prefB[slot], pA = prefA[slot], pWt = prefWt[slot];
+
+        let half = halfW0[k];
+        if (half >= 0) {
+          let x0, x1;
+          if (x >= half && x + half <= lastW) { x0 = x - half; x1 = x + half; }
+          else { x0 = x - half; if (x0 < 0) x0 = 0; x1 = x + half; if (x1 > lastW) x1 = lastW; }
+          totR += RW0 * (pR[x1 + 1] - pR[x0]);
+          totG += RW0 * (pG[x1 + 1] - pG[x0]);
+          totB += RW0 * (pB[x1 + 1] - pB[x0]);
+          totA += RW0 * (pA[x1 + 1] - pA[x0]);
+          totW += RW0 * (pWt[x1 + 1] - pWt[x0]);
+        }
+        half = halfW1[k];
+        if (half >= 0) {
+          let x0, x1;
+          if (x >= half && x + half <= lastW) { x0 = x - half; x1 = x + half; }
+          else { x0 = x - half; if (x0 < 0) x0 = 0; x1 = x + half; if (x1 > lastW) x1 = lastW; }
+          totR += RW1 * (pR[x1 + 1] - pR[x0]);
+          totG += RW1 * (pG[x1 + 1] - pG[x0]);
+          totB += RW1 * (pB[x1 + 1] - pB[x0]);
+          totA += RW1 * (pA[x1 + 1] - pA[x0]);
+          totW += RW1 * (pWt[x1 + 1] - pWt[x0]);
+        }
+        half = halfW2[k];
+        if (half >= 0) {
+          let x0, x1;
+          if (x >= half && x + half <= lastW) { x0 = x - half; x1 = x + half; }
+          else { x0 = x - half; if (x0 < 0) x0 = 0; x1 = x + half; if (x1 > lastW) x1 = lastW; }
+          totR += RW2 * (pR[x1 + 1] - pR[x0]);
+          totG += RW2 * (pG[x1 + 1] - pG[x0]);
+          totB += RW2 * (pB[x1 + 1] - pB[x0]);
+          totA += RW2 * (pA[x1 + 1] - pA[x0]);
+          totW += RW2 * (pWt[x1 + 1] - pWt[x0]);
+        }
+      }
+
+      const oi = mi * 4;
+      dst[oi]     = Math.min(255, Math.round(totR / totW));
+      dst[oi + 1] = Math.min(255, Math.round(totG / totW));
+      dst[oi + 2] = Math.min(255, Math.round(totB / totW));
+      dst[oi + 3] = Math.round(totA / totW);
+    }
+  }
+  return dst;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BOKEH BLUR WORKER POOL — keeps the UI thread responsive AND uses all cores
+// ════════════════════════════════════════════════════════════════════
+// bokehBlurCore is expensive at large radii (inherent to the algorithm: cost
+// scales with radius). Running it on the main thread freezes everything —
+// status text, hover states, even the spinner — for the full duration.
+//
+// Beyond just moving the work off the main thread, the blur is also split
+// across a small POOL of Workers (one per CPU core, capped) so multiple
+// cores crunch it simultaneously. This is safe because of how the blur
+// works: output row y only ever reads source rows [y - r, y + r] (the
+// "kRows" window in bokehBlurCore) — it never reads anything outside that
+// band. So the image can be cut into horizontal bands, each band's worker
+// given its slice PLUS r rows of overlap context above/below, and the
+// results stitched back together — completely equivalent to running the
+// whole image through bokehBlurCore in one pass, just spread over multiple
+// cores. The worker source is still built from bokehBlurCore's own
+// toString(), so every worker runs byte-for-byte the same pixel math the
+// main thread would otherwise run inline. Same code, same inputs (per band),
+// same outputs once stitched — only *where* and *how many at once* changes.
+const BOKEH_POOL_SIZE = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4)));
+let _bokehPool = null;       // array of Worker
+let _bokehPoolSeq = 0;
+const _bokehPoolJobs = new Map(); // id -> { resolve, reject }
+
+function getBokehPool() {
+  if (_bokehPool) return _bokehPool;
+  const workerSrc = `
+    const BOKEH_RINGS = ${JSON.stringify(BOKEH_RINGS)};
+    const bokehBlurCore = ${bokehBlurCore.toString()};
+    self.onmessage = (e) => {
+      const { id, w, h, data, mask, radius } = e.data;
+      try {
+        const result = bokehBlurCore(w, h, new Uint8ClampedArray(data), mask ? new Uint8Array(mask) : null, radius);
+        self.postMessage({ id, ok: true, data: result.buffer }, [result.buffer]);
+      } catch (err) {
+        self.postMessage({ id, ok: false, error: String(err && err.message || err) });
+      }
+    };
+  `;
+  const blob = new Blob([workerSrc], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  _bokehPool = [];
+  for (let i = 0; i < BOKEH_POOL_SIZE; i++) {
+    const w = new Worker(url);
+    w.onmessage = (e) => {
+      const { id, ok, data, error } = e.data;
+      const job = _bokehPoolJobs.get(id);
+      if (!job) return;
+      _bokehPoolJobs.delete(id);
+      if (ok) job.resolve(new Uint8ClampedArray(data));
+      else job.reject(new Error(error || 'Worker error'));
+    };
+    w.onerror = (e) => {
+      // Fail every in-flight job assigned to THIS worker rather than hanging
+      // forever if it throws outside the try/catch (e.g. a syntax problem).
+      for (const [id, job] of _bokehPoolJobs) {
+        if (job.worker === w) { _bokehPoolJobs.delete(id); job.reject(new Error(e.message || 'Worker error')); }
+      }
+    };
+    _bokehPool.push(w);
+  }
+  return _bokehPool;
+}
+
+// Runs bokehBlurCore for one band on a specific worker, resolves with the
+// resulting buffer. Buffers are transferred (not copied) both ways.
+function runBokehBandOnWorker(worker, w, h, dataBuffer, maskBuffer, radius) {
+  return new Promise((resolve, reject) => {
+    const id = ++_bokehPoolSeq;
+    _bokehPoolJobs.set(id, { resolve, reject, worker });
+    const transfer = maskBuffer ? [dataBuffer, maskBuffer] : [dataBuffer];
+    worker.postMessage({ id, w, h, data: dataBuffer, mask: maskBuffer, radius }, transfer);
+  });
+}
+
+// Splits [0,h) into up to `bands` horizontal bands of roughly equal height
+// (last band absorbs any remainder), skipping the split entirely for small
+// images/radii where the overlap overhead wouldn't pay for itself.
+function computeBokehBands(h, radius, poolSize) {
+  const r = Math.max(1, Math.round(radius));
+  // Below this, per-band overlap (2r extra rows each) starts costing more
+  // than splitting saves; just run it as a single band on one worker.
+  const minRowsPerBand = Math.max(8, r * 2);
+  let bands = Math.min(poolSize, Math.max(1, Math.floor(h / minRowsPerBand)));
+  if (bands <= 1) return [{ y0: 0, y1: h }];
+  const bandH = Math.ceil(h / bands);
+  const out = [];
+  for (let y0 = 0; y0 < h; y0 += bandH) {
+    out.push({ y0, y1: Math.min(h, y0 + bandH) });
+  }
+  return out;
+}
+
+// Runs bokehBlurCore over the whole image by splitting it into row-bands,
+// running each band on its own pooled Worker in parallel, and stitching the
+// results back together. Each band gets `radius` rows of overlap context
+// above/below (clamped to image bounds) — exactly the window bokehBlurCore
+// itself reads from for those rows — so each output row is computed from
+// the same source pixels it would have been in a single, unsplit pass.
+// Output is therefore identical to running the whole image through
+// bokehBlurCore once; only the wall-clock time changes.
+async function runBokehBlurAsync(w, h, imageData, mask, radius) {
+  const pool = getBokehPool();
+  const r = Math.max(1, Math.round(radius));
+  const bands = computeBokehBands(h, radius, pool.length);
+  const srcData = imageData.data; // Uint8ClampedArray view over the full image
+
+  const dst = new Uint8ClampedArray(w * h * 4);
+  const jobs = bands.map((band, i) => {
+    const srcY0 = Math.max(0, band.y0 - r);
+    const srcY1 = Math.min(h, band.y1 + r);
+    const subH = srcY1 - srcY0;
+
+    // Copy (not transfer) each band's slice out of the shared source — every
+    // band needs to read overlapping rows, so the buffers can't be split by
+    // ownership; each worker gets its own independent copy instead.
+    const subData = srcData.slice(srcY0 * w * 4, srcY1 * w * 4);
+    const subMask = mask ? mask.slice(srcY0 * w, srcY1 * w) : null;
+
+    const worker = pool[i % pool.length];
+    return runBokehBandOnWorker(worker, w, subH, subData.buffer, subMask ? subMask.buffer : null, radius)
+      .then(resultBand => {
+        const offsetInSub = band.y0 - srcY0;
+        const rowsToCopy = band.y1 - band.y0;
+        dst.set(
+          resultBand.subarray(offsetInSub * w * 4, (offsetInSub + rowsToCopy) * w * 4),
+          band.y0 * w * 4
+        );
+      });
+  });
+
+  await Promise.all(jobs);
+  return dst;
+}
+
+// Async, worker-pool-backed replacement for the old synchronous
+// bokehBlurSelection. Same effect on img (reads current pixels + mask,
+// writes the blurred result back via putImageData, marks img dirty) —
+// just non-blocking and spread across multiple cores. Callers must `await`
+// this and not touch img's canvas until it resolves.
+async function bokehBlurSelection(img, radius) {
+  const { w, h, ctx, mask } = img;
+  const src = ctx.getImageData(0, 0, w, h);
+  // Mask is read-only here and still needed elsewhere (history, batch mode);
+  // runBokehBlurAsync copies per-band slices internally, so the live mask is
+  // never mutated or transferred away.
+  const resultData = await runBokehBlurAsync(w, h, src, mask, radius);
+  const dst = new ImageData(resultData, w, h);
+  ctx.putImageData(dst, 0, 0);
+  markDirty(img);
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// HISTORY — per-image undo/redo, Paint.NET style
+// ════════════════════════════════════════════════════════════════════
+const MAX_HISTORY = 40;
+
+// Pushes a new "notable action" snapshot onto img's history, discarding
+// any redo tail beyond the current pointer (a fresh action after undoing
+// overwrites the steps that were undone — same as Paint.NET).
+//
+// opts.pixelsChanged / opts.maskChanged (default true for both) tell this
+// whether the action actually touched the canvas pixels / the selection
+// mask. Selection actions (draw/select-all/deselect) don't touch pixels;
+// filter applies don't touch the mask. When a given piece didn't change,
+// we reuse the previous entry's reference instead of re-capturing a full
+// snapshot — a full RGBA frame here is ~5.5MB at typical photo sizes, and
+// re-reading it via getImageData on every single selection click was the
+// single biggest driver of history memory bloat with many images open.
+function pushHistory(img, label, opts) {
+  const pixelsChanged = !opts || opts.pixelsChanged !== false;
+  const maskChanged = !opts || opts.maskChanged !== false;
+  const prev = img.history[img.historyIndex];
+  const imageData = (pixelsChanged || !prev) ? img.ctx.getImageData(0, 0, img.w, img.h) : prev.imageData;
+  const mask = (maskChanged || !prev) ? img.mask : prev.mask;
+  const snapshot = {
+    label,
+    imageData,
+    mask,
+    sel: (state.images[state.activeIdx] === img && state.sel) ? structuredClone(state.sel) : null,
+  };
+  img.history = img.history.slice(0, img.historyIndex + 1);
+  img.history.push(snapshot);
+  if (img.history.length > MAX_HISTORY) {
+    img.history.shift();
+    if (img.savedAt >= 0) img.savedAt--;
+  }
+  img.historyIndex = img.history.length - 1;
+  img.unsaved = img.historyIndex !== img.savedAt;
+  if (state.images[state.activeIdx] === img) renderHistoryPanel();
+}
+function restoreHistoryState(img, idx) {
+  const st = img.history[idx];
+  img.ctx.putImageData(st.imageData, 0, 0);
+  img.mask = st.mask || null;
+  markDirty(img);
+  if (state.images[state.activeIdx] === img) {
+    state.sel = st.sel ? structuredClone(st.sel) : null;
+    updateSelDisplay();
+    renderSelMaskOverlay();
+  }
+}
+function undo() {
+  const img = state.images[state.activeIdx];
+  if (!img || img.historyIndex <= 0) { setStatus('Nothing to undo', false); return; }
+  const undoneLabel = img.history[img.historyIndex].label;
+  img.historyIndex--;
+  restoreHistoryState(img, img.historyIndex);
+  img.unsaved = img.historyIndex !== img.savedAt;
+  renderGallery(); updateStatusBar(); renderHistoryPanel();
+  setStatus(`Undid: ${undoneLabel}`, true);
+}
+function redo() {
+  const img = state.images[state.activeIdx];
+  if (!img || img.historyIndex >= img.history.length - 1) { setStatus('Nothing to redo', false); return; }
+  img.historyIndex++;
+  restoreHistoryState(img, img.historyIndex);
+  img.unsaved = img.historyIndex !== img.savedAt;
+  renderGallery(); updateStatusBar(); renderHistoryPanel();
+  setStatus(`Redid: ${img.history[img.historyIndex].label}`, true);
+}
+function jumpToHistory(idx) {
+  const img = state.images[state.activeIdx];
+  if (!img || idx === img.historyIndex || idx < 0 || idx >= img.history.length) return;
+  img.historyIndex = idx;
+  restoreHistoryState(img, idx);
+  img.unsaved = img.historyIndex !== img.savedAt;
+  renderGallery(); updateStatusBar(); renderHistoryPanel();
+  setStatus(`Jumped to: ${img.history[idx].label}`, true);
+}
+function toggleHistoryPanel() {
+  // History lives docked above the gallery (Paint.NET-style), so "toggling"
+  // it just collapses/expands that dock rather than opening a float-over panel.
+  state.historyCollapsed = !state.historyCollapsed;
+  $('history-dock').classList.toggle('collapsed', state.historyCollapsed);
+  $('history-collapse-btn').textContent = state.historyCollapsed ? '▸' : '▾';
+  $('tool-history').classList.toggle('active', !state.historyCollapsed);
+  if (state.galleryState === 'hidden') setGalleryState('side');
+  if (!state.historyCollapsed) renderHistoryPanel();
+}
+function renderHistoryPanel() {
+  const img = state.images[state.activeIdx];
+  const undoBtn = $('undo-btn'), redoBtn = $('redo-btn'), list = $('history-list');
+  if (!img) {
+    undoBtn.disabled = true; redoBtn.disabled = true;
+    list.innerHTML = '<div class="history-empty">no image open</div>';
+    return;
+  }
+  undoBtn.disabled = img.historyIndex <= 0;
+  redoBtn.disabled = img.historyIndex >= img.history.length - 1;
+  list.innerHTML = '';
+  img.history.forEach((st, i) => {
+    const row = document.createElement('div');
+    row.className = 'history-item' + (i === img.historyIndex ? ' current' : (i > img.historyIndex ? ' future' : ''));
+    row.textContent = st.label;
+    row.onclick = () => jumpToHistory(i);
+    list.appendChild(row);
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FILTER PANELS — pixelate / blur, with presets + assignable hotkeys
+// ════════════════════════════════════════════════════════════════════
+function loadPresets() {
+  let raw = null;
+  try {
+    // One-time migration: this app used to be branded "vanta." and stored
+    // presets under 'vanta-editor-presets'. If the new key is empty but the
+    // old one has data, carry it over so the rename doesn't wipe out
+    // anyone's saved presets. Harmless no-op once the new key exists.
+    raw = localStorage.getItem('vael-editor-presets');
+    if (!raw) {
+      const legacy = localStorage.getItem('vanta-editor-presets');
+      if (legacy) {
+        raw = legacy;
+        localStorage.setItem('vael-editor-presets', legacy);
+      }
+    }
+    if (raw) presets = JSON.parse(raw);
+  } catch (e) { /* ignore corrupt storage */ }
+  const isFirstRun = !raw;
+  presets.pixelate = presets.pixelate || [];
+  presets.blur = presets.blur || [];
+  // First-ever launch: seed one ready-to-go pixelate preset on P so the
+  // "select -> hotkey -> save -> next" loop works immediately, no setup.
+  if (isFirstRun && presets.pixelate.length === 0) {
+    presets.pixelate.push({ value: FILTER_DEFAULTS.pixelate, key: 'p' });
+    savePresets();
+  }
+}
+function savePresets() {
+  try { localStorage.setItem('vael-editor-presets', JSON.stringify(presets)); } catch (e) { /* storage unavailable */ }
+}
+function labelForCombo(combo) {
+  return combo.split('+').map(s => s.length === 1 ? s.toUpperCase() : s[0].toUpperCase() + s.slice(1)).join('+');
+}
+function getFilterValue(type) {
+  const v = parseInt($(`${type}-num`).value);
+  return isNaN(v) ? FILTER_DEFAULTS[type] : v;
+}
+function syncFilterValue(type, val) {
+  const [min, max] = FILTER_RANGE[type];
+  val = Math.max(min, Math.min(max, parseInt(val) || FILTER_DEFAULTS[type]));
+  $(`${type}-range`).value = val;
+  $(`${type}-num`).value = val;
+}
+function toggleFilterPanel(type) {
+  const panel = $(`panel-${type}`);
+  const wasOpen = panel.classList.contains('open');
+  document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
+  $('tool-pixelate').classList.remove('active');
+  $('tool-blur').classList.remove('active');
+  if (!wasOpen) {
+    panel.classList.add('open');
+    $(`tool-${type}`).classList.add('active');
+    renderPresets(type);
+  }
+}
+function renderPresets(type) {
+  const list = $(`${type}-presets`);
+  list.innerHTML = '';
+  if (!presets[type].length) {
+    const e = document.createElement('div'); e.className = 'fp-empty'; e.textContent = 'no presets yet';
+    list.appendChild(e); return;
+  }
+  presets[type].forEach((p, i) => {
+    const row = document.createElement('div'); row.className = 'preset-row';
+    const isArming = state.armingPreset && state.armingPreset.type === type && state.armingPreset.idx === i;
+
+    const val = document.createElement('span'); val.className = 'preset-val'; val.textContent = p.value + 'px';
+
+    const key = document.createElement('span');
+    key.className = 'preset-key' + (isArming ? ' armed' : '');
+    key.textContent = isArming ? 'press a key…' : (p.key ? labelForCombo(p.key) : 'set key');
+    key.onclick = () => armHotkey(type, i);
+
+    const apply = document.createElement('button'); apply.className = 'preset-btn'; apply.title = 'Apply this preset'; apply.textContent = '▶';
+    apply.onclick = () => runFilter(type, p.value);
+
+    const del = document.createElement('button'); del.className = 'preset-btn danger'; del.title = 'Delete'; del.textContent = '×';
+    del.onclick = () => deletePreset(type, i);
+
+    row.appendChild(val); row.appendChild(key); row.appendChild(apply); row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+function addPreset(type) {
+  const value = getFilterValue(type);
+  presets[type].push({ value, key: null });
+  savePresets();
+  renderPresets(type);
+  setStatus(`Saved ${type} preset (${value}px)`, true);
+}
+function deletePreset(type, idx) {
+  presets[type].splice(idx, 1);
+  savePresets();
+  renderPresets(type);
+  setStatus('Preset deleted', true);
+}
+function armHotkey(type, idx) {
+  state.armingPreset = { type, idx };
+  renderPresets(type);
+  setStatus('Press a key to assign (Esc to cancel)…', true);
+}
+function findPresetByCombo(combo) {
+  for (const type of ['pixelate', 'blur']) {
+    const idx = presets[type].findIndex(p => p.key === combo);
+    if (idx !== -1) return { type, idx, value: presets[type][idx].value };
+  }
+  return null;
+}
+function filterLabel(type, value) { return `${type === 'pixelate' ? 'Pixelate' : 'Bokeh Blur'} (${value}px)`; }
+function setFiltersBusy(busy) {
+  state.filterBusy = busy;
+  document.querySelectorAll('.fp-apply').forEach(btn => btn.disabled = busy);
+}
+// Minimum time between two blur applications. Guards the
+// select -> blur -> save -> (auto-advance) -> select -> blur workflow against
+// an accidental double-press of the same blur hotkey: without this, hitting
+// the key twice in quick succession blurs the same frame twice, which stacks
+// visibly and looks wrong across an image set. Pixelate isn't guarded since
+// double-pixelating doesn't compound the same way.
+const BLUR_COOLDOWN_MS = 500;
+let _lastBlurAt = 0;
+async function runFilter(type, value) {
+  if (state.filterBusy) return; // a blur job is already running; ignore re-clicks
+  if (value === undefined) value = getFilterValue(type);
+  const isBlur = type !== 'pixelate';
+  if (isBlur) {
+    const now = Date.now();
+    if (now - _lastBlurAt < BLUR_COOLDOWN_MS) return; // swallow the accidental double-press
+    _lastBlurAt = now;
+  }
+  if (state.multiSelected.size >= 2) { runFilterBatch(type, value); return; }
+  const img = state.images[state.activeIdx];
+  if (!img) { setStatus('No image open', false); return; }
+  // Core workflow: either draw a selection first, or hit the hotkey with
+  // nothing selected to pixelate the entire frame. No selection is treated
+  // as "select all" for the duration of this one filter call, then reverted
+  // so the canvas doesn't end up with a lingering full-frame marquee.
+  const hadSelection = img.mask && maskHasSelection(img.mask);
+  if (!hadSelection) img.mask = makeMask(img.w, img.h).fill(255);
+  setFiltersBusy(true);
+  if (isBlur) setStatus('Bokeh blurring…', true);
+  try {
+    if (type === 'pixelate') await pixelateSelection(img, value);
+    else await bokehBlurSelection(img, value);
+    pushHistory(img, filterLabel(type, value), { maskChanged: false });
+    renderGallery();
+    updateStatusBar();
+    setStatus(`${type === 'pixelate' ? 'Pixelated' : 'Bokeh blurred'} ${hadSelection ? 'selection' : 'entire image'} at ${value}px`, true);
+  } catch (err) {
+    console.error(err);
+    setStatus(`Failed to apply ${type}`, false);
+  } finally {
+    if (!hadSelection) img.mask = null;
+    setFiltersBusy(false);
+  }
+}
+async function runFilterBatch(type, value) {
+  // Applies to the whole frame of every gallery-multi-selected image — there's
+  // no shared region to draw a selection on across different images, so batch
+  // mode treats each selected image as fully selected.
+  if (state.filterBusy) return;
+  const isBlur = type !== 'pixelate';
+  if (isBlur) {
+    const now = Date.now();
+    if (now - _lastBlurAt < BLUR_COOLDOWN_MS) return;
+    _lastBlurAt = now;
+  }
+  setFiltersBusy(true);
+  if (isBlur) setStatus('Bokeh blurring…', true);
+  const indices = [...state.multiSelected];
+  let ok = 0;
+  try {
+    // Sequential, not parallel: keeps memory bounded (each job transfers a
+    // full-image buffer) and keeps the status line meaningful. The UI still
+    // stays responsive throughout since each filter itself runs off-thread.
+    for (const i of indices) {
+      const img = state.images[i];
+      if (!img) continue;
+      const savedMask = img.mask;
+      img.mask = makeMask(img.w, img.h).fill(255);
+      let success = false;
+      try {
+        if (type === 'pixelate') await pixelateSelection(img, value);
+        else await bokehBlurSelection(img, value);
+        ok++;
+        success = true;
+      } catch (err) {
+        console.error(err);
+      }
+      img.mask = savedMask;
+      if (success) pushHistory(img, filterLabel(type, value), { maskChanged: false });
+    }
+  } finally {
+    setFiltersBusy(false);
+  }
+  renderGallery();
+  updateStatusBar();
+  setStatus(ok ? `${type === 'pixelate' ? 'Pixelated' : 'Bokeh blurred'} ${ok} image${ok > 1 ? 's' : ''} (${value}px)` : `Failed to apply ${type}`, ok > 0);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// CANVAS PIPELINE
+// ════════════════════════════════════════════════════════════════════
+function makeCanvas(source, w, h) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  if (source) ctx.drawImage(source, 0, 0, w, h);
+  return { canvas: c, ctx };
+}
+// commitCanvas used to run img.canvas.toDataURL('image/png') — a synchronous,
+// main-thread PNG encode of the FULL image — after every single edit
+// (pixelate, blur, undo, redo). That's the actual cost that made "applying
+// pixelate" feel slow, separate from the pixel math itself: encoding a
+// ~1024x1344 PNG on the main thread is tens to hundreds of ms of pure UI
+// freeze, and it was happening on every edit whether or not anyone was about
+// to save.
+//
+// Now: an edit just marks the image dirty. The cheap parts (thumbnail,
+// on-screen canvas) update immediately via drawImage (no encoding at all).
+// The expensive part — a real full-resolution PNG data URL — is only ever
+// produced lazily, right before a save/export/meta-panel lookup actually
+// needs one, and via toBlob (browser-native async encode) instead of the
+// blocking toDataURL.
+function markDirty(img) {
+  img._fullSrcDirty = true;
+  updateThumbCanvas(img);
+  if (state.images[state.activeIdx] === img) renderDisplay();
+}
+function canvasToDataURLAsync(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) { reject(new Error('toBlob failed')); return; }
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+      reader.readAsDataURL(blob);
+    }, 'image/png');
+  });
+}
+// Call this right before anything reads img.src (save, save-as, download
+// fallback, the metadata panel's size estimate). Cheap no-op if nothing has
+// changed since the last time it was computed.
+async function ensureFullSrc(img) {
+  if (img._fullSrcDirty || !img.src) {
+    img.src = await canvasToDataURLAsync(img.canvas);
+    img._fullSrcDirty = false;
+  }
+  return img.src;
+}
+// Small per-image thumbnail, drawn straight from the source canvas — no
+// base64/PNG encode-decode round trip at all, which is what made the old
+// filmstrip (reusing the full-res img.src as every thumbnail's <img> source)
+// so expensive to redraw with many images open. Kept in sync with the
+// image's real aspect ratio; devicePixelRatio-aware so it stays crisp.
+const FS_THUMB_MAX_DPR = 2;
+function ensureThumbCanvas(img) {
+  if (!img._thumbCanvas) img._thumbCanvas = document.createElement('canvas');
+  return img._thumbCanvas;
+}
+function updateThumbCanvas(img) {
+  const ratio = img.w && img.h ? img.w / img.h : 1;
+  const dpr = Math.min(FS_THUMB_MAX_DPR, window.devicePixelRatio || 1);
+  const cssW = Math.max(22, Math.min(160, Math.round(FS_THUMB_H * ratio)));
+  const cssH = FS_THUMB_H;
+  const c = ensureThumbCanvas(img);
+  const pxW = Math.max(1, Math.round(cssW * dpr)), pxH = Math.max(1, Math.round(cssH * dpr));
+  if (c.width !== pxW || c.height !== pxH) { c.width = pxW; c.height = pxH; }
+  const tctx = c.getContext('2d');
+  tctx.clearRect(0, 0, c.width, c.height);
+  tctx.drawImage(img.canvas, 0, 0, c.width, c.height);
+}
+function renderDisplay() {
+  const img = state.images[state.activeIdx];
+  if (!img) { displayCanvas.style.display = 'none'; return; }
+  if (displayCanvas.width !== img.w || displayCanvas.height !== img.h) {
+    displayCanvas.width = img.w; displayCanvas.height = img.h;
+  }
+  displayCtx.clearRect(0, 0, img.w, img.h);
+  displayCtx.drawImage(img.canvas, 0, 0);
+  displayCanvas.style.display = 'block';
+}
+
+// ════════════════════════════════════════════════════════════════════
+// ZOOM / PAN
+// ════════════════════════════════════════════════════════════════════
+function applyTransform(animate = false) {
+  imgCon.style.transition = animate ? 'transform 0.2s ease' : 'none';
+  imgCon.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
+  gridLayer.style.transition = imgCon.style.transition;
+  gridLayer.style.transform = imgCon.style.transform;
+  const img = state.images[state.activeIdx];
+  displayCanvas.style.width  = (img?.w ?? 0) * state.zoom + 'px';
+  displayCanvas.style.height = (img?.h ?? 0) * state.zoom + 'px';
+  selMaskCanvas.style.width  = (img?.w ?? 0) * state.zoom + 'px';
+  selMaskCanvas.style.height = (img?.h ?? 0) * state.zoom + 'px';
+  updateGridSize();
+  updateStatusBar();
+}
+// The grid lives on its own oversized layer (see #grid-layer CSS) panned in
+// lockstep with the image — this just keeps its square size in sync with
+// zoom so it still reads as "attached" to the image's own pixel grid.
+function updateGridSize() {
+  const size = 40 * state.zoom;
+  gridLayer.style.backgroundSize = `${size}px ${size}px`;
+}
+function onCanvasDblClick(e) {
+  if (e.target.closest('.filter-panel')) return;
+  fitImage();
+}
+function fitImage(animate = true) {
+  if (!state.images.length || state.activeIdx < 0) return;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const img = state.images[state.activeIdx];
+  if (!img) return;
+  state.zoom = Math.min((cw - 40) / img.w, (ch - 40) / img.h, 1);
+  state.panX = (cw - img.w * state.zoom) / 2;
+  state.panY = (ch - img.h * state.zoom) / 2;
+  applyTransform(animate);
+}
+function zoomTo(z, cx, cy) {
+  if (!state.images.length || state.activeIdx < 0) return;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const pivX = cx ?? cw / 2, pivY = cy ?? ch / 2;
+  const oldZ = state.zoom;
+  state.zoom = Math.max(0.02, Math.min(32, z));
+  const ratio = state.zoom / oldZ;
+  state.panX = pivX - ratio * (pivX - state.panX);
+  state.panY = pivY - ratio * (pivY - state.panY);
+  applyTransform();
+  updateSelDisplay();
+}
+function zoomBy(delta, cx, cy) { zoomTo(state.zoom + delta * Math.max(0.1, state.zoom * 0.5), cx, cy); }
+function onWheel(e) {
+  if (e.target.closest('.filter-panel')) return;
+  e.preventDefault();
+  if (!state.images.length) return;
+  const rect = wrap.getBoundingClientRect();
+  zoomBy(e.deltaY > 0 ? -0.1 : 0.1, e.clientX - rect.left, e.clientY - rect.top);
+}
+function setZoomInput(val) { val = parseFloat(val); if (!isNaN(val) && val > 0) zoomTo(val / 100); }
+
+// ════════════════════════════════════════════════════════════════════
+// STATUS BAR
+// ════════════════════════════════════════════════════════════════════
+function setStatus(text, ok) {
+  const el = $('sb-status');
+  el.textContent = text;
+  el.classList.remove('ok', 'fail');
+  el.classList.add(ok ? 'ok' : 'fail');
+}
+function updateStatusBar() {
+  const img = state.images[state.activeIdx];
+  $('sb-file').textContent = img ? img.name + (img.unsaved ? ' ●' : '') : '—';
+  $('sb-zoom').value = img ? Math.round(state.zoom * 100) + '%' : '';
+}
+
+// ════════════════════════════════════════════════════════════════════
+// IMAGE LOADING
+// ════════════════════════════════════════════════════════════════════
+// Shared by both loading paths (drag/drop & file-input, and Open Folder):
+// decodes a data URL into a canvas + baseline history entry.
+function loadImageFromSrc(name, path, dataUrl) {
+  return new Promise((resolve, reject) => {
+    const tmpImg = new Image();
+    tmpImg.onload = () => {
+      const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
+      const { canvas, ctx } = makeCanvas(tmpImg, w, h);
+      const baseline = { label: 'Opened image', imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null };
+      const newImg = {
+        // dataUrl is already the file's own bytes — reuse it as-is instead of
+        // paying for a fresh toDataURL() PNG encode of every image up front.
+        // _fullSrcDirty stays false until an actual edit happens, at which
+        // point ensureFullSrc() will regenerate src from the (now-edited)
+        // canvas the next time something needs it.
+        name, path: path || null, unsaved: false, w, h, canvas, ctx, src: dataUrl, _fullSrcDirty: false,
+        mask: null, categoryId: null,
+        history: [baseline], historyIndex: 0, savedAt: 0,
+      };
+      updateThumbCanvas(newImg);
+      resolve(newImg);
+    };
+    tmpImg.onerror = reject;
+    tmpImg.src = dataUrl;
+  });
+}
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => loadImageFromSrc(file.name, file.path || null, e.target.result).then(resolve, reject);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+// ────────────────────────────────────────────────────────────────────
+// BACKGROUND IMPORT PROGRESS
+// A folder or multi-file drop can be hundreds/thousands of images. Each one
+// needs a real <img> decode plus a canvas draw, and doing that many of them
+// back-to-back with nothing yielding to the browser is exactly what makes
+// the whole UI lock up mid-import. loadImagesWithProgress() below loads in
+// small concurrent batches and hands control back to the browser
+// (via requestAnimationFrame) between batches, so the UI keeps painting —
+// and updates the status bar + progress line after every batch so the
+// person can see it's working instead of wondering if it's frozen.
+function beginImportProgress(total) {
+  state._importTotal = total;
+  state._importDone = 0;
+  $('sb-progress-fill').style.width = '0%';
+  setStatus(`Importing images [0/${total}]`, true);
+}
+function bumpImportProgress(justFinished) {
+  state._importDone += justFinished;
+  const { _importDone: done, _importTotal: total } = state;
+  $('sb-progress-fill').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+  setStatus(`Importing images [${done}/${total}]`, true);
+}
+function endImportProgress() {
+  state._importTotal = 0;
+  state._importDone = 0;
+  $('sb-progress-fill').style.width = '0%';
+}
+const IMPORT_BATCH_SIZE = 6;
+async function loadImagesWithProgress(items, loaderFn) {
+  const total = items.length;
+  const results = new Array(total);
+  beginImportProgress(total);
+  try {
+    for (let i = 0; i < total; i += IMPORT_BATCH_SIZE) {
+      const batch = items.slice(i, i + IMPORT_BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(item => loaderFn(item).catch(() => null)));
+      batchResults.forEach((r, k) => { results[i + k] = r; });
+      bumpImportProgress(batch.length);
+      // Yield to the browser so it can paint the updated status/progress bar
+      // and stay responsive to input, instead of running every batch back
+      // to back in one uninterrupted stretch of synchronous work.
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+  } finally {
+    endImportProgress();
+  }
+  return results;
+}
+async function addImages(files) {
+  const imageFiles = [...files].filter(f => f.type.startsWith('image/'));
+  if (!imageFiles.length) { setStatus('No valid image files', false); return; }
+  const startAt = state.images.length;
+  const newImgs = (await loadImagesWithProgress(imageFiles, loadImageFile)).filter(Boolean);
+  if (!newImgs.length) { setStatus('Failed to load images', false); return; }
+  newImgs.forEach(img => state.images.push(img));
+  renderGallery();
+  selectImage(startAt);
+  if (state.galleryState === 'hidden') setGalleryState('side');
+  setStatus(`Added ${newImgs.length} image${newImgs.length > 1 ? 's' : ''}`, true);
+  if (newImgs.length > 1) promptNameCategory(startAt, newImgs.length);
+}
+// Whole-folder open (Electron only): main process reads the directory and
+// hands back {name, path, dataUrl} for every image so the renderer never
+// needs raw filesystem access. This is the primary way to start a shoot —
+// one dialog instead of manually multi-selecting files. A folder always
+// becomes its own category named after the folder — no naming prompt, since
+// the folder name already is the name.
+async function triggerOpenFolder() {
+  if (!window.electronAPI?.openFolder) { setStatus('Open folder needs the desktop app', false); return; }
+  setStatus('Opening folder…', true);
+  let result;
+  try {
+    result = await window.electronAPI.openFolder();
+  } catch (e) {
+    setStatus('Failed to open folder', false);
+    return;
+  }
+  if (!result) { setStatus('Open folder cancelled', false); return; }
+  const folderName = result.dir.split(/[\\/]/).pop() || result.dir;
+  await importFolderAsCategory(folderName, result.images);
+}
+// Loads a whole folder's worth of images (from either the Open Folder dialog
+// or a folder dropped from the OS) and files them straight into a brand-new
+// category named after the folder. Deliberately skip-the-prompt: with
+// hundreds or thousands of images, asking "which category?" per import is
+// exactly the friction this is meant to remove, and dumping them into the
+// Unsorted bucket would make that bucket unusable at scale.
+async function importFolderAsCategory(folderName, images) {
+  if (!images || !images.length) { setStatus(`No images found in "${folderName}"`, false); return; }
+  const startAt = state.images.length;
+  const loaded = await loadImagesWithProgress(images, f => loadImageFromSrc(f.name, f.path, f.dataUrl));
+  const ok = loaded.filter(Boolean);
+  if (!ok.length) { setStatus(`Failed to load images from "${folderName}"`, false); return; }
+  ok.forEach(img => state.images.push(img));
+  const categoryId = addCategory(folderName);
+  assignImagesToCategory(Array.from({ length: ok.length }, (_, k) => startAt + k), categoryId);
+  // Focus the filmstrip on the category we just created — without this the
+  // filmstrip filter stayed on whatever it was before (usually "unsorted"),
+  // so a freshly imported folder/batch would file correctly into its new
+  // category but never actually show up until the person went and clicked
+  // that category's pill themselves.
+  state.categoryFilter = categoryId;
+  selectImage(startAt);
+  if (state.galleryState === 'hidden') setGalleryState('side');
+  setStatus(`Imported ${ok.length} image${ok.length === 1 ? '' : 's'} into "${folderName}"`, true);
+}
+// Auto-incrementing default name so a batch-import can be confirmed by
+// hitting Enter without ever having to type anything.
+let _importNameCounter = 0;
+function nextDefaultImportName() {
+  _importNameCounter++;
+  return `Import ${_importNameCounter}`;
+}
+// Replaces the old "which existing category?" dropdown: a freshly-imported
+// batch of loose files (2+ at once, not a folder) always becomes a brand-new
+// category. The name field is pre-filled with a standard default and
+// autofocused, so a user who doesn't care about naming can just hit Enter
+// immediately.
+function promptNameCategory(startIdx, count) {
+  state._categoryPromptRange = { startIdx, count };
+  const input = $('category-prompt-new-input');
+  $('category-prompt-msg').textContent = `Name a category for these ${count} image${count === 1 ? '' : 's'}:`;
+  input.value = nextDefaultImportName();
+  $('overlay-category-prompt').classList.add('open');
+  requestAnimationFrame(() => { input.focus(); input.select(); });
+}
+function onCategoryPromptInputKeydown(e) {
+  if (e.key === 'Enter') { e.preventDefault(); categoryPromptAction('confirm'); }
+  else if (e.key === 'Escape') { e.preventDefault(); categoryPromptAction('skip'); }
+}
+function categoryPromptAction(action) {
+  $('overlay-category-prompt').classList.remove('open');
+  const range = state._categoryPromptRange;
+  state._categoryPromptRange = null;
+  if (!range) return;
+  const indices = Array.from({ length: range.count }, (_, k) => range.startIdx + k);
+  if (action === 'skip') {
+    setStatus(`${indices.length} image${indices.length === 1 ? '' : 's'} left unsorted`, true);
+    return;
+  }
+  const name = $('category-prompt-new-input').value.trim() || nextDefaultImportName();
+  const categoryId = addCategory(name);
+  assignImagesToCategory(indices, categoryId);
+  // Same fix as importFolderAsCategory: jump the filmstrip filter to the
+  // category these images just got filed into, instead of leaving it on
+  // whatever it was showing before (typically "unsorted", where none of
+  // these newly-categorized images appear anymore).
+  state.categoryFilter = categoryId;
+  renderGallery();
+  setStatus(`Filed ${indices.length} image${indices.length === 1 ? '' : 's'} into "${name}"`, true);
+}
+function selectImage(idx) {
+  if (idx < 0 || idx >= state.images.length) return;
+  state.activeIdx = idx;
+  dropZone.classList.add('has-image');
+  clearSelection();
+  fitImage(false);
+  renderDisplay();
+  renderGallery();
+  updateStatusBar();
+  renderHistoryPanel();
+}
+function removeImage(idx) {
+  state.images.splice(idx, 1);
+  const remapped = new Set();
+  state.multiSelected.forEach(i => { if (i !== idx) remapped.add(i > idx ? i - 1 : i); });
+  state.multiSelected = remapped;
+  if (state.images.length === 0) {
+    state.activeIdx = -1;
+    displayCanvas.style.display = 'none';
+    dropZone.classList.remove('has-image');
+  } else {
+    state.activeIdx = -1;
+    selectImage(Math.min(idx, state.images.length - 1));
+  }
+  renderGallery();
+  updateStatusBar();
+  setStatus('Image closed', true);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// GALLERY
+// ════════════════════════════════════════════════════════════════════
+// Builds the ordered list of real `state.images` indices to display, after
+// the expanded view's search filter and sort have been applied. Side/hidden
+// states always show the unfiltered, unsorted (insertion) order — search
+// and sort only apply once there's room to use them (expanded view).
+// ════════════════════════════════════════════════════════════════════
+// CATEGORIES — replaces the old flat image list. Every image has a
+// `categoryId` (null = uncategorized, which is a real bucket but isn't
+// chromed like a named category). Categories are session-only: they live
+// entirely in `state` and are never written to localStorage. Only settings
+// and templates/presets belong in localStorage — images (and therefore the
+// categories organizing them) never persist between launches, so saving
+// category definitions on their own would just leave stale, empty
+// categories behind on next launch.
+// ════════════════════════════════════════════════════════════════════
+function addCategory(name) {
+  const id = 'cat' + Date.now() + Math.floor(Math.random() * 1000);
+  const trimmed = (name || '').trim();
+  state.categories.push({ id, name: trimmed || null, customName: !!trimmed });
+  return id;
+}
+function deleteCategory(id) {
+  const cat = state.categories.find(c => c.id === id);
+  if (!cat) return;
+  const label = categoryLabel(cat);
+  const indices = state.images.map((_, i) => i).filter(i => state.images[i].categoryId === id);
+  state.categories = state.categories.filter(c => c.id !== id);
+
+  // Deleting a category deletes the images filed under it too — it's not
+  // just a label being removed, so those images shouldn't fall back into
+  // Unsorted (that used to happen, and was surprising: "deleted" images
+  // reappearing in a different bucket instead of actually going away).
+  if (indices.length) removeImages(indices);
+
+  // If the category we just deleted was the one the filmstrip was filtered
+  // to, move the filter onto another remaining category rather than falling
+  // through to the (now possibly hidden) Unsorted bucket.
+  if (state.categoryFilter === id) {
+    state.categoryFilter = state.categories.length ? state.categories[0].id : null;
+  }
+
+  renderGallery();
+  const suffix = indices.length ? ` and ${indices.length} image${indices.length === 1 ? '' : 's'}` : '';
+  setStatus(`Deleted category "${label}"${suffix}`, true);
+}
+// Batch removal used by deleteCategory (removeImage above stays as the
+// single-image path used everywhere else). Mirrors removeImage's rules:
+// if the active image survives, stay put; if it was removed, fall back to
+// the nearest remaining image; if nothing is left at all, actually empty
+// the canvas instead of leaving stale pixels on screen.
+function removeImages(indices) {
+  if (!indices || !indices.length) return;
+  const ascending = [...new Set(indices)].sort((a, b) => a - b);
+  const descending = [...ascending].reverse();
+  const activeImg = state.activeIdx >= 0 ? state.images[state.activeIdx] : null;
+  const anchor = ascending[0];
+
+  descending.forEach(i => state.images.splice(i, 1));
+
+  const newMultiSelected = new Set();
+  state.multiSelected.forEach(i => {
+    if (ascending.includes(i)) return;
+    const shift = ascending.filter(r => r < i).length;
+    newMultiSelected.add(i - shift);
+  });
+  state.multiSelected = newMultiSelected;
+
+  if (state.images.length === 0) {
+    state.activeIdx = -1;
+    displayCanvas.style.display = 'none';
+    dropZone.classList.remove('has-image');
+    // Without this, the status bar (and its clickable filename that opens
+    // the metadata panel) kept showing the last active image's name even
+    // though nothing is open anymore — e.g. deleting a category that held
+    // the currently-active image.
+    updateStatusBar();
+    return;
+  }
+
+  const survivedIdx = activeImg ? state.images.indexOf(activeImg) : -1;
+  if (survivedIdx !== -1) {
+    state.activeIdx = survivedIdx;
+    updateStatusBar();
+  } else {
+    state.activeIdx = -1;
+    selectImage(Math.min(anchor, state.images.length - 1));
+  }
+}
+function categoryLabel(cat) {
+  if (cat.customName && cat.name) return cat.name;
+  return 'unnamed category';
+}
+function assignImagesToCategory(indices, categoryId) {
+  indices.forEach(i => { if (state.images[i]) state.images[i].categoryId = categoryId; });
+  renderGallery();
+}
+function assignActiveToCategory(categoryId) {
+  if (state.activeIdx < 0) return;
+  assignImagesToCategory([state.activeIdx], categoryId);
+  setStatus('Added to category', true);
+}
+function onNewCategoryKeydown(e) {
+  if (e.key !== 'Enter') return;
+  const name = e.target.value.trim();
+  if (!name) return;
+  addCategory(name);
+  e.target.value = '';
+  renderGallery();
+  setStatus(`Created category "${name}"`, true);
+}
+function startRenameCategory(id) {
+  state.categoryRenamingId = id;
+  renderGallery();
+}
+function commitRenameCategory(id, rawName) {
+  state.categoryRenamingId = null;
+  const cat = state.categories.find(c => c.id === id);
+  if (!cat) { renderGallery(); return; }
+  const trimmed = rawName.trim();
+  if (trimmed) { cat.name = trimmed; cat.customName = true; }
+  else { cat.customName = false; } // empty rename reverts to the auto "N images" label
+  renderGallery();
+}
+function toggleMultiSelect(i) {
+  if (state.multiSelected.has(i)) state.multiSelected.delete(i);
+  else state.multiSelected.add(i);
+  renderGallery();
+  const n = state.multiSelected.size;
+  setStatus(n ? `${n} image${n > 1 ? 's' : ''} selected for batch` : 'Batch selection cleared', true);
+}
+// Left-click a category pill to show only that category's images in the
+// filmstrip (click the active one again to go back to showing everything).
+// This is what makes "process this category, then that one" actually work.
+function toggleCategoryFilter(id) {
+  state.categoryFilter = state.categoryFilter === id ? null : id;
+  renderGallery();
+  setStatus(state.categoryFilter ? 'Filmstrip filtered to this category' : 'Showing unsorted images', true);
+}
+// A null categoryId (and a null categoryFilter) both mean "unsorted" now —
+// there's no longer a single view of literally every image regardless of
+// category. That view stopped being useful once large batch imports always
+// get their own category: the only images left with no category are the
+// ones from casual single/double-image drops, so "Unsorted" showing just
+// those is the default bucket for simple use, not a firehose of everything.
+function getVisibleImageIndices() {
+  const all = state.images.map((_, i) => i);
+  if (state.categoryFilter) return all.filter(i => state.images[i].categoryId === state.categoryFilter);
+  return all.filter(i => state.images[i].categoryId === null || state.images[i].categoryId === undefined);
+}
+async function saveAllInCategory(categoryId) {
+  const indices = state.images.map((_, i) => i).filter(i => state.images[i].categoryId === categoryId);
+  const unsaved = indices.filter(i => state.images[i].unsaved);
+  if (!unsaved.length) { setStatus('Nothing to save in this category', true); return; }
+  let ok = 0, fail = 0;
+  for (const i of unsaved) {
+    const img = state.images[i];
+    try {
+      await ensureFullSrc(img);
+      if (img.path) { await window.electronAPI.save(img.path, img.src); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+      else {
+        const path = await window.electronAPI.saveAs(img.src, img.name);
+        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+        else fail++;
+      }
+    } catch (e) { fail++; }
+  }
+  renderGallery(); updateStatusBar();
+  setStatus(fail ? `Saved ${ok}, ${fail} skipped` : `Saved ${ok} image${ok === 1 ? '' : 's'} in category`, fail === 0);
+}
+// Drag a filmstrip thumbnail onto a category pill to file it there — the
+// pill itself carries no thumbnails, so this drop target is the whole button.
+function onCatPillDragOver(e) { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }
+function onCatPillDragLeave(e) { e.currentTarget.classList.remove('drag-over'); }
+function onCatPillDrop(e, categoryId) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  const from = state.categoryDragIdx;
+  state.categoryDragIdx = null;
+  if (from === null || from === undefined) return;
+  const indices = state.multiSelected.has(from) ? [...state.multiSelected] : [from];
+  assignImagesToCategory(indices, categoryId);
+  setStatus(`Moved ${indices.length > 1 ? indices.length + ' images' : '1 image'} to category`, true);
+}
+function renderCategoryPanel() {
+  const list = $('category-list');
+  list.innerHTML = '';
+
+  // "Unsorted" is always present, first in the list, and holds every image
+  // with no category — not a real category, so it can't be renamed or
+  // deleted, but it IS a valid drop target (drop a thumbnail on it to clear
+  // that image's category). This is the default bucket for casual use
+  // (a couple of images dropped in without bothering to categorize); large
+  // batch imports (folders, multi-file drops) always get their own named
+  // category instead, so this bucket never has to hold thousands of images.
+  // Once the person has at least one named category, Unsorted stops being
+  // shown (and stops being a valid filter target) — categorized use is the
+  // real workflow at that point, and a permanently-visible catch-all bucket
+  // just adds a confusing, easy-to-forget-about pill. It reappears on its
+  // own the moment the last named category is gone.
+  if (state.categories.length === 0) {
+    const allPill = document.createElement('div');
+    allPill.className = 'cat-pill cat-all' + (state.categoryFilter === null ? ' filter-active' : '');
+    allPill.onclick = () => {
+      if (state.categoryFilter === null) return;
+      state.categoryFilter = null;
+      renderGallery();
+      setStatus('Showing unsorted images', true);
+    };
+    allPill.ondragover = onCatPillDragOver;
+    allPill.ondragleave = onCatPillDragLeave;
+    allPill.ondrop = (e) => onCatPillDrop(e, null);
+    const allName = document.createElement('span'); allName.className = 'cat-pill-name'; allName.textContent = 'Unsorted';
+    const allCount = document.createElement('span'); allCount.className = 'cat-pill-count';
+    allCount.textContent = state.images.filter(i => i.categoryId === null || i.categoryId === undefined).length;
+    allPill.appendChild(allName); allPill.appendChild(allCount);
+    list.appendChild(allPill);
+  }
+
+  state.categories.forEach(cat => {
+    const pill = document.createElement('div');
+    pill.className = 'cat-pill' + (state.categoryFilter === cat.id ? ' filter-active' : '');
+    pill.dataset.catId = cat.id;
+    pill.ondragover = onCatPillDragOver;
+    pill.ondragleave = onCatPillDragLeave;
+    pill.ondrop = (e) => onCatPillDrop(e, cat.id);
+
+    if (state.categoryRenamingId === cat.id) {
+      const input = document.createElement('input');
+      input.className = 'cat-rename-input'; input.type = 'text'; input.value = cat.customName ? cat.name : '';
+      input.placeholder = categoryLabel(cat);
+      input.onclick = (e) => e.stopPropagation();
+      input.onkeydown = (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); commitRenameCategory(cat.id, input.value); }
+        else if (e.key === 'Escape') { e.preventDefault(); state.categoryRenamingId = null; renderGallery(); }
+      };
+      input.onblur = () => commitRenameCategory(cat.id, input.value);
+      pill.appendChild(input);
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    } else {
+      pill.onclick = () => toggleCategoryFilter(cat.id);
+      const name = document.createElement('span'); name.className = 'cat-pill-name';
+      name.textContent = categoryLabel(cat);
+      const count = document.createElement('span'); count.className = 'cat-pill-count';
+      count.textContent = state.images.filter(i => i.categoryId === cat.id).length;
+      pill.appendChild(name);
+      pill.appendChild(count);
+    }
+    list.appendChild(pill);
+  });
+}
+// Delegated to the list container (rather than each pill) so a right-click
+// keeps working even through re-renders — the container itself never gets
+// swapped out, only its contents.
+function onCategoryListContextMenu(e) {
+  const pill = e.target.closest('.cat-pill[data-cat-id]');
+  if (!pill) return;
+  e.preventDefault();
+  openCategoryContextMenu(e, pill.dataset.catId);
+}
+function openCategoryContextMenu(e, categoryId) {
+  const cat = state.categories.find(c => c.id === categoryId);
+  if (!cat) return;
+  const menu = $('context-menu');
+  menu.innerHTML = '';
+  const addRow = (label, fn, danger) => {
+    const btn = document.createElement('button');
+    btn.textContent = label; if (danger) btn.className = 'danger';
+    btn.onclick = () => { closeContextMenu(); fn(); };
+    menu.appendChild(btn);
+  };
+  addRow('Save all in category', () => saveAllInCategory(categoryId));
+  addRow('Add current image', () => assignActiveToCategory(categoryId));
+  const sep = document.createElement('div'); sep.className = 'cm-sep'; menu.appendChild(sep);
+  addRow('Rename', () => startRenameCategory(categoryId));
+  addRow('Delete category', () => deleteCategory(categoryId), true);
+  menu.style.left = e.clientX + 'px';
+  menu.style.top = e.clientY + 'px';
+  menu.classList.add('open');
+  // The window has no scroll (fixed-size, overflow:hidden app shell), so
+  // anything positioned past its right/bottom edge is genuinely invisible,
+  // not just off-screen. Clamp the menu to stay fully inside those edges,
+  // flipping to open leftward/upward from the click point when it's near
+  // the edge instead of running off it.
+  const margin = 6;
+  const rect = menu.getBoundingClientRect();
+  let left = e.clientX, top = e.clientY;
+  if (rect.right > window.innerWidth - margin) left = Math.max(margin, window.innerWidth - margin - rect.width);
+  if (rect.bottom > window.innerHeight - margin) top = Math.max(margin, window.innerHeight - margin - rect.height);
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+function closeContextMenu() { $('context-menu').classList.remove('open'); }
+function setGalleryState(s) {
+  state.galleryState = s;
+  galleryPanel.classList.remove('state-hidden', 'state-side');
+  galleryPanel.classList.add('state-' + s);
+  renderGallery();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// FILMSTRIP — the topbar's middle-column scrubber. A pure left-to-right scrubber through
+// every open image; this is now the primary way to move between images.
+// ════════════════════════════════════════════════════════════════════
+const FS_THUMB_H = 60; // keep in sync with #filmstrip-track's height inside #topbar-filmstrip-cell (spans both topbar rows)
+// Builds (once) and returns the persistent wrapper element for a given
+// image's filmstrip thumbnail — a small <div> holding the cached thumbnail
+// <canvas> plus the unsaved-dot. Cached on the image object itself
+// (img._thumbWrap / img._thumbDot) so re-renders can reuse and just update
+// it instead of tearing it down and recreating it from scratch.
+function ensureThumbWrap(img) {
+  if (img._thumbWrap) return img._thumbWrap;
+  const thumb = document.createElement('div');
+  thumb.className = 'fs-thumb';
+  thumb.draggable = true;
+  thumb.appendChild(ensureThumbCanvas(img));
+  const dot = document.createElement('span');
+  dot.className = 'fs-dot';
+  dot.style.display = 'none';
+  thumb.appendChild(dot);
+  // Click/drag handlers look the image up by identity at fire-time (via
+  // indexOf) rather than closing over the index at creation time — indices
+  // shift whenever images are added/removed/filtered, but the element (and
+  // the img object it belongs to) is reused across renders.
+  thumb.onclick = (e) => {
+    const idx = state.images.indexOf(img);
+    if (idx === -1) return;
+    if (e.ctrlKey || e.metaKey) toggleMultiSelect(idx);
+    else selectImage(idx);
+  };
+  thumb.ondragstart = (e) => {
+    state.categoryDragIdx = state.images.indexOf(img);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  thumb.ondragend = () => { state.categoryDragIdx = null; };
+  img._thumbWrap = thumb;
+  img._thumbDot = dot;
+  return thumb;
+}
+function renderFilmstrip() {
+  const track = $('filmstrip-track');
+  const indices = getVisibleImageIndices();
+  if (!state.images.length || !indices.length) {
+    track.innerHTML = '';
+    const e = document.createElement('div'); e.className = 'fs-empty';
+    e.textContent = state.images.length ? 'no images in this category' : 'no images open — drop files or use the folder icon';
+    track.appendChild(e);
+    return;
+  }
+  if (track.querySelector('.fs-empty')) track.innerHTML = '';
+
+  let activeEl = null;
+  const wanted = [];
+  indices.forEach(i => {
+    const img = state.images[i];
+    const thumb = ensureThumbWrap(img);
+    thumb.title = img.name;
+    // Real aspect ratio, not a forced 16:9 (or any other) box — a vertical
+    // shot shows up as a tall sliver, a panorama as a wide strip.
+    const ratio = img.w && img.h ? img.w / img.h : 1;
+    const wpx = `${Math.max(22, Math.min(160, Math.round(FS_THUMB_H * ratio)))}px`;
+    if (thumb.style.width !== wpx) thumb.style.width = wpx;
+    const isActive = i === state.activeIdx;
+    thumb.classList.toggle('active', isActive);
+    thumb.classList.toggle('multi-selected', state.multiSelected.has(i));
+    img._thumbDot.style.display = img.unsaved ? '' : 'none';
+    if (isActive) activeEl = thumb;
+    wanted.push(thumb);
+  });
+
+  // Reconcile DOM order against `wanted` by walking both in parallel and
+  // only moving/removing nodes that are actually out of place — no
+  // innerHTML reset, no recreated nodes, so unaffected thumbnails (the vast
+  // majority on any given edit) are never touched at all.
+  let node = track.firstChild;
+  for (const want of wanted) {
+    if (node === want) { node = node.nextSibling; continue; }
+    track.insertBefore(want, node);
+  }
+  while (node) {
+    const next = node.nextSibling;
+    if (!wanted.includes(node)) track.removeChild(node);
+    node = next;
+  }
+  // Smooth easing lives here, applied only to this "jump to the active
+  // thumbnail" case — not as a standing CSS property on the track (see the
+  // comment on #filmstrip-track), so it never fights normal wheel scrolling.
+  if (activeEl) activeEl.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+}
+// Hovering the filmstrip and scrolling pages it left/right instead of doing
+// nothing. Trackpads send a horizontal two-finger swipe as deltaX (deltaY
+// stays ~0), while a plain vertical mouse wheel only ever sends deltaY —
+// the old code read deltaY alone, so trackpad swipes were silently dropped
+// and only a literal vertical wheel did anything, which is most of what
+// made this feel unresponsive. Use whichever axis actually has motion.
+function onFilmstripWheel(e) {
+  e.preventDefault();
+  const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  $('filmstrip-track').scrollLeft += delta;
+}
+// Thin wrapper kept so every existing call site (save, undo/redo, close,
+// import, etc.) keeps working unchanged — it now drives both the category
+// panel and the filmstrip instead of a single flat list.
+function renderGallery() {
+  $('save-all-btn').disabled = !state.images.some(i => i.unsaved);
+  renderCategoryPanel();
+  renderFilmstrip();
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SAVE
+// ════════════════════════════════════════════════════════════════════
+function setAutoAdvance(on) {
+  state.autoAdvance = on;
+  $('tool-autoadvance').classList.toggle('active', on);
+  $('tool-autoadvance-tooltip').textContent = `Auto-next after save: ${on ? 'ON' : 'OFF'}`;
+}
+function toggleAutoAdvance() {
+  setAutoAdvance(!state.autoAdvance);
+  setStatus(`Auto-next after save: ${state.autoAdvance ? 'on' : 'off'}`, true);
+}
+// Jumps to the next image in gallery order after a save — the last step of
+// the select -> pixelate -> save -> next loop, so the workflow never needs
+// a mouse click just to move on to the next file.
+function advanceToNextImage(fromIdx) {
+  if (!state.autoAdvance) return;
+  const visible = getVisibleImageIndices();
+  const pos = visible.indexOf(fromIdx);
+  const next = pos >= 0 ? visible[pos + 1] : fromIdx + 1;
+  if (next !== undefined && next < state.images.length) {
+    selectImage(next);
+    const n = visible.length ? visible.indexOf(next) + 1 : next + 1;
+    const total = visible.length || state.images.length;
+    setStatus(`Saved — showing ${state.images[next].name} (${n}/${total})`, true);
+  } else {
+    setStatus('Saved — that was the last image', true);
+  }
+}
+// Read-only reference for whatever hotkeys are currently bound to a preset —
+// lives at the bottom of the toolbar since the panels that manage them
+// (Pixelate/Blur, top of toolbar) are opened one at a time.
+function toggleHotkeyGuide() {
+  const panel = $('panel-hotkeys');
+  const wasOpen = panel.classList.contains('open');
+  document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
+  $('tool-pixelate').classList.remove('active');
+  $('tool-blur').classList.remove('active');
+  if (!wasOpen) {
+    panel.classList.add('open');
+    renderHotkeyGuide();
+  }
+}
+function renderHotkeyGuide() {
+  const body = $('hotkey-guide-body');
+  body.innerHTML = '';
+
+  const groups = [
+    ['Tools', [['Move', 'R'], ['Select (cycles rect/ellipse/lasso)', 'S']]],
+    ['Selection', [
+      ['Add shape to selection', 'Ctrl + drag'],
+      ['Subtract shape from selection', 'Shift + drag'],
+      ['Select all', 'Ctrl + A'],
+      ['Deselect', 'Esc'],
+    ]],
+    ['Gallery', [
+      ['Multi-select images', 'Ctrl + click thumbnail'],
+    ]],
+    ['File', [['Save', 'Ctrl + S'], ['Fit + Save', 'C'], ['Undo', 'Ctrl + Z'], ['Redo', 'Ctrl + Y / Ctrl + Shift + Z']]],
+    ['View', [
+      ['Zoom in / out', '+ / −'],
+      ['100% zoom', '1'],
+      ['Fit to window', '0 / F'],
+      ['Previous / next image', '← / →'],
+      ['Hide all UI', 'H'],
+    ]],
+  ];
+  groups.forEach(([label, rows]) => {
+    const title = document.createElement('div'); title.className = 'hk-group-title'; title.textContent = label;
+    body.appendChild(title);
+    rows.forEach(([desc, key]) => {
+      const row = document.createElement('div'); row.className = 'hk-row';
+      const label2 = document.createElement('span'); label2.textContent = desc;
+      const kbd = document.createElement('kbd'); kbd.textContent = key;
+      row.appendChild(label2); row.appendChild(kbd);
+      body.appendChild(row);
+    });
+  });
+
+  const hasAny = presets.pixelate.some(p => p.key) || presets.blur.some(p => p.key);
+  if (!hasAny) return;
+  [['pixelate', 'Pixelate'], ['blur', 'Bokeh Blur']].forEach(([type, label]) => {
+    const withKeys = presets[type].filter(p => p.key);
+    if (!withKeys.length) return;
+    const title = document.createElement('div'); title.className = 'hk-group-title'; title.textContent = label;
+    body.appendChild(title);
+    withKeys.forEach(p => {
+      const row = document.createElement('div'); row.className = 'hk-row';
+      const label2 = document.createElement('span'); label2.textContent = `${p.value}px`;
+      const kbd = document.createElement('kbd'); kbd.textContent = labelForCombo(p.key);
+      row.appendChild(label2); row.appendChild(kbd);
+      body.appendChild(row);
+    });
+  });
+}
+async function saveImage() {
+  const img = state.images[state.activeIdx];
+  if (!img) { setStatus('No image to save', false); return; }
+  const savedIdx = state.activeIdx;
+  if (!img.path) { saveImageAs(); return; }
+  try {
+    await ensureFullSrc(img);
+    await window.electronAPI?.save?.(img.path, img.src);
+    img.unsaved = false; img.savedAt = img.historyIndex; renderGallery(); updateStatusBar();
+    setStatus(`Saved ${img.name}`, true);
+    advanceToNextImage(savedIdx);
+  } catch (e) {
+    setStatus(`Failed to save ${img.name}`, false);
+  }
+}
+async function saveImageAs() {
+  const img = state.images[state.activeIdx]; if (!img) return;
+  const savedIdx = state.activeIdx;
+  try {
+    await ensureFullSrc(img);
+    const action = window.electronAPI?.saveAs
+      ? window.electronAPI.saveAs(img.src, img.name)
+      : Promise.resolve(downloadFallback(img));
+    const path = await action;
+    if (path) {
+      img.path = path;
+      img.name = path.split(/[\\/]/).pop();
+      img.unsaved = false; img.savedAt = img.historyIndex; renderGallery(); updateStatusBar();
+      setStatus(`Saved ${img.name}`, true);
+      advanceToNextImage(savedIdx);
+    } else {
+      setStatus('Save cancelled', false);
+    }
+  } catch (e) {
+    setStatus('Save failed', false);
+  }
+}
+function downloadFallback(img) {
+  const a = document.createElement('a'); a.href = img.src; a.download = img.name; a.click();
+  return img.name;
+}
+async function saveAllChanges() {
+  const unsaved = state.images.filter(i => i.unsaved);
+  if (!unsaved.length) { setStatus('Nothing to save', true); return; }
+  let ok = 0, fail = 0;
+  for (const img of unsaved) {
+    try {
+      await ensureFullSrc(img);
+      if (img.path) {
+        await window.electronAPI.save(img.path, img.src);
+        img.unsaved = false; img.savedAt = img.historyIndex; ok++;
+      } else {
+        const path = await window.electronAPI.saveAs(img.src, img.name);
+        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+        else fail++;
+      }
+    } catch (e) { fail++; }
+  }
+  renderGallery(); updateStatusBar();
+  setStatus(fail ? `Saved ${ok}, ${fail} skipped` : `Saved all changes (${ok})`, fail === 0);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// METADATA OVERLAY
+// ════════════════════════════════════════════════════════════════════
+async function openMetaPanel() {
+  const img = state.images[state.activeIdx];
+  if (!img) { setStatus('No image open', false); return; }
+  await ensureFullSrc(img);
+  $('meta-filename').textContent = img.name;
+  const body = $('meta-body'); body.innerHTML = '';
+  // Collapse the full-metadata section back down every time the panel is
+  // (re)opened — otherwise reopening for a different image could show it
+  // already expanded, mid-transition from the last one.
+  $('meta-full-body').classList.remove('open');
+  $('meta-full-body').innerHTML = '';
+  $('meta-full-toggle').classList.remove('open');
+  $('meta-full-toggle-label').textContent = 'show full metadata';
+  const ext = img.name.includes('.') ? img.name.split('.').pop().toUpperCase() : '—';
+  const mp = ((img.w * img.h) / 1000000).toFixed(2);
+  const ratio = (() => { const g = (a, b) => b ? g(b, a % b) : a; const d = g(img.w, img.h) || 1; return `${img.w / d}:${img.h / d}`; })();
+  const b64len = img.src.length - (img.src.indexOf(',') + 1);
+  const bytes = Math.round(b64len * 0.75);
+  const sizeStr = bytes > 1048576 ? (bytes / 1048576).toFixed(2) + ' MB' : bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B';
+  const isNew = !img.path;
+  const rows = [
+    ['filename', img.name], ['format', ext], ['dimensions', `${img.w} × ${img.h} px`],
+    ['megapixels', mp + ' MP'], ['aspect', ratio], ['est. size', sizeStr], null,
+    ['status', img.unsaved ? 'unsaved' : 'saved'],
+    ['source', isNew ? 'created in app' : (img.path || 'opened from file')],
+  ];
+  rows.forEach(row => {
+    if (!row) { const s = document.createElement('div'); s.className = 'meta-sep'; body.appendChild(s); return; }
+    const r = document.createElement('div'); r.className = 'meta-row';
+    const k = document.createElement('span'); k.className = 'meta-key'; k.textContent = row[0];
+    const v = document.createElement('span'); v.className = 'meta-val'; v.textContent = row[1];
+    if (row[0] === 'status' && img.unsaved) v.style.color = 'var(--gold)';
+    r.appendChild(k); r.appendChild(v); body.appendChild(r);
+  });
+  $('overlay-meta').classList.add('open');
+}
+function closeMetaPanel(e) { if (e && e.target !== $('overlay-meta')) return; $('overlay-meta').classList.remove('open'); }
+function closeMetaPanelDirect() { $('overlay-meta').classList.remove('open'); }
+
+// ════════════════════════════════════════════════════════════════════
+// FULL METADATA — raw, unsorted dump of every tag the reader can find
+// (EXIF for JPEG, tEXt/iTXt/eXIf chunks for PNG). This is deliberately
+// separate from the curated summary above: it's only decoded the first
+// time someone clicks "show full metadata" (see toggleFullMeta), and the
+// result is cached on the image object so flipping it open/closed again
+// doesn't re-parse. Nothing here is sorted or filtered — it's presented
+// in the order it was found in the file, exactly as read.
+// ════════════════════════════════════════════════════════════════════
+const EXIF_TAGS = {
+  0x0100:'ImageWidth',0x0101:'ImageLength',0x0102:'BitsPerSample',0x0103:'Compression',
+  0x0106:'PhotometricInterpretation',0x010E:'ImageDescription',0x010F:'Make',0x0110:'Model',
+  0x0111:'StripOffsets',0x0112:'Orientation',0x0115:'SamplesPerPixel',0x0116:'RowsPerStrip',
+  0x0117:'StripByteCounts',0x011A:'XResolution',0x011B:'YResolution',0x011C:'PlanarConfiguration',
+  0x0128:'ResolutionUnit',0x0131:'Software',0x0132:'DateTime',0x013B:'Artist',0x013E:'WhitePoint',
+  0x013F:'PrimaryChromaticities',0x0211:'YCbCrCoefficients',0x0213:'YCbCrPositioning',
+  0x0214:'ReferenceBlackWhite',0x8298:'Copyright',0x8769:'ExifIFDPointer',0x8825:'GPSInfoIFDPointer',
+  0x829A:'ExposureTime',0x829D:'FNumber',0x8822:'ExposureProgram',0x8824:'SpectralSensitivity',
+  0x8827:'ISOSpeedRatings',0x8828:'OECF',0x8830:'SensitivityType',0x9000:'ExifVersion',
+  0x9003:'DateTimeOriginal',0x9004:'DateTimeDigitized',0x9101:'ComponentsConfiguration',
+  0x9102:'CompressedBitsPerPixel',0x9201:'ShutterSpeedValue',0x9202:'ApertureValue',
+  0x9203:'BrightnessValue',0x9204:'ExposureBiasValue',0x9205:'MaxApertureValue',
+  0x9206:'SubjectDistance',0x9207:'MeteringMode',0x9208:'LightSource',0x9209:'Flash',
+  0x920A:'FocalLength',0x9214:'SubjectArea',0x927C:'MakerNote',0x9286:'UserComment',
+  0x9290:'SubSecTime',0x9291:'SubSecTimeOriginal',0x9292:'SubSecTimeDigitized',
+  0xA000:'FlashpixVersion',0xA001:'ColorSpace',0xA002:'PixelXDimension',0xA003:'PixelYDimension',
+  0xA004:'RelatedSoundFile',0xA005:'InteropIFDPointer',0xA20B:'FlashEnergy',
+  0xA20E:'FocalPlaneXResolution',0xA20F:'FocalPlaneYResolution',0xA210:'FocalPlaneResolutionUnit',
+  0xA214:'SubjectLocation',0xA215:'ExposureIndex',0xA217:'SensingMethod',0xA300:'FileSource',
+  0xA301:'SceneType',0xA302:'CFAPattern',0xA401:'CustomRendered',0xA402:'ExposureMode',
+  0xA403:'WhiteBalance',0xA404:'DigitalZoomRatio',0xA405:'FocalLengthIn35mmFilm',
+  0xA406:'SceneCaptureType',0xA407:'GainControl',0xA408:'Contrast',0xA409:'Saturation',
+  0xA40A:'Sharpness',0xA40C:'SubjectDistanceRange',0xA420:'ImageUniqueID',0xA430:'CameraOwnerName',
+  0xA431:'BodySerialNumber',0xA432:'LensSpecification',0xA433:'LensMake',0xA434:'LensModel',
+  0xA435:'LensSerialNumber',
+};
+const GPS_TAGS = {
+  0x0000:'GPSVersionID',0x0001:'GPSLatitudeRef',0x0002:'GPSLatitude',0x0003:'GPSLongitudeRef',
+  0x0004:'GPSLongitude',0x0005:'GPSAltitudeRef',0x0006:'GPSAltitude',0x0007:'GPSTimeStamp',
+  0x0008:'GPSSatellites',0x0009:'GPSStatus',0x000A:'GPSMeasureMode',0x000B:'GPSDOP',
+  0x000C:'GPSSpeedRef',0x000D:'GPSSpeed',0x000E:'GPSTrackRef',0x000F:'GPSTrack',
+  0x0010:'GPSImgDirectionRef',0x0011:'GPSImgDirection',0x0012:'GPSMapDatum',0x001D:'GPSDateStamp',
+};
+function dataUrlToBytes(dataUrl) {
+  const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+// Walks one IFD starting at `offset` in a TIFF-structured buffer (`dv`,
+// `little` = byte order), pushing every entry it finds — in file order,
+// untouched — onto `out`, prefixed with which IFD it came from. Recurses
+// into the Exif/GPS/Interop sub-IFDs the moment it sees their pointer tag.
+function walkIFD(dv, tiffStart, offset, little, label, out, depth) {
+  if (depth > 4 || offset <= 0 || offset + 2 > dv.byteLength) return;
+  const count = dv.getUint16(offset, little);
+  let p = offset + 2;
+  for (let i = 0; i < count && p + 12 <= dv.byteLength; i++, p += 12) {
+    const tag = dv.getUint16(p, little);
+    const type = dv.getUint16(p + 2, little);
+    const num = dv.getUint32(p + 4, little);
+    const typeSizes = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8};
+    const size = (typeSizes[type] || 1) * num;
+    const valueOffset = size > 4 ? tiffStart + dv.getUint32(p + 8, little) : p + 8;
+    let value;
+    try {
+      if (type === 2) { // ASCII
+        let s = '';
+        for (let j = 0; j < num - 1; j++) s += String.fromCharCode(dv.getUint8(valueOffset + j));
+        value = s;
+      } else if (type === 3) { // SHORT
+        const arr = []; for (let j = 0; j < num; j++) arr.push(dv.getUint16(valueOffset + j * 2, little));
+        value = arr.length === 1 ? arr[0] : arr.join(', ');
+      } else if (type === 4) { // LONG
+        const arr = []; for (let j = 0; j < num; j++) arr.push(dv.getUint32(valueOffset + j * 4, little));
+        value = arr.length === 1 ? arr[0] : arr.join(', ');
+      } else if (type === 5 || type === 10) { // RATIONAL / SRATIONAL
+        const arr = [];
+        for (let j = 0; j < num; j++) {
+          const n = type === 5 ? dv.getUint32(valueOffset + j * 8, little) : dv.getInt32(valueOffset + j * 8, little);
+          const d = type === 5 ? dv.getUint32(valueOffset + j * 8 + 4, little) : dv.getInt32(valueOffset + j * 8 + 4, little);
+          arr.push(d ? (n / d).toFixed(n % d === 0 ? 0 : 4) : `${n}/${d}`);
+        }
+        value = arr.length === 1 ? arr[0] : arr.join(', ');
+      } else if (type === 7) { // UNDEFINED — show as text if printable, else hex
+        let printable = true; const bytes = [];
+        for (let j = 0; j < Math.min(num, 64); j++) { const b = dv.getUint8(valueOffset + j); bytes.push(b); if (b !== 0 && (b < 32 || b > 126)) printable = false; }
+        value = printable ? bytes.map(b => String.fromCharCode(b)).join('').replace(/\0+$/, '') : '0x' + bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+        if (num > 64) value += ` … (${num} bytes)`;
+      } else {
+        value = `(type ${type}, ${num} value${num === 1 ? '' : 's'})`;
+      }
+    } catch (e) { value = '(unreadable)'; }
+
+    if (tag === 0x8769) { walkIFD(dv, tiffStart, tiffStart + num_or(dv, p, little), little, 'Exif', out, depth + 1); continue; }
+    if (tag === 0x8825) { walkIFD(dv, tiffStart, tiffStart + num_or(dv, p, little), little, 'GPS', out, depth + 1); continue; }
+    if (tag === 0xA005) { walkIFD(dv, tiffStart, tiffStart + num_or(dv, p, little), little, 'Interop', out, depth + 1); continue; }
+
+    const table = label === 'GPS' ? GPS_TAGS : EXIF_TAGS;
+    const name = table[tag] || `Tag 0x${tag.toString(16).toUpperCase()}`;
+    out.push({ tag: `${label}: ${name}`, value });
+  }
+}
+function num_or(dv, entryOffset, little) { return dv.getUint32(entryOffset + 8, little); }
+
+function parseExifFromApp1(dv, app1Start) {
+  // app1Start points at "Exif\0\0"; the TIFF header follows immediately.
+  const tiffStart = app1Start + 6;
+  const byteOrder = dv.getUint16(tiffStart, false);
+  const little = byteOrder === 0x4949; // 'II'
+  const ifd0Offset = dv.getUint32(tiffStart + 4, little);
+  const out = [];
+  walkIFD(dv, tiffStart, ifd0Offset, little, 'IFD0', out, 0);
+  return out;
+}
+function parseJPEGFullMetadata(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = [];
+  let offset = 2; // skip SOI (FFD8)
+  while (offset + 4 <= bytes.length) {
+    if (dv.getUint8(offset) !== 0xFF) break;
+    const marker = dv.getUint8(offset + 1);
+    if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { offset += 2; continue; }
+    if (marker === 0xD9) break; // EOI
+    const segLen = dv.getUint16(offset + 2, false);
+    if (marker === 0xE1) { // APP1 — Exif or XMP
+      const tag = String.fromCharCode(dv.getUint8(offset+4), dv.getUint8(offset+5), dv.getUint8(offset+6), dv.getUint8(offset+7));
+      if (tag === 'Exif') out.push(...parseExifFromApp1(dv, offset + 4));
+      else {
+        // Likely XMP packet — dump as a single raw-text entry, untouched.
+        let s = '';
+        for (let j = 4; j < segLen - 2 && offset + 2 + j < bytes.length; j++) s += String.fromCharCode(dv.getUint8(offset + 2 + j));
+        out.push({ tag: 'APP1 (raw)', value: s.slice(0, 2000) + (s.length > 2000 ? ' … (truncated)' : '') });
+      }
+    }
+    offset += 2 + segLen;
+  }
+  return out;
+}
+function parsePNGFullMetadata(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = [];
+  let offset = 8; // skip PNG signature
+  while (offset + 8 <= bytes.length) {
+    const len = dv.getUint32(offset, false);
+    const type = String.fromCharCode(dv.getUint8(offset+4), dv.getUint8(offset+5), dv.getUint8(offset+6), dv.getUint8(offset+7));
+    const dataStart = offset + 8;
+    if (type === 'IHDR') {
+      out.push({ tag: 'PNG: Width', value: dv.getUint32(dataStart, false) });
+      out.push({ tag: 'PNG: Height', value: dv.getUint32(dataStart + 4, false) });
+      out.push({ tag: 'PNG: BitDepth', value: dv.getUint8(dataStart + 8) });
+      out.push({ tag: 'PNG: ColorType', value: dv.getUint8(dataStart + 9) });
+      out.push({ tag: 'PNG: Interlace', value: dv.getUint8(dataStart + 12) });
+    } else if (type === 'tEXt') {
+      let s = ''; for (let j = 0; j < len; j++) s += String.fromCharCode(dv.getUint8(dataStart + j));
+      const nul = s.indexOf('\0');
+      out.push({ tag: `PNG tEXt: ${nul >= 0 ? s.slice(0, nul) : '(untitled)'}`, value: nul >= 0 ? s.slice(nul + 1) : s });
+    } else if (type === 'iTXt') {
+      let s = ''; for (let j = 0; j < len; j++) s += String.fromCharCode(dv.getUint8(dataStart + j));
+      const nul = s.indexOf('\0');
+      out.push({ tag: `PNG iTXt: ${nul >= 0 ? s.slice(0, nul) : '(untitled)'}`, value: nul >= 0 ? s.slice(nul + 1).replace(/[\0]/g, ' ') : s });
+    } else if (type === 'zTXt') {
+      out.push({ tag: 'PNG zTXt', value: '(compressed text chunk present, not decompressed)' });
+    } else if (type === 'eXIf') {
+      const exifBytes = bytes.subarray(dataStart, dataStart + len);
+      const exifDv = new DataView(exifBytes.buffer, exifBytes.byteOffset, exifBytes.byteLength);
+      const byteOrder = exifDv.getUint16(0, false);
+      const little = byteOrder === 0x4949;
+      const ifd0Offset = exifDv.getUint32(4, little);
+      walkIFD(exifDv, 0, ifd0Offset, little, 'IFD0', out, 0);
+    } else if (type !== 'IDAT' && type !== 'IEND') {
+      out.push({ tag: `PNG chunk: ${type}`, value: `${len} bytes` });
+    }
+    offset = dataStart + len + 4; // + CRC
+  }
+  return out;
+}
+async function readFullMetadata(img) {
+  if (img._fullMeta) return img._fullMeta;
+  let entries = [];
+  try {
+    const bytes = dataUrlToBytes(img.src);
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8) entries = parseJPEGFullMetadata(bytes);
+    else if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) entries = parsePNGFullMetadata(bytes);
+    else entries = [{ tag: 'Note', value: `No embedded EXIF/text metadata reader for this format (${img.name.split('.').pop().toUpperCase()}) — showing header info only.` }];
+  } catch (e) {
+    entries = [{ tag: 'Error', value: 'Could not parse metadata from this file.' }];
+  }
+  if (!entries.length) entries = [{ tag: 'Note', value: 'No embedded metadata found in this file.' }];
+  img._fullMeta = entries;
+  return entries;
+}
+async function toggleFullMeta() {
+  const toggle = $('meta-full-toggle'), label = $('meta-full-toggle-label'), full = $('meta-full-body');
+  const isOpen = full.classList.contains('open');
+  if (isOpen) {
+    full.classList.remove('open'); toggle.classList.remove('open'); label.textContent = 'show full metadata';
+    return;
+  }
+  const img = state.images[state.activeIdx];
+  if (!img) return;
+  full.innerHTML = '<div class="meta-full-loading">reading full metadata…</div>';
+  full.classList.add('open'); toggle.classList.add('open'); label.textContent = 'hide full metadata';
+  // Only decoded now, on demand — parsing every tag out of the raw file
+  // bytes up front (for every image, whether anyone looks or not) is what
+  // would cause the lag; this way it's paid for once, lazily, per image.
+  const entries = await readFullMetadata(img);
+  full.innerHTML = '';
+  entries.forEach(({ tag, value }) => {
+    const valStr = String(value);
+    // Long or multi-line values (huge embedded prompt/JSON blobs are the
+    // usual culprit) get their own textarea rather than being crammed
+    // into the key/value row layout, where they'd either overflow or
+    // force the whole panel to stretch.
+    if (valStr.length > 100 || valStr.includes('\n')) {
+      const wrap = document.createElement('div'); wrap.className = 'meta-full-longval';
+      const k = document.createElement('span'); k.className = 'meta-key'; k.textContent = tag;
+      const ta = document.createElement('textarea');
+      ta.readOnly = true; ta.spellcheck = false; ta.value = valStr;
+      wrap.appendChild(k); wrap.appendChild(ta); full.appendChild(wrap);
+      return;
+    }
+    const r = document.createElement('div'); r.className = 'meta-row';
+    const k = document.createElement('span'); k.className = 'meta-key'; k.textContent = tag;
+    const v = document.createElement('span'); v.className = 'meta-val'; v.textContent = valStr;
+    r.appendChild(k); r.appendChild(v); full.appendChild(r);
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// CLOSE / CONFIRM
+// ════════════════════════════════════════════════════════════════════
+function requestCloseImage(idx) {
+  if (state.images[idx]?.unsaved) {
+    $('confirm-msg').textContent = `"${state.images[idx].name}" has unsaved changes. Close anyway?`;
+    $('overlay-confirm').classList.add('open');
+    state.confirmCallback = action => {
+      $('overlay-confirm').classList.remove('open');
+      if (action === 'close') removeImage(idx);
+    };
+  } else {
+    removeImage(idx);
+  }
+}
+function attemptClose() {
+  const unsaved = state.images.filter(i => i.unsaved);
+  if (!unsaved.length) { doCloseApp(); return; }
+  $('confirm-msg').textContent = `You have ${unsaved.length} unsaved image${unsaved.length > 1 ? 's' : ''}. Close anyway?`;
+  $('overlay-confirm').classList.add('open');
+  state.confirmCallback = action => {
+    $('overlay-confirm').classList.remove('open');
+    if (action === 'close') doCloseApp();
+  };
+}
+function confirmAction(action) { if (state.confirmCallback) state.confirmCallback(action); state.confirmCallback = null; }
+function doCloseApp() { if (window.electronAPI?.quit) window.electronAPI.quit(); else window.close(); }
+
+// ════════════════════════════════════════════════════════════════════
+// DRAG & DROP / FILE INPUT
+// ════════════════════════════════════════════════════════════════════
+function onDragOver(e) { e.preventDefault(); wrap.classList.add('dragover'); }
+function onDragLeave(e) { if (!wrap.contains(e.relatedTarget)) wrap.classList.remove('dragover'); }
+// Dropping a folder straight from the OS file explorer (e.g. Explorer on a
+// second monitor) works the same as "Open Folder": Electron attaches a real
+// absolute `.path` to every dropped File, including folders, but a plain
+// File object can't be read as a directory from the renderer. So we hand the
+// dropped paths to the main process, which stats each one and reads full
+// image lists for any that turn out to be directories. Loose image files
+// dropped alongside (or instead of) folders still go through addImages as
+// before.
+async function onDrop(e) {
+  e.preventDefault();
+  wrap.classList.remove('dragover');
+  const files = Array.from(e.dataTransfer.files || []);
+  if (!files.length) return;
+
+  const withPaths = files.filter(f => f.path);
+  if (window.electronAPI?.inspectDroppedPaths && withPaths.length) {
+    let inspected = null;
+    try {
+      inspected = await window.electronAPI.inspectDroppedPaths(withPaths.map(f => f.path));
+    } catch (e) { inspected = null; }
+    if (inspected) {
+      const dirPaths = new Set(inspected.filter(r => r.isDirectory).map(r => r.path));
+      if (dirPaths.size) {
+        const looseFiles = files.filter(f => !f.path || !dirPaths.has(f.path));
+        for (const dir of inspected.filter(r => r.isDirectory)) {
+          await importFolderAsCategory(dir.name, dir.images);
+        }
+        if (looseFiles.length) await addImages(looseFiles);
+        return;
+      }
+    }
+  }
+  addImages(files);
+}
+function triggerFileOpen() { $('file-input').click(); }
+function onFileInput(e) { addImages(e.target.files); e.target.value = ''; }
+
+// ════════════════════════════════════════════════════════════════════
+// HIDE/SHOW ALL UI
+// ════════════════════════════════════════════════════════════════════
+function toggleAllUI() {
+  state.uiHidden = !state.uiHidden;
+  document.body.classList.toggle('ui-hidden', state.uiHidden);
+  setStatus(state.uiHidden ? 'UI hidden' : 'UI shown', true);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// KEYBOARD
+// ════════════════════════════════════════════════════════════════════
+function comboFromEvent(e) {
+  const parts = [];
+  if (e.ctrlKey || e.metaKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  let key = e.key.toLowerCase();
+  if (key === ' ') key = 'space';
+  parts.push(key);
+  return parts.join('+');
+}
+document.addEventListener('keydown', e => {
+  // Hotkey-assignment capture mode takes priority over everything else
+  if (state.armingPreset) {
+    e.preventDefault();
+    const { type } = state.armingPreset;
+    if (e.key === 'Escape') {
+      state.armingPreset = null; renderPresets(type);
+      setStatus('Hotkey assignment cancelled', false);
+      return;
+    }
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return; // wait for a real key
+    const combo = comboFromEvent(e);
+    const { idx } = state.armingPreset;
+    if (RESERVED_COMBOS.has(combo)) {
+      setStatus(`"${labelForCombo(combo)}" is reserved`, false);
+      state.armingPreset = null; renderPresets(type);
+      return;
+    }
+    const dupe = findPresetByCombo(combo);
+    if (dupe) {
+      setStatus(`"${labelForCombo(combo)}" is already assigned`, false);
+      state.armingPreset = null; renderPresets(type);
+      return;
+    }
+    presets[type][idx].key = combo;
+    savePresets();
+    state.armingPreset = null;
+    renderPresets(type);
+    setStatus(`Hotkey ${labelForCombo(combo)} assigned`, true);
+    return;
+  }
+
+  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+    if (e.key === 'Escape') document.activeElement.blur();
+    return;
+  }
+
+  // Preset hotkeys (pixelate/blur presets with an assigned key)
+  const combo = comboFromEvent(e);
+  const match = findPresetByCombo(combo);
+  if (match) { e.preventDefault(); runFilter(match.type, match.value); return; }
+
+  if (e.key === 'Escape') {
+    closeMetaPanelDirect();
+    closeContextMenu();
+    document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
+    $('tool-pixelate').classList.remove('active');
+    $('tool-blur').classList.remove('active');
+    const img = state.images[state.activeIdx];
+    const hadSelection = img && maskHasSelection(img.mask);
+    clearSelection();
+    if (hadSelection) { pushHistory(img, 'Deselect', { pixelsChanged: false }); renderGallery(); updateStatusBar(); }
+    if (state.multiSelected.size) { state.multiSelected.clear(); renderGallery(); }
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+    e.preventDefault(); saveImage();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && e.shiftKey) {
+    e.preventDefault(); redo();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault(); undo();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+    e.preventDefault(); redo();
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    if (state.currentTool !== 'select') setTool('select');
+    selectAll();
+  } else if (e.key === 's' || e.key === 'S') {
+    pressS();
+  } else if (e.key === 'r' || e.key === 'R') {
+    pressR();
+  } else if (e.key === 'h' || e.key === 'H') {
+    toggleAllUI();
+  } else if (e.key === 'c' || e.key === 'C') {
+    // Fit-then-save in one press: same two actions as pressing F (fit to
+    // window) followed by Ctrl+S (save), just chained under one key.
+    e.preventDefault();
+    fitImage();
+    saveImage();
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    if (state.activeIdx > 0) { selectImage(state.activeIdx - 1); setStatus(`Showing ${state.images[state.activeIdx].name}`, true); }
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    if (state.activeIdx < state.images.length - 1) { selectImage(state.activeIdx + 1); setStatus(`Showing ${state.images[state.activeIdx].name}`, true); }
+  } else if (e.key === '+' || e.key === '=') {
+    zoomBy(0.25);
+  } else if (e.key === '-') {
+    zoomBy(-0.25);
+  } else if (e.key === '1') {
+    zoomTo(1);
+  } else if (e.key === '0' || e.key === 'f' || e.key === 'F') {
+    fitImage();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════════════════
+document.addEventListener('click', e => {
+  const menu = $('context-menu');
+  if (menu.classList.contains('open') && !menu.contains(e.target)) closeContextMenu();
+});
+
+// Tooltips near the edge of the window (the "Open folder…" button sits
+// right against the left edge, the history toggle against the right edge,
+// etc.) can compute a position that pushes part of their text past the
+// window bounds. Since the app window itself doesn't scroll, that's not
+// "off-screen" — it's just invisible, clipped by the window edge. Nudge
+// the tooltip back inward with a margin offset (applied via margin so it
+// stacks cleanly with each tooltip's own centering/alignment transform)
+// right before it becomes visible.
+function fitTooltipToViewport(wrapperEl) {
+  const tip = wrapperEl.querySelector('.tool-tooltip');
+  if (!tip) return;
+  tip.style.marginLeft = '';
+  tip.style.marginTop = '';
+  const margin = 6;
+  const rect = tip.getBoundingClientRect();
+  let dx = 0, dy = 0;
+  if (rect.left < margin) dx = margin - rect.left;
+  else if (rect.right > window.innerWidth - margin) dx = (window.innerWidth - margin) - rect.right;
+  if (rect.top < margin) dy = margin - rect.top;
+  else if (rect.bottom > window.innerHeight - margin) dy = (window.innerHeight - margin) - rect.bottom;
+  if (dx) tip.style.marginLeft = dx + 'px';
+  if (dy) tip.style.marginTop = dy + 'px';
+}
+document.querySelectorAll('.tool-btn, .qa-btn, .history-toggle-btn').forEach(el => {
+  el.addEventListener('mouseenter', () => fitTooltipToViewport(el));
+});
+
+loadPresets();
+setGalleryState(state.galleryState);
+setTool(state.currentTool);
+updateSelectIcon();
+$('tool-history').classList.toggle('active', !state.historyCollapsed);
+setAutoAdvance(state.autoAdvance);
+renderGallery();
+updateStatusBar();
+renderHistoryPanel();
+setStatus('Ready', true);
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# === Node / Electron (editor, reviewer) ===
+node_modules/
+dist/
+out/
+*.log
+npm-debug.log*
+
+# electron-builder artifacts
+*.exe
+*.exe.blockmap
+*.dmg
+*.AppImage
+*.deb
+*.snap
+*.blockmap
+builder-debug.yml
+builder-effective-config.yaml
+
+# === Python / PySide6 (indexer) ===
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.metadata_cache.json
+
+# app-generated logs
+logs/
+*.log
+
+# indexer scripts (not part of the shipped app)
+indexer/scripts/
+
+# === OS cruft ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Editor / IDE ===
+.vscode/
+.idea/
+*.swp
+
+# === Env / secrets ===
+.env
+.env.local
