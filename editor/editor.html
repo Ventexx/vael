@@ -270,6 +270,20 @@
   .fp-add-preset:hover { color: var(--text); border-color: var(--accent-dim); }
   .fp-empty { font-size: 10px; color: var(--text-dim); text-align: center; padding: 8px 0; }
 
+  /* Template + Save combo panel — list of every pixelate/blur preset to
+     pick as "the" template, plus the same key-capture control used for
+     regular preset hotkeys (reuses .preset-key below). */
+  #template-save-list { max-height: 180px; overflow-y: auto; margin-bottom: 4px; }
+  .tpl-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
+    border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: 11px; color: var(--text);
+  }
+  .tpl-row:hover { border-color: var(--border2); }
+  .tpl-row.selected { border-color: var(--accent-dim); background: var(--accent-faint); color: var(--accent); }
+  .tpl-row-type { font-size: 9px; text-transform: uppercase; letter-spacing: .03em; color: var(--text-dim); flex-shrink: 0; }
+  .tpl-row.selected .tpl-row-type { color: var(--accent); }
+  .tpl-row-val { flex: 1; text-align: right; }
+
   /* HOTKEY GUIDE — read-only reference, lives bottom-left near the toolbar
      rather than top-left like the pixelate/blur panels (which hold live
      controls). Wider than the other filter panels, and its body scrolls,
@@ -285,6 +299,11 @@
     background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px; padding: 1px 6px;
     color: var(--accent); font-family: var(--font); font-size: 10px;
   }
+  .hk-row kbd.hk-kbd-btn { cursor: pointer; }
+  .hk-row kbd.hk-kbd-btn:hover { border-color: var(--accent-dim); color: var(--text-bright); }
+  .hk-row-featured span { color: var(--gold); }
+  .hk-row-featured kbd.hk-kbd-btn { color: var(--gold); border-color: rgba(232,184,75,0.4); }
+  .hk-row-featured kbd.hk-kbd-btn:hover { color: var(--gold); border-color: var(--gold); }
 
   /* DOCKED PANELS — History stacked above Categories, split 2/3 (history) to
      1/3 (categories) of the rail's vertical space. */
@@ -626,6 +645,20 @@
         <button class="fp-add-preset" onclick="addPreset('blur')">+ save current as preset</button>
       </div>
 
+      <!-- TEMPLATE + SAVE COMBO PANEL — configures the one special "apply this
+           preset, then save" hotkey. Not opened from the toolbar like
+           Pixelate/Blur; opened by clicking its entry in the Hotkeys guide. -->
+      <div class="filter-panel" id="panel-template-save">
+        <div class="fp-head">Template + Save Combo <button class="fp-close" onclick="toggleTemplateSavePanel()">×</button></div>
+        <div class="fp-label">template</div>
+        <div id="template-save-list"></div>
+        <div id="template-save-hotkey-section">
+          <div class="fp-divider"></div>
+          <div class="fp-label">hotkey</div>
+          <div id="template-save-key-row"></div>
+        </div>
+      </div>
+
       <!-- HOTKEY GUIDE (bottom-left, near the toolbar button that opens it) -->
       <div class="filter-panel" id="panel-hotkeys">
         <div class="fp-head">Hotkeys <button class="fp-close" onclick="toggleHotkeyGuide()">×</button></div>
@@ -755,6 +788,7 @@ const state = {
   uiHidden: false,
   confirmCallback: null,
   armingPreset: null,      // { type, idx } while capturing a hotkey
+  armingTemplateSave: false, // true while capturing a hotkey for the Template + Save combo
   filterBusy: false,       // true while a bokeh blur worker job is in flight
   autoAdvance: true,       // jump to the next image automatically after a save
   historyCollapsed: false, // docked history panel collapsed to save side-rail space
@@ -771,9 +805,15 @@ const SHAPE_ICONS = {
   lasso:   '<path d="M6 12c0-3.3 2.7-6 6-6s6 2.7 6 6c0 2.5-1.5 4.6-3.7 5.5L12 21l-2.3-3.5C7.5 16.6 6 14.5 6 12z" stroke-dasharray="4 2"/>',
 };
 const GALLERY_STATES = ['hidden', 'side'];
-const RESERVED_COMBOS = new Set(['s','r','escape','h','f','0','1','+','=','-','c','ctrl+s','ctrl+a','ctrl+z','ctrl+y','ctrl+shift+z','arrowleft','arrowright']);
+const RESERVED_COMBOS = new Set(['s','r','escape','h','f','0','1','+','=','-','ctrl+s','ctrl+a','ctrl+z','ctrl+y','ctrl+shift+z','arrowleft','arrowright']);
 
-let presets = { pixelate: [], blur: [] };
+// templateSaveKey lives on the same persisted blob as the pixelate/blur
+// presets themselves (see loadPresets/savePresets) since it's really just
+// another saved setting: "which preset + which key" for the Template + Save
+// combo. The chosen preset is marked on the preset object itself
+// (`.templateSave = true`) rather than referenced by index, so it survives
+// reordering/deletion of unrelated presets cleanly.
+let presets = { pixelate: [], blur: [], templateSaveKey: null };
 
 // ════════════════════════════════════════════════════════════════════
 // DOM REFS
@@ -1760,6 +1800,7 @@ function loadPresets() {
   const isFirstRun = !raw;
   presets.pixelate = presets.pixelate || [];
   presets.blur = presets.blur || [];
+  presets.templateSaveKey = presets.templateSaveKey || null; // older saves won't have this field
   // First-ever launch: seed one ready-to-go pixelate preset on P so the
   // "select -> hotkey -> save -> next" loop works immediately, no setup.
   if (isFirstRun && presets.pixelate.length === 0) {
@@ -1834,6 +1875,7 @@ function deletePreset(type, idx) {
   presets[type].splice(idx, 1);
   savePresets();
   renderPresets(type);
+  if ($('panel-template-save').classList.contains('open')) renderTemplateSavePanel();
   setStatus('Preset deleted', true);
 }
 function armHotkey(type, idx) {
@@ -1847,6 +1889,82 @@ function findPresetByCombo(combo) {
     if (idx !== -1) return { type, idx, value: presets[type][idx].value };
   }
   return null;
+}
+
+// ── Template + Save combo ──────────────────────────────────────────
+// A single special hotkey: applies one chosen preset ("template"), then
+// saves. The chosen preset is flagged with `.templateSave = true` on the
+// preset object itself (only one across pixelate+blur at a time), and the
+// combo's own key lives at presets.templateSaveKey.
+function getTemplateSaveTarget() {
+  for (const type of ['pixelate', 'blur']) {
+    const idx = presets[type].findIndex(p => p.templateSave);
+    if (idx !== -1) return { type, idx, value: presets[type][idx].value };
+  }
+  return null;
+}
+function selectTemplateSaveTarget(type, idx) {
+  presets.pixelate.forEach(p => delete p.templateSave);
+  presets.blur.forEach(p => delete p.templateSave);
+  presets[type][idx].templateSave = true;
+  savePresets();
+  renderTemplateSavePanel();
+  setStatus(`Template set: ${type === 'pixelate' ? 'Pixelate' : 'Bokeh Blur'} ${presets[type][idx].value}px`, true);
+}
+function armTemplateSaveHotkey() {
+  state.armingTemplateSave = true;
+  renderTemplateSavePanel();
+  setStatus('Press a key to assign (Esc to cancel)…', true);
+}
+function toggleTemplateSavePanel() {
+  const panel = $('panel-template-save');
+  const wasOpen = panel.classList.contains('open');
+  document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
+  $('tool-pixelate').classList.remove('active');
+  $('tool-blur').classList.remove('active');
+  if (!wasOpen) {
+    panel.classList.add('open');
+    renderTemplateSavePanel();
+  }
+}
+function renderTemplateSavePanel() {
+  const list = $('template-save-list');
+  const hotkeySection = $('template-save-hotkey-section');
+  const keyRow = $('template-save-key-row');
+  list.innerHTML = '';
+  keyRow.innerHTML = '';
+
+  const all = [
+    ...presets.pixelate.map((p, i) => ({ type: 'pixelate', idx: i, value: p.value, label: 'Pixelate' })),
+    ...presets.blur.map((p, i) => ({ type: 'blur', idx: i, value: p.value, label: 'Bokeh Blur' })),
+  ];
+
+  if (!all.length) {
+    const e = document.createElement('div'); e.className = 'fp-empty';
+    e.textContent = 'No templates yet — save a preset in the Pixelate or Blur panel first.';
+    list.appendChild(e);
+    hotkeySection.style.display = 'none';
+    return;
+  }
+  hotkeySection.style.display = '';
+
+  const target = getTemplateSaveTarget();
+  all.forEach(entry => {
+    const row = document.createElement('div'); row.className = 'tpl-row';
+    const isSel = target && target.type === entry.type && target.idx === entry.idx;
+    if (isSel) row.classList.add('selected');
+    const typeSpan = document.createElement('span'); typeSpan.className = 'tpl-row-type'; typeSpan.textContent = entry.label;
+    const valSpan = document.createElement('span'); valSpan.className = 'tpl-row-val'; valSpan.textContent = entry.value + 'px';
+    row.appendChild(typeSpan); row.appendChild(valSpan);
+    row.onclick = () => selectTemplateSaveTarget(entry.type, entry.idx);
+    list.appendChild(row);
+  });
+
+  const key = document.createElement('span');
+  key.className = 'preset-key' + (state.armingTemplateSave ? ' armed' : '');
+  key.textContent = state.armingTemplateSave ? 'press a key…' : (presets.templateSaveKey ? labelForCombo(presets.templateSaveKey) : 'set key');
+  key.onclick = () => armTemplateSaveHotkey();
+  keyRow.appendChild(key);
 }
 function filterLabel(type, value) { return `${type === 'pixelate' ? 'Pixelate' : 'Bokeh Blur'} (${value}px)`; }
 function setFiltersBusy(busy) {
@@ -2782,7 +2900,7 @@ function renderHotkeyGuide() {
     ['Gallery', [
       ['Multi-select images', 'Ctrl + click thumbnail'],
     ]],
-    ['File', [['Save', 'Ctrl + S'], ['Fit + Save', 'C'], ['Undo', 'Ctrl + Z'], ['Redo', 'Ctrl + Y / Ctrl + Shift + Z']]],
+    ['File', [['Save', 'Ctrl + S'], ['Undo', 'Ctrl + Z'], ['Redo', 'Ctrl + Y / Ctrl + Shift + Z']]],
     ['View', [
       ['Zoom in / out', '+ / −'],
       ['100% zoom', '1'],
@@ -2801,6 +2919,18 @@ function renderHotkeyGuide() {
       row.appendChild(label2); row.appendChild(kbd);
       body.appendChild(row);
     });
+    if (label === 'File') {
+      // Not a fixed key like the rows above — this one's user-configured,
+      // so its own label doubles as the button that opens the setup panel.
+      const row = document.createElement('div'); row.className = 'hk-row hk-row-featured';
+      const label2 = document.createElement('span'); label2.textContent = 'Template + Save Combo';
+      const kbd = document.createElement('kbd'); kbd.className = 'hk-kbd-btn';
+      kbd.textContent = presets.templateSaveKey ? labelForCombo(presets.templateSaveKey) : 'set up…';
+      kbd.title = 'Click to choose a template and hotkey';
+      kbd.onclick = () => toggleTemplateSavePanel();
+      row.appendChild(label2); row.appendChild(kbd);
+      body.appendChild(row);
+    }
   });
 
   const hasAny = presets.pixelate.some(p => p.key) || presets.blur.some(p => p.key);
@@ -3247,6 +3377,33 @@ function comboFromEvent(e) {
 }
 document.addEventListener('keydown', e => {
   // Hotkey-assignment capture mode takes priority over everything else
+  if (state.armingTemplateSave) {
+    e.preventDefault();
+    if (e.key === 'Escape') {
+      state.armingTemplateSave = false; renderTemplateSavePanel();
+      setStatus('Hotkey assignment cancelled', false);
+      return;
+    }
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return; // wait for a real key
+    const combo = comboFromEvent(e);
+    if (RESERVED_COMBOS.has(combo)) {
+      setStatus(`"${labelForCombo(combo)}" is reserved`, false);
+      state.armingTemplateSave = false; renderTemplateSavePanel();
+      return;
+    }
+    const dupe = findPresetByCombo(combo);
+    if (dupe) {
+      setStatus(`"${labelForCombo(combo)}" is already assigned`, false);
+      state.armingTemplateSave = false; renderTemplateSavePanel();
+      return;
+    }
+    presets.templateSaveKey = combo;
+    savePresets();
+    state.armingTemplateSave = false;
+    renderTemplateSavePanel();
+    setStatus(`Hotkey ${labelForCombo(combo)} assigned`, true);
+    return;
+  }
   if (state.armingPreset) {
     e.preventDefault();
     const { type } = state.armingPreset;
@@ -3263,7 +3420,7 @@ document.addEventListener('keydown', e => {
       state.armingPreset = null; renderPresets(type);
       return;
     }
-    const dupe = findPresetByCombo(combo);
+    const dupe = findPresetByCombo(combo) || (presets.templateSaveKey === combo ? true : null);
     if (dupe) {
       setStatus(`"${labelForCombo(combo)}" is already assigned`, false);
       state.armingPreset = null; renderPresets(type);
@@ -3286,6 +3443,15 @@ document.addEventListener('keydown', e => {
   const combo = comboFromEvent(e);
   const match = findPresetByCombo(combo);
   if (match) { e.preventDefault(); runFilter(match.type, match.value); return; }
+
+  // Template + Save combo: applies the chosen preset, then saves.
+  if (presets.templateSaveKey && combo === presets.templateSaveKey) {
+    e.preventDefault();
+    const target = getTemplateSaveTarget();
+    if (!target) { setStatus('Template + Save: no template selected', false); return; }
+    Promise.resolve(runFilter(target.type, target.value)).then(() => saveImage());
+    return;
+  }
 
   if (e.key === 'Escape') {
     closeMetaPanelDirect();
@@ -3316,12 +3482,6 @@ document.addEventListener('keydown', e => {
     pressR();
   } else if (e.key === 'h' || e.key === 'H') {
     toggleAllUI();
-  } else if (e.key === 'c' || e.key === 'C') {
-    // Fit-then-save in one press: same two actions as pressing F (fit to
-    // window) followed by Ctrl+S (save), just chained under one key.
-    e.preventDefault();
-    fitImage();
-    saveImage();
   } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
     if (state.activeIdx > 0) { selectImage(state.activeIdx - 1); setStatus(`Showing ${state.images[state.activeIdx].name}`, true); }

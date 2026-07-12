@@ -1781,7 +1781,7 @@ class FolderSection(QWidget):
             btn.setText("Copy")
             btn.setObjectName("folderCopyBtn")
             btn.setToolTip("Copy Folder Tag")
-            btn.setVisible(False)  # shown only when expanded AND hovered
+            btn.setVisible(False)  # shown for as long as the folder is expanded
             btn.setFixedHeight(16)
             btn.adjustSize()
             btn.clicked.connect(self._copy_meta_value)
@@ -1879,12 +1879,11 @@ class FolderSection(QWidget):
             QApplication.clipboard().setText(self._copy_value)
 
     def _update_copy_btn_visibility(self) -> None:
-        """Copy pill only ever shows for an OPEN folder while actively
-        hovered -- never sits there permanently just because it's expanded."""
+        """Copy pill shows for as long as the folder is expanded, regardless
+        of hover state."""
         if self._copy_btn is None:
             return
-        hovering = self._header_wrap.underMouse()
-        self._copy_btn.setVisible(self._expanded and hovering)
+        self._copy_btn.setVisible(self._expanded)
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self._header_wrap and event.type() in (
