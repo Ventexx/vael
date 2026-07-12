@@ -2422,6 +2422,11 @@ function removeImage(idx) {
     state.activeIdx = -1;
     displayCanvas.style.display = 'none';
     dropZone.classList.remove('has-image');
+    // No image left means there's nothing left to select or undo/redo —
+    // without this, a selection outline from the closed image kept
+    // floating on screen and the history panel kept listing its old steps.
+    clearSelection();
+    renderHistoryPanel();
   } else {
     state.activeIdx = -1;
     selectImage(Math.min(idx, state.images.length - 1));
@@ -2509,6 +2514,12 @@ function removeImages(indices) {
     // though nothing is open anymore — e.g. deleting a category that held
     // the currently-active image.
     updateStatusBar();
+    // Same idea for selection + history: deleting a category (or any batch
+    // removal) that empties the canvas left the last selection outline on
+    // screen and the history panel still listing the deleted image's steps,
+    // since neither is tied to canvas visibility on its own.
+    clearSelection();
+    renderHistoryPanel();
     return;
   }
 
