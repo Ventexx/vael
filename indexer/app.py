@@ -3476,45 +3476,31 @@ class MainWindow(QMainWindow):
         self.resize(1000, 720)
         # ── Restore last window geometry from prefs ────────────────────────
         #
-        # We use Qt's own saveGeometry()/restoreGeometry() pair rather than
-        # hand-tracking x/y/width/height. Those are a matched, frame-aware
-        # contract: saveGeometry() encodes the *actual* on-screen frame
-        # geometry (accounting for the native/custom frame this window ends
-        # up with on each platform), and restoreGeometry() reconstructs
-        # exactly that -- so the window reopens at the same size it was
-        # closed at instead of drifting a little wider each time.
+        # We store plain x/y/width/height ints rather than Qt's own
+        # saveGeometry()/restoreGeometry() blob. restoreGeometry() looks
+        # appealing (frame-aware, handles maximized state, etc.) but it
+        # also silently clamps the restored *size* to fit the current
+        # screen's available geometry, and -- critically -- repositions
+        # the window as part of that clamping even when nothing is
+        # actually off-screen. That fights exactly the kind of placement
+        # people use a second monitor for: dragged flush to an edge and
+        # stretched close to the full height. Plain move()/resize() with
+        # explicit numbers has none of that "helpful" behaviour -- it
+        # reproduces the exact saved geometry every time.
         if not DEV_MODE:
             _prefs = _load_prefs()
-            _restored = False
-            _geo_hex = _prefs.get("main_window_geometry_v2")
-            if isinstance(_geo_hex, str):
-                try:
-                    _restored = self.restoreGeometry(QByteArray.fromHex(_geo_hex.encode("ascii")))
-                except Exception:
-                    _restored = False
-            if _restored:
-                # restoreGeometry() can leave the window smaller than our
-                # current minimum size (e.g. after a DPI or content change
-                # since it was last saved) -- clamp back up if so.
-                w = max(self.width(), 560)
-                h = max(self.height(), 460)
-                if (w, h) != (self.width(), self.height()):
+            _geo = _prefs.get("main_window_geometry")
+            if isinstance(_geo, dict):
+                x = _geo.get("x")
+                y = _geo.get("y")
+                w = _geo.get("width")
+                h = _geo.get("height")
+                if all(isinstance(v, int) for v in (x, y, w, h)):
+                    # Clamp to minimum size so saved values can never shrink below it
+                    w = max(560, w)
+                    h = max(460, h)
                     self.resize(w, h)
-            else:
-                # ── Legacy fallback: older prefs files saved a plain
-                #    x/y/width/height dict instead. Migrate from that.
-                _geo = _prefs.get("main_window_geometry")
-                if isinstance(_geo, dict):
-                    x = _geo.get("x")
-                    y = _geo.get("y")
-                    w = _geo.get("width")
-                    h = _geo.get("height")
-                    if all(isinstance(v, int) for v in (x, y, w, h)):
-                        # Clamp to minimum size so saved values can never shrink below it
-                        w = max(560, w)
-                        h = max(460, h)
-                        self.resize(w, h)
-                        self.move(x, y)
+                    self.move(x, y)
             # Guard against the window landing off-screen (e.g. a second
             # monitor that is no longer connected).  We require at least
             # 100 px of the title-bar area to be visible on some screen
@@ -4253,9 +4239,6 @@ class MainWindow(QMainWindow):
         # ── Persist window geometry so the next launch reopens here ───────
         if not DEV_MODE:
             _prefs = _load_prefs()
-            _prefs["main_window_geometry_v2"] = bytes(self.saveGeometry()).hex()
-            # Keep the legacy key around too (harmless, and lets someone
-            # roll back to an older build without losing their window spot).
             _prefs["main_window_geometry"] = {
                 "x": self.x(),
                 "y": self.y(),
