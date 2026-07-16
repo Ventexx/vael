@@ -13,7 +13,7 @@ from typing import Optional
 # import os
 # os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -1452,6 +1452,7 @@ class ThumbnailCard(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hovered = False
         self._drag_start_pos: Optional[QPoint] = None
+        self._show_tagged_mode = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1569,12 +1570,42 @@ class ThumbnailCard(QWidget):
     def enterEvent(self, event) -> None:
         self._hovered = True
         self.update()
+        self._update_name_highlight()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
         self._hovered = False
         self.update()
+        self._update_name_highlight()
         super().leaveEvent(event)
+
+    # ── "Show Tagged" mode ──────────────────────────────────────────────
+    #
+    # When active, every visible card whose image already has a tag gets its
+    # name label highlighted with a neutral white-gray tone, brightening
+    # slightly on hover. Untagged images are left untouched. This is purely
+    # cosmetic/text-level and does not affect the thumbnail itself.
+
+    def is_tagged(self) -> bool:
+        """True if this asset's json_data has a non-empty 'tags' value."""
+        try:
+            data = json.loads(self.asset.get("json_data", "{}"))
+        except Exception:
+            return False
+        return bool(str(data.get("tags", "")).strip())
+
+    def set_tagged_mode(self, enabled: bool) -> None:
+        self._show_tagged_mode = enabled
+        self._update_name_highlight()
+
+    def _update_name_highlight(self) -> None:
+        if not self._show_tagged_mode or not self.is_tagged():
+            self._name_lbl.setStyleSheet("")
+            return
+        bg = "rgba(255,255,255,0.30)" if self._hovered else "rgba(255,255,255,0.15)"
+        self._name_lbl.setStyleSheet(
+            f"background-color: {bg}; border-radius: 3px; color: rgba(240,240,240,0.95);"
+        )
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -1774,6 +1805,14 @@ class FolderSection(QWidget):
 
         hc_lay.addWidget(self._header, 0)
 
+        # Orange dot shown (only in "Show Tagged" mode) when every image in
+        # this folder, including images in every nested subfolder, is tagged.
+        self._tag_dot = QLabel("●")
+        self._tag_dot.setObjectName("folderTagDot")
+        self._tag_dot.setFixedWidth(10)
+        self._tag_dot.hide()
+        hc_lay.addWidget(self._tag_dot, 0)
+
         # Copy button - only created when this folder has an !F-*.json
         self._copy_btn: Optional[QToolButton] = None
         if copy_value:
@@ -1819,6 +1858,7 @@ class FolderSection(QWidget):
         self._cards: list[ThumbnailCard] = []
         self._current_cols: int = COLS
         self._db_ref: Optional[Database] = None
+        self._show_tagged: bool = False
 
     def set_db(self, db: Optional[Database]) -> None:
         self._db_ref = db
@@ -1833,6 +1873,8 @@ class FolderSection(QWidget):
         i = len(self._cards)
         self._cards.append(card)
         self._card_grid.addWidget(card, i // COLS, i % COLS)
+        card.set_tagged_mode(self._show_tagged)
+        self._update_tag_dot()
 
     def _on_card_view_requested(self, card: ThumbnailCard) -> None:
         """Relay view request with the ordered card list of this folder."""
@@ -1870,9 +1912,41 @@ class FolderSection(QWidget):
         sec.folder_tagged.connect(self.folder_tagged)
         sec.card_view_requested.connect(self.card_view_requested)
         self._body_lay.addWidget(sec)
+        sec.set_tagged_mode(self._show_tagged)
+        self._update_tag_dot()
 
     def has_cards(self) -> bool:
         return len(self._cards) > 0
+
+    # ── "Show Tagged" mode ──────────────────────────────────────────────
+
+    def set_tagged_mode(self, enabled: bool) -> None:
+        """Toggle Show Tagged mode for this folder and everything inside it."""
+        self._show_tagged = enabled
+        for card in self._cards:
+            card.set_tagged_mode(enabled)
+        for child in self._child_sections:
+            child.set_tagged_mode(enabled)
+        self._update_tag_dot()
+
+    def _all_cards(self) -> list["ThumbnailCard"]:
+        """Every card in this folder plus every card in nested subfolders."""
+        cards = list(self._cards)
+        for child in self._child_sections:
+            cards.extend(child._all_cards())
+        return cards
+
+    def _is_fully_tagged(self) -> bool:
+        cards = self._all_cards()
+        if not cards:
+            return False
+        return all(c.is_tagged() for c in cards)
+
+    def _update_tag_dot(self) -> None:
+        if self._show_tagged and self._is_fully_tagged():
+            self._tag_dot.show()
+        else:
+            self._tag_dot.hide()
 
     def _copy_meta_value(self) -> None:
         if self._copy_value:
@@ -2107,6 +2181,7 @@ class ResultsPanel(QScrollArea):
         self._db: Optional[Database] = None
         self._root_folder: Optional[Path] = None
         self._az_sort: bool = True
+        self._show_tagged: bool = False
 
         # Loading overlay (child of the viewport so it covers the scroll area)
         self._overlay = LoadingOverlay(self.viewport())
@@ -2305,6 +2380,29 @@ class ResultsPanel(QScrollArea):
                 sec._toggle()
 
         self._layout.addStretch()
+        self._apply_tagged_mode()
+
+    # ── "Show Tagged" mode ──────────────────────────────────────────────
+
+    def set_tagged_mode(self, enabled: bool) -> None:
+        self._show_tagged = enabled
+        self._apply_tagged_mode()
+
+    def _apply_tagged_mode(self) -> None:
+        """(Re)apply the current Show Tagged mode to every top-level folder.
+
+        Each FolderSection propagates the mode down to its own cards and
+        nested subfolders, so a single top-level call recurses through the
+        whole tree. Called after every _populate() so newly rebuilt folder
+        trees (from a search, refresh, or edit) keep the current mode.
+        """
+        for i in range(self._layout.count()):
+            item = self._layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if isinstance(w, FolderSection):
+                w.set_tagged_mode(self._show_tagged)
 
     def _on_card_deleted(self, image_path: str) -> None:
         if self._db:
@@ -3334,6 +3432,9 @@ class MainWindow(QMainWindow):
         self.db_manager = db_manager
         self._active_db = ""
         self._app_menu: Optional[QMenu] = None
+        # "Show Tagged" mode: False (default) = normal behaviour, unchanged.
+        # True = tagged-image highlighting + fully-tagged folder dots.
+        self._show_tagged: bool = False
         self._index_worker: Optional[IndexWorker] = None
         self._pre_search_expanded: Optional[set[str]] = None
         self._pre_search_scroll: int = 0
@@ -3374,35 +3475,61 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(560, 460)
         self.resize(1000, 720)
         # ── Restore last window geometry from prefs ────────────────────────
+        #
+        # We use Qt's own saveGeometry()/restoreGeometry() pair rather than
+        # hand-tracking x/y/width/height. Those are a matched, frame-aware
+        # contract: saveGeometry() encodes the *actual* on-screen frame
+        # geometry (accounting for the native/custom frame this window ends
+        # up with on each platform), and restoreGeometry() reconstructs
+        # exactly that -- so the window reopens at the same size it was
+        # closed at instead of drifting a little wider each time.
         if not DEV_MODE:
             _prefs = _load_prefs()
-            _geo = _prefs.get("main_window_geometry")
-            if isinstance(_geo, dict):
-                x = _geo.get("x")
-                y = _geo.get("y")
-                w = _geo.get("width")
-                h = _geo.get("height")
-                if all(isinstance(v, int) for v in (x, y, w, h)):
-                    # Clamp to minimum size so saved values can never shrink below it
-                    w = max(560, w)
-                    h = max(460, h)
+            _restored = False
+            _geo_hex = _prefs.get("main_window_geometry_v2")
+            if isinstance(_geo_hex, str):
+                try:
+                    _restored = self.restoreGeometry(QByteArray.fromHex(_geo_hex.encode("ascii")))
+                except Exception:
+                    _restored = False
+            if _restored:
+                # restoreGeometry() can leave the window smaller than our
+                # current minimum size (e.g. after a DPI or content change
+                # since it was last saved) -- clamp back up if so.
+                w = max(self.width(), 560)
+                h = max(self.height(), 460)
+                if (w, h) != (self.width(), self.height()):
                     self.resize(w, h)
-                    self.move(x, y)
-                    # Guard against the window landing off-screen (e.g. a second
-                    # monitor that is no longer connected).  We require at least
-                    # 100 px of the title-bar area to be visible on some screen
-                    # so the user can still grab and drag the window.
-                    from PySide6.QtGui import QGuiApplication
-                    available = QGuiApplication.primaryScreen().virtualGeometry()
-                    title_bar_rect = self.frameGeometry()
-                    title_bar_rect.setHeight(min(100, title_bar_rect.height()))
-                    if not available.intersects(title_bar_rect):
-                        # Centre on the primary screen instead
-                        primary = QGuiApplication.primaryScreen().availableGeometry()
-                        self.move(
-                            primary.x() + (primary.width() - w) // 2,
-                            primary.y() + (primary.height() - h) // 2,
-                        )
+            else:
+                # ── Legacy fallback: older prefs files saved a plain
+                #    x/y/width/height dict instead. Migrate from that.
+                _geo = _prefs.get("main_window_geometry")
+                if isinstance(_geo, dict):
+                    x = _geo.get("x")
+                    y = _geo.get("y")
+                    w = _geo.get("width")
+                    h = _geo.get("height")
+                    if all(isinstance(v, int) for v in (x, y, w, h)):
+                        # Clamp to minimum size so saved values can never shrink below it
+                        w = max(560, w)
+                        h = max(460, h)
+                        self.resize(w, h)
+                        self.move(x, y)
+            # Guard against the window landing off-screen (e.g. a second
+            # monitor that is no longer connected).  We require at least
+            # 100 px of the title-bar area to be visible on some screen
+            # so the user can still grab and drag the window.
+            from PySide6.QtGui import QGuiApplication
+            available = QGuiApplication.primaryScreen().virtualGeometry()
+            title_bar_rect = self.frameGeometry()
+            title_bar_rect.setHeight(min(100, title_bar_rect.height()))
+            if not available.intersects(title_bar_rect):
+                # Centre on the primary screen instead
+                primary = QGuiApplication.primaryScreen().availableGeometry()
+                self.move(
+                    primary.x() + (primary.width() - self.width()) // 2,
+                    primary.y() + (primary.height() - self.height()) // 2,
+                )
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
@@ -3816,6 +3943,10 @@ class MainWindow(QMainWindow):
         reload_menu.addAction("with Scripts", self._action_reload_with_scripts)
         menu.addAction("Change Database", self._action_open_db)
         menu.addAction("Add Folder", self._action_add_folder)
+        menu.addSeparator()
+        tagged_label = "Hide Tagged" if self._show_tagged else "Show Tagged"
+        menu.addAction(tagged_label, self._action_toggle_tagged)
+        menu.addSeparator()
         menu.addAction("Startup Scripts", self._action_startup_scripts)
         menu.aboutToHide.connect(self._on_menu_hide)
         self._app_menu = menu
@@ -3886,6 +4017,17 @@ class MainWindow(QMainWindow):
         if self._active_db:
             self.db_manager.unload(self._active_db)
         self._start_load_db(name)
+
+    def _action_toggle_tagged(self) -> None:
+        """Toggle 'Show Tagged' mode.
+
+        Default (off) state = 'Hide Tagged': app behaves as normal.
+        On state = 'Show Tagged': every visible image's name is highlighted,
+        and folders whose images are all tagged (including nested
+        subfolders) get an orange dot next to their name.
+        """
+        self._show_tagged = not self._show_tagged
+        self._results.set_tagged_mode(self._show_tagged)
 
     def _action_startup_scripts(self) -> None:
         # ── DEV MODE: open dialog in readonly mode - fully interactive but
@@ -4111,6 +4253,9 @@ class MainWindow(QMainWindow):
         # ── Persist window geometry so the next launch reopens here ───────
         if not DEV_MODE:
             _prefs = _load_prefs()
+            _prefs["main_window_geometry_v2"] = bytes(self.saveGeometry()).hex()
+            # Keep the legacy key around too (harmless, and lets someone
+            # roll back to an older build without losing their window spot).
             _prefs["main_window_geometry"] = {
                 "x": self.x(),
                 "y": self.y(),
@@ -5352,6 +5497,13 @@ def apply_style(app: QApplication) -> None:
             border-left: 2px solid {ACCENT};
             color: rgba(235,235,235,0.95);
             font-weight: 700;
+        }}
+
+        /* ── folder "fully tagged" dot (Show Tagged mode) ─────────────── */
+        #folderTagDot {{
+            background: transparent;
+            color: #E8A24B;
+            font-size: 10px;
         }}
 
         /* ── folder copy button (!F-*.json) ─────────────────────────── */
