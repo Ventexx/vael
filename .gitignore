@@ -1,7 +1,7 @@
 # === Node / Electron (editor, reviewer) ===
-node_modules/
-dist/
-out/
+**/node_modules/
+**/dist/
+**/out/
 *.log
 npm-debug.log*
 
@@ -16,21 +16,24 @@ npm-debug.log*
 builder-debug.yml
 builder-effective-config.yaml
 
-# === Python / PySide6 (indexer) ===
-venv/
-.venv/
-__pycache__/
+# === Python / PySide6 (indexer, chess) ===
+**/venv/
+**/.venv/
+**/__pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
 .metadata_cache.json
 
 # app-generated logs
-logs/
+**/logs/
 *.log
 
 # indexer scripts (not part of the shipped app)
 indexer/scripts/
+
+# chess local settings
+chess/.vael_chess_settings.json
 
 # === OS cruft ===
 .DS_Store
