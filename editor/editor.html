@@ -2405,6 +2405,20 @@ function categoryPromptAction(action) {
 function selectImage(idx) {
   if (idx < 0 || idx >= state.images.length) return;
   state.activeIdx = idx;
+  // Keep the filmstrip's category filter following whatever image just
+  // became active. Without this, the filmstrip only updates its highlight
+  // for images that happen to already be inside the currently-filtered
+  // category — so as soon as the active image moves into a different
+  // category (auto-advance rolling into the next collection, or the
+  // Left/Right arrow keys crossing a collection boundary), the filmstrip
+  // keeps showing the old category with no active thumbnail at all. This
+  // does NOT fight manual exploring: clicking a category pill sets
+  // categoryFilter directly without calling selectImage, so browsing a
+  // different category while a different image stays "active" elsewhere
+  // is untouched — this only fires once the person actually navigates to
+  // an image that lives in a different category than the current filter.
+  const activeCat = state.images[idx].categoryId ?? null;
+  if (state.categoryFilter !== activeCat) state.categoryFilter = activeCat;
   dropZone.classList.add('has-image');
   clearSelection();
   fitImage(false);
@@ -2865,22 +2879,53 @@ function toggleAutoAdvance() {
   setAutoAdvance(!state.autoAdvance);
   setStatus(`Auto-next after save: ${state.autoAdvance ? 'on' : 'off'}`, true);
 }
-// Jumps to the next image in gallery order after a save — the last step of
-// the select -> pixelate -> save -> next loop, so the workflow never needs
-// a mouse click just to move on to the next file.
+// Finds the next category (in state.categories order, with the Unsorted
+// bucket treated as coming first) after `afterCatId` that still has at
+// least one image in it. Returns undefined once there's nothing left.
+// Deliberately doesn't wrap back around to categories before `afterCatId`
+// — auto-advance only ever moves forward through the collections.
+function nextCategoryWithImages(afterCatId) {
+  const order = [null, ...state.categories.map(c => c.id)];
+  const startPos = order.indexOf(afterCatId);
+  for (let p = startPos + 1; p < order.length; p++) {
+    const id = order[p];
+    if (state.images.some(im => (im.categoryId ?? null) === id)) return id;
+  }
+  return undefined;
+}
+// Jumps to the next image after a save — the last step of the select ->
+// pixelate -> save -> next loop, so the workflow never needs a mouse click
+// just to move on to the next file. Stays within the just-saved image's own
+// category first, matching against its actual categoryId rather than
+// state.categoryFilter (the filmstrip's filter can legitimately point
+// somewhere else, e.g. right after a manual category switch, so relying on
+// it here made auto-advance behave inconsistently). Once that category is
+// exhausted, it rolls over into the next collection that has images —
+// selectImage() below then re-points the filmstrip filter to follow it.
 function advanceToNextImage(fromIdx) {
   if (!state.autoAdvance) return;
-  const visible = getVisibleImageIndices();
-  const pos = visible.indexOf(fromIdx);
-  const next = pos >= 0 ? visible[pos + 1] : fromIdx + 1;
-  if (next !== undefined && next < state.images.length) {
+  const img = state.images[fromIdx];
+  if (!img) return;
+  const cat = img.categoryId ?? null;
+  const sameCategory = state.images.map((_, i) => i).filter(i => (state.images[i].categoryId ?? null) === cat);
+  const pos = sameCategory.indexOf(fromIdx);
+  const next = pos >= 0 ? sameCategory[pos + 1] : undefined;
+  if (next !== undefined) {
     selectImage(next);
-    const n = visible.length ? visible.indexOf(next) + 1 : next + 1;
-    const total = visible.length || state.images.length;
-    setStatus(`Saved — showing ${state.images[next].name} (${n}/${total})`, true);
-  } else {
-    setStatus('Saved — that was the last image', true);
+    const n = sameCategory.indexOf(next) + 1;
+    setStatus(`Saved — showing ${state.images[next].name} (${n}/${sameCategory.length})`, true);
+    return;
   }
+  const nextCat = nextCategoryWithImages(cat);
+  if (nextCat !== undefined) {
+    const firstIdx = state.images.findIndex(i => (i.categoryId ?? null) === nextCat);
+    selectImage(firstIdx);
+    const catObj = state.categories.find(c => c.id === nextCat);
+    const label = catObj ? categoryLabel(catObj) : 'Unsorted';
+    setStatus(`Saved — moving to next collection: ${label}`, true);
+    return;
+  }
+  setStatus('Saved — that was the last image', true);
 }
 // Read-only reference for whatever hotkeys are currently bound to a preset —
 // lives at the bottom of the toolbar since the panels that manage them

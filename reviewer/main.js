@@ -103,9 +103,10 @@ function loadConfig() {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
     const cfg = JSON.parse(raw);
     if (!Array.isArray(cfg.folders)) cfg.folders = [];
+    if (!Array.isArray(cfg.hiddenFolders)) cfg.hiddenFolders = [];
     return cfg;
   } catch (e) {
-    return { folders: [] };
+    return { folders: [], hiddenFolders: [] };
   }
 }
 function saveConfig(cfg) {
@@ -154,6 +155,23 @@ ipcMain.handle('add-folder', async () => {
 ipcMain.handle('remove-folder', (_, folder) => {
   const cfg = loadConfig();
   cfg.folders = cfg.folders.filter(f => f !== folder);
+  cfg.hiddenFolders = cfg.hiddenFolders.filter(f => f !== folder);
+  saveConfig(cfg);
+  return cfg;
+});
+
+// Hiding a folder excludes it from scanning (so it stops counting toward the
+// watched-image total and drops out of the sidebar) without forgetting it --
+// it stays in cfg.folders and can be un-hidden later without re-browsing to
+// it. This is deliberately separate from remove-folder, which forgets the
+// path entirely.
+ipcMain.handle('toggle-folder-hidden', (_, folder) => {
+  const cfg = loadConfig();
+  if (cfg.hiddenFolders.includes(folder)) {
+    cfg.hiddenFolders = cfg.hiddenFolders.filter(f => f !== folder);
+  } else {
+    cfg.hiddenFolders.push(folder);
+  }
   saveConfig(cfg);
   return cfg;
 });
@@ -169,23 +187,71 @@ const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 // e.g. "base_B_7_00001_.png" -> base "base_B_7", iteration 1
 const ITER_RE = /^(.+)_(\d{3,})_?\.(png|jpe?g|webp|bmp|gif)$/i;
 
+// Plain .sort() on base names is lexicographic, so "B10" ends up before
+// "B2" (character-by-character, '1' < '2'). The trailing run of digits in a
+// base name is meant to be read as one number, so use locale-aware numeric
+// comparison instead -- this puts "B2" before "B10" like a human would.
+function naturalCompare(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
+
 function shouldIgnoreDir(name) {
   return name.startsWith('.') || name.startsWith('!');
 }
 
-function scanDir(dir, out) {
+// ---------------------------------------------------------------------------
+// Directory-listing cache: keyed by absolute directory path, holds the last
+// fs.readdirSync result plus the directory's own mtime at the time it was
+// read. A directory's mtime changes whenever an entry is added, removed, or
+// renamed inside it (true on both Windows/NTFS and POSIX filesystems), so
+// checking that one stat lets a rescan skip re-reading (and re-grouping) any
+// subtree that hasn't actually changed, instead of doing a full
+// fs.readdirSync + regex-group pass on every folder on every rescan --
+// which matters now that rescans happen automatically rather than only when
+// the user asks for one. Editing an existing file's *contents* without
+// renaming it doesn't bump the parent directory's mtime, but that's fine
+// here: grouping only cares about which filenames exist, not their bytes.
+const dirListCache = new Map(); // dir -> { mtimeMs, entries }
+
+function listDirCached(dir, seen) {
+  if (seen) seen.add(dir);
+  let stat;
+  try {
+    stat = fs.statSync(dir);
+  } catch (e) {
+    return null;
+  }
+  const cached = dirListCache.get(dir);
+  if (cached && cached.mtimeMs === stat.mtimeMs) return cached.entries;
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch (e) {
-    return;
+    return null;
   }
+  dirListCache.set(dir, { mtimeMs: stat.mtimeMs, entries });
+  return entries;
+}
+
+// Drops cache entries for directories that weren't visited in the scan pass
+// that just finished -- folders that got deleted, renamed, or unwatched --
+// so the cache can't grow without bound as folder trees get restructured
+// over a long-running session.
+function pruneDirListCache(seen) {
+  for (const dir of dirListCache.keys()) {
+    if (!seen.has(dir)) dirListCache.delete(dir);
+  }
+}
+
+function scanDir(dir, out, seen) {
+  const entries = listDirCached(dir, seen);
+  if (!entries) return;
 
   const files = [];
   for (const e of entries) {
     if (e.isDirectory()) {
       if (shouldIgnoreDir(e.name)) continue;
-      scanDir(path.join(dir, e.name), out);
+      scanDir(path.join(dir, e.name), out, seen);
     } else if (e.isFile()) {
       if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
     }
@@ -211,10 +277,22 @@ function scanDir(dir, out) {
   if (Object.keys(multi).length) out.push({ dir, groups: multi });
 }
 
-ipcMain.handle('scan', async () => {
+ipcMain.handle('scan', async (_, opts) => {
+  // force: true means "throw the directory-listing cache away and re-read
+  // everything from disk", used by the renderer's manual full rescan. The
+  // cache is keyed by each directory's own mtime, which doesn't change when
+  // a file inside it is edited/replaced in place without being renamed --
+  // so a targeted invalidation can't catch that case; wiping it entirely is
+  // the only way to guarantee a from-scratch scan actually re-reads.
+  if (opts && opts.force) dirListCache.clear();
   const cfg = loadConfig();
   const out = [];
-  for (const root of cfg.folders) scanDir(root, out);
+  const seen = new Set();
+  for (const root of cfg.folders) {
+    if (cfg.hiddenFolders.includes(root)) continue;
+    scanDir(root, out, seen);
+  }
+  pruneDirListCache(seen);
   out.sort((a, b) => a.dir.localeCompare(b.dir));
   return out;
 });
@@ -234,19 +312,15 @@ ipcMain.handle('scan', async () => {
 // folder's whole image wall with every set's iterations kept contiguous
 // (needed for the "scroll to this set" behavior in general review).
 // ---------------------------------------------------------------------------
-function scanAllDir(dir, out) {
-  let entries;
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    return;
-  }
+function scanAllDir(dir, out, seen) {
+  const entries = listDirCached(dir, seen);
+  if (!entries) return;
 
   const files = [];
   for (const e of entries) {
     if (e.isDirectory()) {
       if (shouldIgnoreDir(e.name)) continue;
-      scanAllDir(path.join(dir, e.name), out);
+      scanAllDir(path.join(dir, e.name), out, seen);
     } else if (e.isFile()) {
       if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
     }
@@ -268,7 +342,7 @@ function scanAllDir(dir, out) {
   }
 
   const order = [];
-  for (const base of Object.keys(groups).sort()) {
+  for (const base of Object.keys(groups).sort(naturalCompare)) {
     groups[base].sort((a, b) => a.iter - b.iter);
     for (const entry of groups[base]) order.push({ base, name: entry.name, iter: entry.iter });
   }
@@ -276,10 +350,16 @@ function scanAllDir(dir, out) {
   out.push({ dir, groups, order });
 }
 
-ipcMain.handle('scan-all', async () => {
+ipcMain.handle('scan-all', async (_, opts) => {
+  if (opts && opts.force) dirListCache.clear();
   const cfg = loadConfig();
   const out = [];
-  for (const root of cfg.folders) scanAllDir(root, out);
+  const seen = new Set();
+  for (const root of cfg.folders) {
+    if (cfg.hiddenFolders.includes(root)) continue;
+    scanAllDir(root, out, seen);
+  }
+  pruneDirListCache(seen);
   out.sort((a, b) => a.dir.localeCompare(b.dir));
   return out;
 });
@@ -345,9 +425,21 @@ ipcMain.handle('get-flags', async () => {
     const { dir, base } = flags[k];
     (byDir[dir] = byDir[dir] || []).push(base);
   }
-  return Object.keys(byDir).sort().map(dir => ({ dir, bases: byDir[dir].sort() }));
+  return Object.keys(byDir).sort().map(dir => ({ dir, bases: byDir[dir].sort(naturalCompare) }));
 });
 
 app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => {
+  // Explicit memory teardown on close. The process exiting would drop all of
+  // this anyway on non-darwin, but clearing it here makes the "clean on
+  // close" guarantee explicit rather than implicit, and it actually matters
+  // on darwin, where the app process (and everything below) stays alive
+  // after every window closes -- flags is already documented as a
+  // session-only store that should disappear when the app closes, and the
+  // directory-listing cache has no reason to hold onto anything once
+  // there's no window around to ask for a rescan.
+  for (const k in flags) delete flags[k];
+  dirListCache.clear();
+  if (process.platform !== 'darwin') app.quit();
+});
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

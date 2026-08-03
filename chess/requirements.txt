@@ -1,0 +1,6 @@
+pywebview>=5.0
+chess>=1.10
+mss>=9.0
+numpy>=1.26
+Pillow>=10.0
+cairosvg>=2.7

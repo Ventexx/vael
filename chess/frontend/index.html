@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vael. // chess</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- RESIZE HANDLES (frameless windows have no native ones) -->
+  <div class="resize-handle rh-n" data-edge="n"></div>
+  <div class="resize-handle rh-s" data-edge="s"></div>
+  <div class="resize-handle rh-e" data-edge="e"></div>
+  <div class="resize-handle rh-w" data-edge="w"></div>
+  <div class="resize-handle rh-ne" data-edge="ne"></div>
+  <div class="resize-handle rh-nw" data-edge="nw"></div>
+  <div class="resize-handle rh-se" data-edge="se"></div>
+  <div class="resize-handle rh-sw" data-edge="sw"></div>
+
+  <!-- TITLEBAR -->
+  <div id="titlebar" class="pywebview-drag-region">
+    <div class="titlebar-logo">vael. <span>chess</span></div>
+    <div id="titlebar-winctl">
+      <button class="winbtn" id="win-min" title="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"></line></svg></button>
+      <button class="winbtn" id="win-max" title="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"></rect></svg></button>
+      <button class="winbtn close" id="win-close" title="Close"><svg viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9"></line><line x1="9" y1="1" x2="1" y2="9"></line></svg></button>
+    </div>
+  </div>
+
+  <!-- TOOLBAR -->
+  <div id="topbar">
+    <span class="status-dot off" id="engine-dot"></span>
+    <span id="engine-status-text">Engine not connected</span>
+    <div id="topbar-actions">
+      <button class="tb-btn" id="btn-new-game" title="New game">
+        <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"></path><polyline points="12 1 12 5 16 5"></polyline></svg>
+        New
+      </button>
+      <button class="tb-btn" id="btn-flip" title="Flip board">
+        <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+        Flip
+      </button>
+      <select class="tb-select" id="live-mode-select" title="Continuous: reads the region on a timer. Manual: only reads when you click Capture.">
+        <option value="continuous">Continuous</option>
+        <option value="manual">Manual</option>
+      </select>
+      <button class="tb-btn" id="btn-live" title="Watch a screen region and mirror moves made there live">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.34 6.34l1.42 1.42M16.24 16.24l1.42 1.42M6.34 17.66l1.42-1.42M16.24 7.76l1.42-1.42"></path></svg>
+        Live
+      </button>
+      <button class="tb-btn" id="btn-capture-now" title="Capture the assigned region now and update the position" style="display:none;">
+        <svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+        Capture
+      </button>
+      <div class="tb-sep"></div>
+      <button class="tb-btn" id="btn-import" title="Import PGN or FEN">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Import
+      </button>
+      <button class="tb-btn" id="btn-export" title="Export PGN">
+        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        Export
+      </button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div id="main-row">
+
+    <div id="board-col">
+      <div id="board-area">
+        <div id="board-frame">
+          <div id="board-wrap">
+            <div id="board-squares"></div>
+            <div id="arrows-layer"></div>
+            <div id="pieces-layer"></div>
+            <div id="promo-picker"></div>
+          </div>
+          <div id="file-labels"></div>
+          <div id="rank-labels"></div>
+        </div>
+
+        <div id="eval-bar-outer">
+          <div id="eval-bar">
+            <div id="eval-fill-black"></div>
+            <div id="eval-fill-white"></div>
+          </div>
+          <div id="eval-num" class="top">+0.2</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div id="right-panel">
+
+      <!-- ENGINE SETTINGS -->
+      <div class="panel-section collapsed" id="section-engine">
+        <button class="panel-section-head">
+          <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-dim); flex-shrink:0;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          <span class="panel-section-title">Engine</span>
+          <span class="panel-section-tag" id="engine-tag">off</span>
+        </button>
+        <div class="panel-section-body" id="engine-body">
+
+          <div class="engine-id" id="engine-id-box">No engine connected. Point this at your local Stockfish binary.</div>
+
+          <div class="field">
+            <label>Stockfish path</label>
+            <div class="field-row">
+              <input type="text" id="engine-path" placeholder="/usr/local/bin/stockfish">
+              <button class="small-btn" id="btn-browse-engine">Browse</button>
+            </div>
+            <div class="field-row" style="margin-top:6px;">
+              <button class="small-btn primary" id="btn-connect-engine" style="flex:1;">Connect</button>
+              <button class="small-btn" id="btn-disconnect-engine">Disconnect</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Lines to show (MultiPV)</label>
+            <div class="stepper">
+              <button id="multipv-dec">&minus;</button>
+              <span class="val" id="multipv-val">3</span>
+              <button id="multipv-inc">&plus;</button>
+            </div>
+          </div>
+
+          <div class="toggle-row">
+            <label>Limit strength by Elo</label>
+            <label class="switch"><input type="checkbox" id="toggle-limit-strength"><span class="track"></span></label>
+          </div>
+
+          <div class="field" id="skill-field">
+            <label>Skill level (0&ndash;20)</label>
+            <div class="field-row">
+              <input type="range" id="skill-slider" min="0" max="20" value="20">
+              <span class="val" id="skill-val" style="min-width:22px;">20</span>
+            </div>
+          </div>
+
+          <div class="field" id="elo-field" style="display:none;">
+            <label>Target Elo</label>
+            <input type="number" id="elo-input" min="1320" max="3190" value="1500" step="10">
+          </div>
+
+          <div class="field">
+            <label>Analysis limit</label>
+            <select id="limit-mode">
+              <option value="infinite">Infinite (until position changes)</option>
+              <option value="depth">Fixed depth</option>
+              <option value="movetime">Fixed time per position</option>
+            </select>
+          </div>
+          <div class="field" id="depth-field" style="display:none;">
+            <label>Depth</label>
+            <input type="number" id="depth-input" min="1" max="60" value="20">
+          </div>
+          <div class="field" id="movetime-field" style="display:none;">
+            <label>Time (ms)</label>
+            <input type="number" id="movetime-input" min="50" max="60000" value="1000" step="50">
+          </div>
+
+          <div class="field-row" style="margin-bottom:9px;">
+            <div style="flex:1;">
+              <label style="display:block;font-size:10px;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Threads</label>
+              <input type="number" id="threads-input" min="1" max="64" value="1">
+            </div>
+            <div style="flex:1;">
+              <label style="display:block;font-size:10px;color:var(--text-dim);margin-bottom:4px;text-transform:uppercase;">Hash (MB)</label>
+              <input type="number" id="hash-input" min="16" max="16384" value="128" step="16">
+            </div>
+          </div>
+
+          <div class="toggle-row">
+            <label>Show best-move arrows</label>
+            <label class="switch"><input type="checkbox" id="toggle-arrows" checked><span class="track"></span></label>
+          </div>
+
+          <button class="small-btn primary" id="btn-apply-engine" style="width:100%;">Apply settings</button>
+          <div class="hint">Changes apply immediately and restart analysis on the current position.</div>
+        </div>
+      </div>
+
+      <!-- ANALYSIS LINES -->
+      <div class="panel-section" id="section-lines">
+        <button class="panel-section-head">
+          <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          <span class="panel-section-title">Engine lines</span>
+          <span class="panel-section-tag" id="lines-depth-tag">&mdash;</span>
+        </button>
+        <div class="panel-section-body">
+          <div class="lines-meta" id="lines-meta">&mdash;</div>
+          <div id="lines-list"><div class="lines-empty">Connect an engine to see live analysis lines here.</div></div>
+        </div>
+      </div>
+
+      <!-- MOVE LIST / NOTATION -->
+      <div class="panel-section" id="section-moves">
+        <div class="panel-section-head">
+          <button class="panel-section-head-toggle">
+            <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            <span class="panel-section-title">Notation</span>
+          </button>
+          <div class="moves-nav no-collapse">
+            <button class="tb-btn icon-only mini" id="btn-step-back" title="Previous move">
+              <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <button class="tb-btn icon-only mini" id="btn-step-fwd" title="Next move">
+              <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </button>
+          </div>
+          <span class="panel-section-tag" id="moves-count-tag">0</span>
+        </div>
+        <div class="panel-section-body">
+          <div id="moves-table"><div class="moves-empty">No moves played yet.</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div id="statusbar">
+    <div id="status-left">&mdash;</div>
+    <div id="status-right"></div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="modal-backdrop" id="modal-import">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Import position</div>
+      <button class="modal-close" id="import-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-tabs">
+        <button class="modal-tab active" data-tab="fen">FEN</button>
+        <button class="modal-tab" data-tab="pgn">PGN</button>
+      </div>
+      <div class="modal-pane active" id="pane-fen">
+        <input type="text" id="fen-input" placeholder="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1">
+      </div>
+      <div class="modal-pane" id="pane-pgn">
+        <textarea id="pgn-input" placeholder="1. e4 e5 2. Nf3 Nc6 ..."></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-secondary" id="import-cancel">Cancel</button>
+      <button class="btn-primary" id="import-go">Load</button>
+    </div>
+  </div>
+</div>
+
+<!-- EXPORT MODAL -->
+<div class="modal-backdrop" id="modal-export">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Export PGN</div>
+      <button class="modal-close" id="export-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
+    </div>
+    <div class="modal-body">
+      <textarea id="export-text" readonly></textarea>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-secondary" id="export-copy">Copy to clipboard</button>
+    </div>
+  </div>
+</div>
+
+<script src="pieces.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

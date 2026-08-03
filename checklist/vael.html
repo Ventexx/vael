@@ -190,9 +190,13 @@ body.theme-paper .bar-btn.add-btn { background: rgba(63,95,122,0.08); border: 1p
 .cb-wrap input:checked ~ .cb-box { background: var(--accent-faint); border-color: var(--accent); }
 .cb-box svg { display: none; }
 .cb-wrap input:checked ~ .cb-box svg { display: block; }
+.cb-wrap.rejected .cb-box,
+.cb-wrap.rejected:hover .cb-box { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.cb-wrap.rejected .cb-box svg { display: block; }
 
 .task-text { flex: 1; word-break: break-word; outline: none; transition: color 0.15s; font-family: var(--font-ui); font-size: 14.5px; font-weight: 400; color: var(--text); }
 .task-item.done .task-text { color: var(--done-text); text-decoration: line-through; text-decoration-color: var(--done-strike); }
+.task-item.rejected .task-text { color: var(--red); text-decoration: line-through; text-decoration-color: var(--red); opacity: 0.85; }
 .task-text[contenteditable=true] {
   color: var(--text) !important; text-decoration: none !important; outline: none;
   background: rgba(0,0,0,0.08); box-shadow: 0 0 0 1px var(--border2); padding: 1px 5px; margin: -1px -5px; user-select: text;
@@ -413,7 +417,7 @@ body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
   <header>
     <div class="logo">vael<span class="logo-dot">.</span><span class="logo-name">checklist</span></div>
     <div class="toolbar">
-      <button class="tb-btn" id="clean-btn" title="Remove completed tasks" disabled>
+      <button class="tb-btn" id="clean-btn" title="Remove completed &amp; rejected tasks" disabled>
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
       </button>
       <button class="tb-btn" id="undo-btn" title="Undo (Ctrl+Z)" disabled>
@@ -450,6 +454,7 @@ body.theme-paper .theme-btn:hover { background: rgba(0,0,0,0.03); }
 <div id="help-tooltip">
   <div><span class="sk-key">enter</span><span class="sk-desc">add task</span></div>
   <div><span class="sk-key">double-click</span><span class="sk-desc">edit task / rename profile</span></div>
+  <div><span class="sk-key">right-click box</span><span class="sk-desc">mark task rejected</span></div>
   <div><span class="sk-key">esc</span><span class="sk-desc">cancel edit</span></div>
   <div><span class="sk-key">/</span><span class="sk-desc">focus task input</span></div>
   <div><span class="sk-key">ctrl+m</span><span class="sk-desc">toggle menu</span></div>
@@ -523,7 +528,7 @@ function pushHistory(b) { undoStack.push(b); redoStack = []; isDirty = true; upd
 function updateTB() {
   undoBtn.disabled = !undoStack.length;
   redoBtn.disabled = !redoStack.length;
-  cleanBtn.disabled = !items.some(n => n.type === 'task' && n.done);
+  cleanBtn.disabled = !items.some(n => n.type === 'task' && (n.done || n.rejected));
 }
 function undo() { if (!undoStack.length) return; redoStack.push(cloneItems()); items = undoStack.pop(); render(); updateTB(); }
 function redo() { if (!redoStack.length) return; undoStack.push(cloneItems()); items = redoStack.pop(); render(); updateTB(); }
@@ -538,7 +543,7 @@ function esc(s) {
 
 function countTasks(arr = items) {
   let total = 0, done = 0;
-  arr.forEach(node => { if (node.type === 'task') { total++; if (node.done) done++; } });
+  arr.forEach(node => { if (node.type === 'task' && !node.rejected) { total++; if (node.done) done++; } });
   return { total, done };
 }
 
@@ -580,21 +585,33 @@ function render(newId = null) {
 
 function mkTask(item) {
   const el = document.createElement('div');
-  el.className = 'task-item' + (item.done ? ' done' : '');
+  el.className = 'task-item' + (item.done ? ' done' : '') + (item.rejected ? ' rejected' : '');
   el.dataset.id = item.id;
   el.draggable = false;
   el.innerHTML = `
     <div class="drag-handle">${DRAG_SVG}</div>
-    <label class="cb-wrap">
+    <label class="cb-wrap${item.rejected ? ' rejected' : ''}" title="Click: complete · Right-click: mark rejected">
       <input type="checkbox" ${item.done ? 'checked' : ''}>
-      <div class="cb-box">${CHECK_SVG}</div>
+      <div class="cb-box">${item.rejected ? X_SVG : CHECK_SVG}</div>
     </label>
     <div class="task-text" tabindex="-1">${esc(item.text)}</div>
     <button class="del-btn">${X_SVG}</button>`;
 
-  el.querySelector('input[type=checkbox]').addEventListener('change', e => {
+  const cbWrap = el.querySelector('.cb-wrap');
+
+  cbWrap.querySelector('input[type=checkbox]').addEventListener('change', e => {
     const b = cloneItems();
     item.done = e.target.checked;
+    if (item.done) item.rejected = false;
+    pushHistory(b);
+    render();
+  });
+
+  cbWrap.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const b = cloneItems();
+    item.rejected = !item.rejected;
+    if (item.rejected) item.done = false;
     pushHistory(b);
     render();
   });
@@ -740,7 +757,7 @@ function del(id) {
 }
 
 function clearDone() {
-  const doneIds = items.filter(n => n.type === 'task' && n.done).map(n => n.id);
+  const doneIds = items.filter(n => n.type === 'task' && (n.done || n.rejected)).map(n => n.id);
   if (!doneIds.length) return;
   const b = cloneItems();
 
@@ -752,7 +769,7 @@ function clearDone() {
   });
 
   setTimeout(() => {
-    items = items.filter(n => !(n.type === 'task' && n.done));
+    items = items.filter(n => !(n.type === 'task' && (n.done || n.rejected)));
     pushHistory(b);
     render();
   }, 230);

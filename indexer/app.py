@@ -208,6 +208,22 @@ def _diff_against_cache(
 
 # ── Startup Scripts ────────────────────────────────────────────────────────────
 
+def _natural_sort_key(name: str) -> list:
+    """
+    Split a name into a list of (text, number) chunks so that sorting
+    compares embedded digit runs numerically instead of character-by-
+    character. This makes "2" sort before "10" instead of after it.
+
+    e.g. "img2" -> ["img", 2]   "img10" -> ["img", 10]
+    """
+    import re
+
+    return [
+        int(chunk) if chunk.isdigit() else chunk
+        for chunk in re.split(r"(\d+)", name.lower())
+    ]
+
+
 SCRIPTS_FILE = APP_DIR / "startup_scripts.json"
 
 
@@ -4774,7 +4790,7 @@ class NotePanel(QScrollArea):
         other_entries = [e for e in all_entries if e["category"]]
 
         if az_sort:
-            root_entries.sort(key=lambda e: e["name"].lower())
+            root_entries.sort(key=lambda e: _natural_sort_key(e["name"]))
 
         # ── Root entries (no category) shown at top as flat card grid ────
         if root_entries:
@@ -4847,7 +4863,7 @@ class NotePanel(QScrollArea):
                 local_val = sec._get_local_az_sort()
                 effective = local_val if local_val is not None else az_sort
                 if effective:
-                    entries = sorted(entries, key=lambda e: e["name"].lower())
+                    entries = sorted(entries, key=lambda e: _natural_sort_key(e["name"]))
                 for entry in entries:
                     sec.add_card(entry["name"], entry["value"], self._notes_file, self)
 

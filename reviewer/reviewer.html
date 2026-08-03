@@ -163,12 +163,20 @@
     text-overflow: ellipsis; white-space: nowrap; min-width: 0; letter-spacing: .02em; }
   #ch-sub { font-size: 10px; color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7; }
   #ch-sub::before { content: '\2014'; margin-right: 8px; opacity: .5; }
-  #ch-actions { display: flex; gap: 3px; flex-shrink: 0; }
+  #ch-actions { display: flex; gap: 3px; flex-shrink: 0; align-items: center; }
   #btn-rightclick-mode { margin-right: 10px; }
   #ch-actions .tb-btn.icon-only.active { border-color: var(--border2); color: var(--text); }
   #ch-actions .tb-btn.icon-only { width: 20px; height: 20px; background: transparent; border-color: transparent; color: var(--text-dim); }
   #ch-actions .tb-btn.icon-only:hover:not(:disabled) { background: var(--bg4); border-color: var(--border2); color: var(--accent); }
   #ch-actions .tb-btn.icon-only svg { width: 11px; height: 11px; }
+  .tb-select {
+    height: 20px; margin-right: 8px; padding: 0 4px; font-size: 10px; font-family: inherit;
+    background: transparent; color: var(--text-dim); border: 1px solid transparent; border-radius: 4px;
+    cursor: pointer; outline: none;
+  }
+  .tb-select:hover { background: var(--bg4); border-color: var(--border2); color: var(--text); }
+  .tb-select:focus { border-color: var(--accent); }
+  .tb-select option { background: var(--bg2); color: var(--text); }
 
   #canvas-wrap { flex: 1; position: relative; overflow-y: auto; overflow-x: hidden; min-height: 0;
     background: radial-gradient(ellipse 1100px 600px at 50% 0%, #161616 0%, var(--bg) 70%); }
@@ -196,6 +204,20 @@
   .cl-bar { height: 4px; border-radius: 2px; background: var(--bg4); overflow: hidden; }
   .cl-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width .15s ease; }
   .cl-sub { font-size: 10px; color: var(--text-dim); margin-top: 8px; }
+
+  /* LOAD-ALL OVERLAY -- covers the entire app (not just the canvas) while
+     every set in every folder of the current review mode is pre-loaded into
+     memory. Sits above the topbar/sidebar/modals and intercepts all clicks,
+     matching the "app is unresponsive during this" behavior requested --
+     there's nothing useful to interact with until every image is in
+     imageCache anyway. */
+  #loadall-overlay {
+    position: fixed; inset: 0; background: rgba(5,5,5,0.85); backdrop-filter: blur(2px); z-index: 1100;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #loadall-overlay.hidden { display: none; }
+  .la-box { width: 280px; text-align: center; }
+  .la-title { font-size: 12px; color: var(--text-bright); margin-bottom: 12px; font-weight: 700; }
 
   /* GROUP SECTIONS (accordion list, replaces the old draggable canvas) --
      styled to match the simple folder-list pattern: a plain header row,
@@ -375,11 +397,16 @@
 
   .folder-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border2);
     background: var(--bg3); border-radius: 5px; margin-bottom: 6px; }
+  .folder-row.hidden-folder { opacity: 0.55; }
   .folder-row-path { flex: 1; font-size: 10.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .folder-row-remove { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border2); background: var(--bg4);
+  .folder-row-hidden-tag { font-size: 9.5px; color: var(--text-dim); border: 1px solid var(--border2); border-radius: 3px;
+    padding: 1px 5px; flex-shrink: 0; }
+  .folder-row-hide, .folder-row-remove { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border2); background: var(--bg4);
     color: var(--text-dim); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .folder-row-hide:hover { background: var(--bg2); border-color: var(--accent-dim); color: var(--accent); }
+  .folder-row-hide.active { color: var(--accent); border-color: var(--accent-dim); }
   .folder-row-remove:hover { background: #6e2020; border-color: #8b3333; color: #ffaaaa; }
-  .folder-row-remove svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .folder-row-hide svg, .folder-row-remove svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2; }
   .add-folder-btn {
     width: 100%; padding: 9px; border: 1px dashed var(--border2); background: transparent; color: var(--text-dim);
     border-radius: 5px; cursor: pointer; font-family: var(--font); font-size: 11px; display: flex; align-items: center;
@@ -400,6 +427,7 @@
   .btn-primary:hover { background: rgba(0,212,160,0.16); }
   .btn-danger { background: var(--red-faint); color: var(--red); border-color: var(--red-dim); }
   .btn-danger:hover { background: rgba(139,51,51,0.28); }
+  .btn-primary:disabled, .btn-secondary:disabled, .btn-danger:disabled { opacity: .35; cursor: default; pointer-events: none; }
 
   .flag-group-row { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--border2);
     background: var(--bg3); border-radius: 5px; margin-bottom: 6px; }
@@ -464,7 +492,7 @@
           <button class="sb-foot-btn" id="btn-settings" title="Watched folders">
             <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
           </button>
-          <button class="sb-foot-btn" id="btn-rescan" title="Rescan now">
+          <button class="sb-foot-btn" id="btn-rescan" title="Full rescan \u2014 reloads everything from disk">
             <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
           </button>
           <button class="sb-foot-btn" id="btn-mode-toggle" title="Switch to general review">
@@ -479,6 +507,7 @@
         <div id="ch-title">&mdash;</div>
         <div id="ch-sub"></div>
         <div id="ch-actions">
+          <select id="letter-filter" class="tb-select" title="Show only sets starting with this letter" style="display:none"></select>
           <button class="tb-btn icon-only" id="btn-rightclick-mode" title="Right-click marks for deletion instead of flagging">
             <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>
           </button>
@@ -539,6 +568,17 @@
   </div>
 </div>
 
+<!-- LOAD-ALL OVERLAY -- app-wide block while every folder in the current
+     review mode is pre-loaded into memory. Lives outside #app so it's a
+     fixed full-viewport layer regardless of scroll/layout underneath. -->
+<div id="loadall-overlay" class="hidden">
+  <div class="la-box">
+    <div class="la-title" id="la-title">Loading all folders&hellip;</div>
+    <div class="cl-bar"><div class="cl-bar-fill" id="la-bar-fill"></div></div>
+    <div class="cl-sub" id="la-sub">0 / 0</div>
+  </div>
+</div>
+
 <!-- SETTINGS MODAL -->
 <div class="modal-backdrop" id="modal-settings">
   <div class="modal">
@@ -548,7 +588,7 @@
     </div>
     <div class="modal-body">
       <div style="font-size:10.5px;color:var(--text-dim);line-height:1.6;margin-bottom:10px;">
-        Every folder below is searched recursively for requeued image sets. Subfolders starting with <b style="color:var(--text)">.</b> or <b style="color:var(--text)">!</b> are skipped.
+        Every folder below is searched recursively for requeued image sets. Subfolders starting with <b style="color:var(--text)">.</b> or <b style="color:var(--text)">!</b> are skipped. Hide a folder to stop watching it without removing it from this list.
       </div>
       <div id="folder-list"></div>
       <button class="add-folder-btn" id="btn-add-folder">
@@ -557,7 +597,7 @@
       </button>
     </div>
     <div class="modal-foot">
-      <button class="btn-primary" id="settings-rescan">Rescan now</button>
+      <button class="btn-primary" id="settings-rescan">Full rescan</button>
     </div>
   </div>
 </div>
@@ -570,6 +610,10 @@
       <button class="modal-close" id="flagged-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
     </div>
     <div class="modal-body" id="flagged-list"></div>
+    <div class="modal-foot">
+      <button class="btn-secondary" id="flagged-unflag-all" title="Unflag every flagged set (doesn't touch any files)">Unflag all</button>
+      <button class="btn-danger" id="flagged-execute-all" title="Delete all marked images, same as the topbar Execute button">Execute all</button>
+    </div>
   </div>
 </div>
 
@@ -586,7 +630,7 @@
       <div class="hk-row"><span>Zoom into an image</span><kbd>click image</kbd></div>
       <div class="hk-row"><span>Mark / unmark image for deletion</span><kbd>hover + X, or the &times; button</kbd></div>
       <div class="hk-row"><span>Mark every image in a set</span><kbd>trash icon</kbd></div>
-      <div class="hk-row"><span>Flag / unflag a set for requeue</span><kbd>flag icon</kbd></div>
+      <div class="hk-row"><span>Flag / unflag a set for requeue</span><kbd>hover + F, or the flag icon</kbd></div>
       <div class="hk-group-title">Zoomed view</div>
       <div class="hk-row"><span>Switch to previous / next iteration</span><kbd>&larr; / &rarr;</kbd></div>
       <div class="hk-row"><span>Mark / unmark focused image</span><kbd>X</kbd></div>
@@ -600,7 +644,7 @@
 <div class="modal-backdrop" id="modal-confirm">
   <div class="modal" style="width:380px">
     <div class="modal-head">
-      <div class="modal-title">Confirm delete</div>
+      <div class="modal-title" id="confirm-title">Confirm delete</div>
       <button class="modal-close" id="confirm-close"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>
     </div>
     <div class="modal-body">
@@ -617,7 +661,7 @@
 const api = window.electronAPI;
 
 // ---------------------------------------------------------------- STATE
-let config = { folders: [] };
+let config = { folders: [], hiddenFolders: [] };
 let reviewMode = 'iteration';      // 'iteration' (default, requeue review) | 'general' (browse everything)
 let scanResults = [];              // iteration mode: [{dir, groups:{base:[{name,iter}]}}] -- only sets w/ 2+ files
 let scanResultsAll = [];           // general mode:   [{dir, groups:{base:[{name,iter}]}, order:[{base,name,iter}]}] -- every set
@@ -630,11 +674,18 @@ let expandedGroups = new Set();    // keys currently expanded in the canvas list
 let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
 let markedForDeletion = {};        // key -> Set(filenames)
 let rightClickMarks = false;       // false: right-click flags the set (default) | true: right-click marks that image for deletion
+let letterFilter = '';             // '' = show everything | 'A'/'B'/... = only show sets whose label starts with this letter
 
 let collapsedFolderHeaders = new Set(); // parent dir keys collapsed in the Folders sidebar
 let collapsedFlagHeaders = new Set();   // folder dirs collapsed in the Flagged modal
 
 let focusDir = null, focusBase = null, focusGroupKey = null, focusIndex = -1;
+// When focus is opened from the flat wall view, focusContext holds the full
+// list of {dir, base, name} entries currently on screen so arrow keys can
+// step through *every* image in sequence, not just the variants within one
+// duplicate set. When opened from a group's accordion body, focusContext is
+// left null and arrow-stepping falls back to cycling within that group only.
+let focusContext = null, focusContextIndex = -1;
 let hoveredTile = null; // {dir, base, name} of the tile currently under the mouse (set/wall view), so X can mark it without clicking
 
 const key = (dir, base) => dir + '||' + base;
@@ -660,6 +711,14 @@ function tintColorForIndex(i) {
 
 // ---------------------------------------------------------------- INIT
 async function init() {
+  // Defensive reset -- these are already fresh on a normal page load (each
+  // `let` above only runs once), but stating it explicitly here means app
+  // start always guarantees a clean slate even if init() were ever called
+  // again on an existing page instead of a fresh navigation.
+  imageCache = {};
+  scanResults = [];
+  scanResultsAll = [];
+
   bindWindowControls();
   bindTopbar();
   bindFocusOverlay();
@@ -675,18 +734,84 @@ async function init() {
   document.getElementById('btn-collapse-all').onclick = () => setAllExpanded(false);
   document.getElementById('btn-toggle-sidebar').onclick = () => document.getElementById('sidebar').classList.toggle('collapsed');
   document.getElementById('btn-mode-toggle').onclick = toggleReviewMode;
+  document.getElementById('letter-filter').onchange = (e) => {
+    letterFilter = e.target.value;
+    if (!currentFolder) return;
+    if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
+    else renderGroupsCanvas(currentFolder);
+  };
   updateModeToggleButton();
 
+  // Drop every large in-memory structure right before the window goes away,
+  // rather than relying on process teardown to do it implicitly -- keeps
+  // the "clean on close" behavior explicit and correct even if a future
+  // change reuses the page instead of destroying it outright.
+  window.addEventListener('beforeunload', () => {
+    imageCache = {};
+    scanResults = [];
+    scanResultsAll = [];
+    flaggedList = [];
+    flaggedKeys = new Set();
+  });
+
   config = await api.getConfig();
-  await refreshAll(); // always rescan every watched folder on startup
+  await refreshAll(); // rescan every watched folder; images load lazily per-folder as they're opened
 }
 
-async function refreshAll() {
-  if (reviewMode === 'general') {
-    scanResultsAll = await api.scanAll();
-  } else {
-    scanResults = await api.scan();
+
+// Drops anything from imageCache that no longer matches reality: either the
+// whole set is gone (folder unwatched, base deleted entirely) or its file
+// list changed (an image inside it was added/removed/renamed) since it was
+// last read from disk. Checked against scanResultsAll specifically -- unlike
+// scanResults, it lists every set including singletons, so it's a complete
+// picture of what's actually on disk regardless of which review mode is
+// currently active. Runs on every rescan (not just the two big ones below)
+// so nothing lingers in memory once it stops matching disk.
+function reconcileImageCache() {
+  const onDiskFiles = new Map(); // key(dir,base) -> Set(filenames currently on disk)
+  for (const f of scanResultsAll) {
+    for (const base in f.groups) onDiskFiles.set(key(f.dir, base), new Set(f.groups[base].map(e => e.name)));
   }
+  for (const k in imageCache) {
+    const onDisk = onDiskFiles.get(k);
+    if (!onDisk) { delete imageCache[k]; continue; } // set no longer exists at all
+    const cached = imageCache[k];
+    const sameFiles = cached.length === onDisk.size && cached.every(im => onDisk.has(im.name));
+    if (!sameFiles) delete imageCache[k]; // membership changed -- reload fresh next time it's needed
+  }
+}
+
+// opts.fullLoad triggers a full-tree pre-load (loadEverythingIntoMemory) after
+// the rescan completes. NOT used on app start or on review-mode switches
+// anymore -- eagerly base64-loading every image across every watched folder
+// (which can easily be 1000+ images) was slow/memory-heavy enough to hang
+// the renderer and show a blank screen. Startup and mode switches now just
+// rescan; each folder's images load lazily (loadAllImagesWithProgress) the
+// moment that folder is actually opened. Deletes and folder edits stay
+// lightweight too and only reconcile membership (added/removed/renamed
+// files), they don't force a full reload.
+//
+// opts.force is the manual "rescan" button's full-from-zero rescan: it
+// throws away every cached image dataUrl and tells main.js to drop its own
+// directory-listing cache before re-scanning, then eagerly reloads every
+// image. This is the only path that catches a file being replaced in place
+// (same name, new bytes) -- membership-based reconcileImageCache can't see
+// that, since the filename on disk never changed, and neither can main.js's
+// mtime-keyed directory cache, since replacing a file's contents without
+// renaming it doesn't bump its parent directory's mtime either.
+async function refreshAll(opts) {
+  const fullLoad = !!(opts && opts.fullLoad);
+  const force = !!(opts && opts.force);
+  if (force) imageCache = {};
+  // Both datasets are fetched every time (not just whichever mode is active)
+  // so scanResultsAll is always fresh enough to reconcile the cache against,
+  // and so switching modes never shows stale data from before the last time
+  // that mode happened to be active. Cheap in practice on a normal (non-
+  // force) rescan: main.js caches each directory's listing by its own
+  // mtime, so an unchanged subtree costs one stat call instead of a full
+  // re-read.
+  [scanResultsAll, scanResults] = await Promise.all([api.scanAll({ force }), api.scan({ force })]);
+  reconcileImageCache();
   flaggedList = await api.getFlags();
   flaggedKeys = new Set();
   for (const f of flaggedList) for (const b of f.bases) flaggedKeys.add(key(f.dir, b));
@@ -697,6 +822,7 @@ async function refreshAll() {
     else renderGroupsCanvas(currentFolder);
   }
   updateStatusbar();
+  if (fullLoad || force) await loadEverythingIntoMemory();
 }
 
 // ---------------------------------------------------------------- REVIEW MODE SWITCH
@@ -734,6 +860,9 @@ function toggleReviewMode() {
     ? 'Pick a folder on the left to browse every image in it.'
     : 'Pick a character on the left to review its sets here.';
   document.getElementById('canvas-placeholder').classList.remove('hidden');
+  letterFilter = '';
+  document.getElementById('letter-filter').style.display = 'none';
+  document.getElementById('letter-filter').innerHTML = '';
 
   refreshAll();
 }
@@ -771,16 +900,20 @@ function bindTopbar() {
   document.getElementById('btn-execute').onclick = openExecuteConfirm;
 }
 
+function activeWatchedCount() {
+  const hidden = new Set(config.hiddenFolders || []);
+  return config.folders.filter(f => !hidden.has(f)).length;
+}
 function updateStatusbar() {
   if (reviewMode === 'general') {
     const totalFolders = scanResultsAll.length;
     const totalImages = scanResultsAll.reduce((n, f) => n + f.order.length, 0);
     document.getElementById('status-left').innerHTML =
-      '<b>' + config.folders.length + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalFolders + '</b> folders &nbsp;&middot;&nbsp; <b>' + totalImages + '</b> images &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
+      '<b>' + activeWatchedCount() + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalFolders + '</b> folders &nbsp;&middot;&nbsp; <b>' + totalImages + '</b> images &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
   } else {
     const totalGroups = scanResults.reduce((n, f) => n + Object.keys(f.groups).length, 0);
     document.getElementById('status-left').innerHTML =
-      '<b>' + config.folders.length + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalGroups + '</b> sets need review &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
+      '<b>' + activeWatchedCount() + '</b> watched &nbsp;&middot;&nbsp; <b>' + totalGroups + '</b> sets need review &nbsp;&middot;&nbsp; <b>' + flaggedKeys.size + '</b> flagged';
   }
   document.getElementById('status-right').innerHTML = markedCountTotal() > 0 ? '<b>' + markedCountTotal() + '</b> marked for deletion' : '';
 }
@@ -789,6 +922,16 @@ function splitPath(p) { return p.split(/[\\\/]/).filter(Boolean); }
 function leafName(p) { const parts = splitPath(p); return parts[parts.length - 1] || p; }
 function parentDirKey(p) { const parts = splitPath(p); parts.pop(); return parts.join('/') || p; }
 function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+// Plain .sort() on set names is lexicographic, so "B10" sorts before "B2"
+// (chars compare '1' < '2'). Set names carry a run of digits that's meant to
+// be read as a single number, not compared character-by-character, so use
+// locale-aware numeric comparison instead -- this treats "10" as the number
+// 10, not the string "1","0". Fixes ordering everywhere a folder's set names
+// get sorted (the wall order coming from main.js, the accordion list here).
+function naturalCompare(a, b) {
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+}
 
 // ---------------------------------------------------------------- SIDEBAR (folders / characters only)
 function emptyStateHtml(msg, btnLabel) {
@@ -927,12 +1070,47 @@ function setLabel(base) {
   return m ? (m[1].toUpperCase() + m[2]) : base;
 }
 
+// The single leading letter of a set's label (e.g. "B9" -> "B"), or null if
+// this base doesn't follow the "..._[Letter]_[Number]" convention at all.
+function baseLetter(base) {
+  const m = base.match(SET_LABEL_RE);
+  return m ? m[1].toUpperCase() : null;
+}
+
+// Rebuilds the letter-filter dropdown for the folder that was just opened,
+// from the FULL (unfiltered) set of bases in that folder -- so the option
+// list always reflects everything available, regardless of which letter (if
+// any) happens to be selected right now. Hides the dropdown entirely for
+// folders that have no lettered sets at all, same treatment as the
+// expand/collapse-all buttons getting hidden when there's nothing to act on.
+function populateLetterFilter(allBases) {
+  const sel = document.getElementById('letter-filter');
+  const letters = [...new Set(allBases.map(baseLetter).filter(Boolean))].sort();
+  if (!letters.length) {
+    sel.style.display = 'none';
+    sel.innerHTML = '';
+    letterFilter = '';
+    return;
+  }
+  sel.style.display = '';
+  sel.innerHTML = '<option value="">\u2013</option>' + letters.map(l => '<option value="' + l + '">' + l + '</option>').join('');
+  // Keep the current selection if it's still a valid letter for this folder
+  // (e.g. re-render after Load All), otherwise fall back to "show everything".
+  if (!letters.includes(letterFilter)) letterFilter = '';
+  sel.value = letterFilter;
+}
+
 // ---------------------------------------------------------------- CANVAS (general review): the image wall
 function renderGeneralCanvas(dir) {
+  const isNewFolder = currentFolder !== dir;
   currentFolder = dir;
   const folderData = scanResultsAll.find(f => f.dir === dir);
-  const order = folderData ? folderData.order : [];
-  const bases = folderData ? Object.keys(folderData.groups) : [];
+  const allBases = folderData ? Object.keys(folderData.groups) : [];
+  if (isNewFolder) letterFilter = '';
+  populateLetterFilter(allBases);
+
+  const order = folderData ? (letterFilter ? folderData.order.filter(o => baseLetter(o.base) === letterFilter) : folderData.order) : [];
+  const bases = letterFilter ? allBases.filter(b => baseLetter(b) === letterFilter) : allBases;
 
   document.getElementById('ch-title').textContent = leafName(dir);
   document.getElementById('ch-sub').textContent = order.length + ' image' + (order.length === 1 ? '' : 's') + ' \u00b7 ' + bases.length + ' set' + (bases.length === 1 ? '' : 's');
@@ -951,13 +1129,14 @@ function renderGeneralCanvas(dir) {
   // appears while scanning through the wall.
   const tintForBase = {};
   let tintIdx = 0;
-  for (const base of Object.keys(folderData ? folderData.groups : {}).sort()) {
+  for (const base of bases.slice().sort(naturalCompare)) {
     if (folderData.groups[base].length > 1) tintForBase[base] = tintColorForIndex(tintIdx++);
   }
 
   renderFoldersList();
   loadWallImagesWithProgress(dir, order, tintForBase);
 }
+
 
 async function loadWallImagesWithProgress(dir, order, tintForBase) {
   const overlay = document.getElementById('canvas-loading');
@@ -1004,6 +1183,10 @@ async function loadWallImagesWithProgress(dir, order, tintForBase) {
 function renderWallTiles(dir, order, tintForBase) {
   const wall = document.getElementById('wall-list');
   wall.innerHTML = '';
+  // Flat navigation context shared by every tile in this wall -- lets the
+  // focus overlay's arrow keys step through all images in on-screen order,
+  // across set boundaries, instead of being stuck inside one duplicate set.
+  const wallContext = order.map(o => ({ dir, base: o.base, name: o.name }));
   for (const item of order) {
     const k = key(dir, item.base);
     const images = imageCache[k] || [];
@@ -1033,7 +1216,7 @@ function renderWallTiles(dir, order, tintForBase) {
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
 
-    tile.querySelector('img').onclick = () => openFocus(dir, item.base, idxInGroup);
+    tile.querySelector('img').onclick = () => openFocus(dir, item.base, item.name, wallContext);
     tile.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, item.base, item.name); };
     tile.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, item.base, item.name); });
     tile.addEventListener('mouseenter', () => { hoveredTile = { dir, base: item.base, name: item.name }; });
@@ -1072,9 +1255,13 @@ function updateWallTileFlag(dir, base) {
 
 // ---------------------------------------------------------------- CANVAS: all sets for a folder, as an accordion list
 function renderGroupsCanvas(dir) {
+  const isNewFolder = currentFolder !== dir;
   currentFolder = dir;
   const folderData = scanResults.find(f => f.dir === dir);
-  const bases = folderData ? Object.keys(folderData.groups).sort() : [];
+  const allBases = folderData ? Object.keys(folderData.groups).sort(naturalCompare) : [];
+  if (isNewFolder) letterFilter = '';
+  populateLetterFilter(allBases);
+  const bases = letterFilter ? allBases.filter(b => baseLetter(b) === letterFilter) : allBases;
 
   document.getElementById('wall-list').classList.remove('active');
   document.getElementById('groups-list').style.display = '';
@@ -1149,6 +1336,86 @@ async function loadAllImagesWithProgress(dir, bases) {
 
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
   if (currentFolder === dir) overlay.classList.add('hidden');
+}
+
+// ---------------------------------------------------------------- LOAD ALL (every folder, current mode)
+// Reads every set's images into imageCache up front, across every folder in
+// every watched root -- this never opens a folder view or any external
+// program, it's purely api.readImage calls landing in the same in-memory
+// imageCache that per-folder loading already uses, so anything loaded here
+// is picked up for free the next time that set's canvas is built.
+//
+// Always sourced from scanResultsAll (not whichever mode is active): it's a
+// strict superset of scanResults (iteration mode only ever hides singleton
+// sets, it never adds anything scanResultsAll doesn't have), so loading
+// against it primes both review modes in one pass regardless of which one
+// you're currently in.
+//
+// Only runs behind the manual "Full rescan" button now (see refreshAll's
+// force/fullLoad options) -- it used to also run automatically on app start
+// and on every review-mode switch, but eagerly loading every image across
+// every watched folder (easily 1000+ images) could hang the renderer long
+// enough to look like a blank-screen crash. The app is intentionally made
+// unresponsive for the duration via a fixed, full-viewport overlay
+// (#loadall-overlay) that sits above everything (topbar, sidebar, modals)
+// and swallows clicks -- there's nothing useful to do until it's done anyway.
+let fullLoadInProgress = false;
+
+function allKnownSets() {
+  const sets = [];
+  for (const f of scanResultsAll) {
+    for (const base in f.groups) sets.push({ dir: f.dir, base });
+  }
+  return sets;
+}
+
+async function loadEverythingIntoMemory() {
+  if (fullLoadInProgress) return;
+  const sets = allKnownSets();
+  if (!sets.length) return;
+
+  fullLoadInProgress = true;
+
+  const overlay = document.getElementById('loadall-overlay');
+  const title = document.getElementById('la-title');
+  const fill = document.getElementById('la-bar-fill');
+  const sub = document.getElementById('la-sub');
+
+  const total = sets.length;
+  title.textContent = 'Loading every folder\u2026';
+  fill.style.width = '0%';
+  sub.textContent = '0 / ' + total + ' sets';
+  overlay.classList.remove('hidden');
+  // Let the overlay paint before the work starts -- same reasoning as the
+  // per-folder loaders: if everything's already cached this would otherwise
+  // resolve synchronously and never actually show.
+  await new Promise(r => requestAnimationFrame(r));
+
+  let done = 0;
+  const CONCURRENCY = 4;
+  let idx = 0;
+  async function worker() {
+    while (idx < sets.length) {
+      const { dir, base } = sets[idx++];
+      await ensureImagesLoaded(dir, base);
+      done++;
+      fill.style.width = Math.round((done / total) * 100) + '%';
+      sub.textContent = done + ' / ' + total + ' sets';
+      await new Promise(r => requestAnimationFrame(r));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+
+  overlay.classList.add('hidden');
+  fullLoadInProgress = false;
+
+  // If a folder's already open, re-render it so anything newly cached shows
+  // up immediately. Everything's cached now, so this resolves essentially
+  // instantly -- it's the same "instant revisit" path as normal navigation.
+  if (currentFolder) {
+    if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
+    else renderGroupsCanvas(currentFolder);
+  }
 }
 
 function buildGroupSection(dir, base, entries, renderNow = true) {
@@ -1250,7 +1517,7 @@ function renderGroupBody(dir, base, body) {
       '<div class="tile-iter-badge">' + img.iter + '</div>' +
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
-    imgwrap.querySelector('img').onclick = () => openFocus(dir, base, idx);
+    imgwrap.querySelector('img').onclick = () => openFocus(dir, base, img.name);
     imgwrap.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, base, img.name); };
     imgwrap.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, base, img.name); });
 
@@ -1398,6 +1665,26 @@ async function onFlagManualClick(dir, base) {
   updateStatusbar();
 }
 
+// Unflags one group without a full refreshAll() -- patches just the flag
+// state (sidebar dot, flagged-count badge, and the group/wall flag icon if
+// that set happens to be the one currently on screen) instead of rescanning
+// disk and rebuilding the whole canvas. Used by the flagged modal, which
+// previously called refreshAll() here and caused a visible full reload of
+// the canvas (re-decoding every image) just to clear one flag dot.
+async function unflagGroupLocal(dir, base) {
+  const k = key(dir, base);
+  await api.unflagGroup(dir, base);
+  flaggedKeys.delete(k);
+  manualFlags.delete(k);
+  flaggedList = await api.getFlags();
+  updateFlaggedBadge();
+  if (dir === currentFolder) {
+    if (reviewMode === 'general') updateWallTileFlag(dir, base);
+    else updateGroupFlagUI(dir, base);
+  }
+  renderFoldersList();
+}
+
 async function syncAutoFlag(dir, base) {
   const k = key(dir, base);
   const images = imageCache[k] || [];
@@ -1422,13 +1709,18 @@ async function syncAutoFlag(dir, base) {
 }
 
 // ---------------------------------------------------------------- FOCUS / ZOOM
-function openFocus(dir, base, idx) {
-  focusDir = dir; focusBase = base; focusGroupKey = key(dir, base); focusIndex = idx;
+function openFocus(dir, base, name, context) {
+  focusDir = dir; focusBase = base; focusGroupKey = key(dir, base);
+  const images = imageCache[focusGroupKey] || [];
+  focusIndex = images.findIndex(im => im.name === name);
+  focusContext = context || null;
+  focusContextIndex = focusContext ? focusContext.findIndex(c => c.dir === dir && c.base === base && c.name === name) : -1;
   document.getElementById('focus-overlay').classList.add('open');
   updateFocusView();
 }
 function closeFocus() {
   focusDir = null; focusBase = null; focusGroupKey = null; focusIndex = -1;
+  focusContext = null; focusContextIndex = -1;
   document.getElementById('focus-overlay').classList.remove('open');
 }
 function updateFocusView() {
@@ -1437,7 +1729,12 @@ function updateFocusView() {
   if (!img) return;
   document.getElementById('focus-img').src = img.dataUrl || '';
   document.getElementById('focus-name').textContent = img.name;
-  document.getElementById('focus-counter').textContent = (focusIndex + 1) + ' / ' + images.length;
+  // With a flat context (opened from the wall), the counter reflects
+  // position across every on-screen image; otherwise it reflects position
+  // within the current duplicate set, as before.
+  document.getElementById('focus-counter').textContent = focusContext
+    ? (focusContextIndex + 1) + ' / ' + focusContext.length
+    : (focusIndex + 1) + ' / ' + images.length;
   const marked = (markedForDeletion[focusGroupKey] || new Set()).has(img.name);
   document.getElementById('focus-img-wrap').classList.toggle('marked', marked);
   const mb = document.getElementById('focus-mark-btn');
@@ -1475,10 +1772,28 @@ function bindFocusOverlay() {
     }
   });
 }
-function stepFocus(dir) {
+async function stepFocus(delta) {
+  // This one function backs both the on-screen prev/next buttons (mouse
+  // left/right click) and the ArrowLeft/ArrowRight keys, so whatever it does
+  // is automatically a 1:1 mapping between the two input methods.
+  if (focusContext && focusContext.length > 1) {
+    // Flat wall context (opened from general review): step across every
+    // on-screen image regardless of which set it belongs to.
+    focusContextIndex = (focusContextIndex + delta + focusContext.length) % focusContext.length;
+    const entry = focusContext[focusContextIndex];
+    focusDir = entry.dir; focusBase = entry.base; focusGroupKey = key(entry.dir, entry.base);
+    await ensureImagesLoaded(entry.dir, entry.base); // no-op if already cached
+    const images = imageCache[focusGroupKey] || [];
+    focusIndex = images.findIndex(im => im.name === entry.name);
+    updateFocusView();
+    return;
+  }
+  // No wall context (opened from the duplicate-set accordion view): step
+  // through the current set's own iterations instead, so the buttons/arrow
+  // keys aren't dead here just because there's no flat context to walk.
   const images = imageCache[focusGroupKey] || [];
-  if (!images.length) return;
-  focusIndex = (focusIndex + dir + images.length) % images.length;
+  if (images.length <= 1) return;
+  focusIndex = (focusIndex + delta + images.length) % images.length;
   updateFocusView();
 }
 
@@ -1494,6 +1809,13 @@ function bindGlobalHotkeys() {
     if (focusIndex < 0 && hoveredTile && (e.key === 'x' || e.key === 'X' || e.key === 'Delete')) {
       toggleMark(hoveredTile.dir, hoveredTile.base, hoveredTile.name);
     }
+
+    // F while hovering a tile flags/unflags that tile's whole set, same as
+    // clicking its flag button -- mirrors the X handler above, and mirrors
+    // the zoom overlay's own F handler for the focused set.
+    if (focusIndex < 0 && hoveredTile && (e.key === 'f' || e.key === 'F')) {
+      onFlagManualClick(hoveredTile.dir, hoveredTile.base);
+    }
   });
 }
 
@@ -1502,15 +1824,28 @@ function openSettings() {
   renderFolderList();
   document.getElementById('modal-settings').classList.add('open');
 }
+const ICON_EYE = '<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+const ICON_EYE_OFF = '<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a20.3 20.3 0 0 1 5.06-5.94M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a20.3 20.3 0 0 1-2.34 3.37"></path><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>';
+
 function renderFolderList() {
   const list = document.getElementById('folder-list');
   list.innerHTML = '';
   if (!config.folders.length) { list.innerHTML = '<div class="modal-empty">No folders yet.</div>'; return; }
+  const hidden = new Set(config.hiddenFolders || []);
   for (const dir of config.folders) {
+    const isHidden = hidden.has(dir);
     const row = document.createElement('div');
-    row.className = 'folder-row';
+    row.className = 'folder-row' + (isHidden ? ' hidden-folder' : '');
     row.innerHTML = '<span class="folder-row-path" title="' + escapeHtml(dir) + '">' + escapeHtml(dir) + '</span>' +
-      '<button class="folder-row-remove"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+      (isHidden ? '<span class="folder-row-hidden-tag">hidden</span>' : '') +
+      '<button class="folder-row-hide' + (isHidden ? ' active' : '') + '" title="' + (isHidden ? 'Unhide -- resume watching this folder' : 'Hide -- stop watching without removing it') + '">' +
+      (isHidden ? ICON_EYE_OFF : ICON_EYE) + '</button>' +
+      '<button class="folder-row-remove" title="Remove from list"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+    row.querySelector('.folder-row-hide').onclick = async () => {
+      config = await api.toggleFolderHidden(dir);
+      renderFolderList();
+      await refreshAll();
+    };
     row.querySelector('.folder-row-remove').onclick = async () => {
       config = await api.removeFolder(dir);
       renderFolderList();
@@ -1526,14 +1861,19 @@ function bindModals() {
     renderFolderList();
     await refreshAll();
   };
-  document.getElementById('settings-rescan').onclick = async () => { await refreshAll(); };
-  document.getElementById('btn-rescan').onclick = async () => { await refreshAll(); };
+  document.getElementById('settings-rescan').onclick = async () => { await refreshAll({ force: true }); };
+  document.getElementById('btn-rescan').onclick = async () => { await refreshAll({ force: true }); };
 
   document.getElementById('flagged-close').onclick = () => document.getElementById('modal-flagged').classList.remove('open');
+  document.getElementById('flagged-execute-all').onclick = () => {
+    document.getElementById('modal-flagged').classList.remove('open');
+    openExecuteConfirm();
+  };
+  document.getElementById('flagged-unflag-all').onclick = openUnflagAllConfirm;
   document.getElementById('hotkeys-close').onclick = () => document.getElementById('modal-hotkeys').classList.remove('open');
   document.getElementById('confirm-close').onclick = closeConfirm;
   document.getElementById('confirm-cancel').onclick = closeConfirm;
-  document.getElementById('confirm-go').onclick = executeDelete;
+  document.getElementById('confirm-go').onclick = () => { if (confirmAction) confirmAction(); };
 
   [document.getElementById('modal-settings'), document.getElementById('modal-flagged'), document.getElementById('modal-hotkeys'), document.getElementById('modal-confirm')].forEach(m => {
     m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); });
@@ -1543,6 +1883,8 @@ function bindModals() {
 function openFlaggedModal() {
   const body = document.getElementById('flagged-list');
   body.innerHTML = '';
+  document.getElementById('flagged-execute-all').disabled = markedCountTotal() === 0;
+  document.getElementById('flagged-unflag-all').disabled = flaggedKeys.size === 0;
   if (!flaggedList.length) {
     body.innerHTML = '<div class="modal-empty">Nothing flagged for requeue.</div>';
     document.getElementById('modal-flagged').classList.add('open');
@@ -1571,9 +1913,7 @@ function openFlaggedModal() {
         row.innerHTML = '<span class="fg-dot"></span><div class="fg-info"><div class="fg-base">' + escapeHtml(base) + '</div></div>' +
           '<button class="tb-btn">Unflag</button>';
         row.querySelector('button').onclick = async () => {
-          await api.unflagGroup(f.dir, base);
-          manualFlags.delete(key(f.dir, base));
-          await refreshAll();
+          await unflagGroupLocal(f.dir, base);
           openFlaggedModal();
         };
         childWrap.appendChild(row);
@@ -1584,14 +1924,39 @@ function openFlaggedModal() {
   document.getElementById('modal-flagged').classList.add('open');
 }
 
-// ---------------------------------------------------------------- EXECUTE
+// ---------------------------------------------------------------- EXECUTE / CONFIRM MODAL
+// The confirm modal is shared by two destructive-ish bulk actions (delete all
+// marked images, unflag every flagged set). `confirmAction` holds whichever
+// one the "go" button should run next; each opener sets the modal's text and
+// this variable before showing it.
+let confirmAction = null;
+
 function openExecuteConfirm() {
   const n = markedCountTotal();
   if (!n) return;
+  document.getElementById('confirm-title').textContent = 'Confirm delete';
   document.getElementById('confirm-text').innerHTML =
     'This will move <b>' + n + ' image' + (n === 1 ? '' : 's') + '</b> to the trash across all reviewed sets. This can\'t be undone from inside the app. Continue?';
+  const go = document.getElementById('confirm-go');
+  go.textContent = 'Move to trash';
+  go.className = 'btn-danger';
+  confirmAction = executeDelete;
   document.getElementById('modal-confirm').classList.add('open');
 }
+
+function openUnflagAllConfirm() {
+  const n = flaggedKeys.size;
+  if (!n) return;
+  document.getElementById('confirm-title').textContent = 'Confirm unflag all';
+  document.getElementById('confirm-text').innerHTML =
+    'This will unflag <b>' + n + ' set' + (n === 1 ? '' : 's') + '</b>. It doesn\'t delete or move any files, and sets can always be reflagged individually afterward. Continue?';
+  const go = document.getElementById('confirm-go');
+  go.textContent = 'Unflag all';
+  go.className = 'btn-danger';
+  confirmAction = executeUnflagAll;
+  document.getElementById('modal-confirm').classList.add('open');
+}
+
 function closeConfirm() { document.getElementById('modal-confirm').classList.remove('open'); }
 
 async function executeDelete() {
@@ -1620,6 +1985,16 @@ async function executeDelete() {
   if (failed.length) {
     alert(failed.length + ' file' + (failed.length === 1 ? '' : 's') + ' could not be moved to the trash:\n' + failed.map(f => f.name).join('\n'));
   }
+}
+
+// Unflags every currently-flagged set. Purely a flag-state change -- doesn't
+// touch markedForDeletion or any files -- so it patches state locally (via
+// unflagGroupLocal) rather than doing a full refreshAll()/rescan.
+async function executeUnflagAll() {
+  closeConfirm();
+  const toUnflag = flaggedList.flatMap(f => f.bases.map(base => ({ dir: f.dir, base })));
+  for (const { dir, base } of toUnflag) await unflagGroupLocal(dir, base);
+  if (document.getElementById('modal-flagged').classList.contains('open')) openFlaggedModal();
 }
 
 init();
