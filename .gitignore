@@ -33,7 +33,8 @@ builder-effective-config.yaml
 indexer/scripts/
 
 # chess local settings
-chess/.vael_chess_settings.json
+chess/vael_chess_settings.json
+chess/piece_templates/
 
 # === OS cruft ===
 .DS_Store
