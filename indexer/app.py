@@ -65,7 +65,7 @@ APP_DIR = Path.home() / ".vael_indexer"
 # Pre-rebrand data folder ("Asset Indexer"). Migrated automatically on first
 # launch of this version -- see _migrate_legacy_app_dir() near main().
 _LEGACY_APP_DIR = Path.home() / ".asset_indexer"
-ICON_PATH = Path(__file__).parent / "Icon.png"
+ICON_PATH = Path(__file__).parent / "icon.ico"
 PREFS_FILE = APP_DIR / "prefs.json"
 NOTES_FILE = APP_DIR / "notes.json"
 
@@ -208,20 +208,30 @@ def _diff_against_cache(
 
 # ── Startup Scripts ────────────────────────────────────────────────────────────
 
-def _natural_sort_key(name: str) -> list:
+def _natural_sort_key(name: str) -> str:
     """
-    Split a name into a list of (text, number) chunks so that sorting
-    compares embedded digit runs numerically instead of character-by-
-    character. This makes "2" sort before "10" instead of after it.
+    Zero-pad every run of digits in `name` (lowercased) so that plain
+    string comparison sorts numbers by magnitude instead of character-by-
+    character -- "2" sorts before "10" -- while every other character
+    keeps its normal alphabetical position relative to digits and to each
+    other (e.g. "!" still sorts before "1", "1" still sorts before "a").
 
-    e.g. "img2" -> ["img", 2]   "img10" -> ["img", 10]
+    This also works unchanged on "/"-separated folder paths, since "/" is
+    just another character and is compared consistently at every depth.
+
+    e.g. "img2" -> "img00000000000000000002"
+         "img10" -> "img00000000000000000010"   (sorts after img2, before img20)
+
+    Earlier version split into [text, number, text, ...] chunks and mixed
+    str/int types. That produced a leading "" chunk for any name starting
+    with a digit, and comparing "" against a whole word (e.g. "!other")
+    always ranked the digit-led name first regardless of which character
+    it was actually up against -- e.g. "100-Girlfriends" would incorrectly
+    sort above "!Other". Returning a single homogeneous string avoids that.
     """
     import re
 
-    return [
-        int(chunk) if chunk.isdigit() else chunk
-        for chunk in re.split(r"(\d+)", name.lower())
-    ]
+    return re.sub(r"\d+", lambda m: m.group().zfill(20), name.lower())
 
 
 SCRIPTS_FILE = APP_DIR / "startup_scripts.json"
@@ -748,15 +758,38 @@ class DevDatabase:
         self._assets: list[dict] = [dict(a) for a in _DEV_FAKE_ASSETS]
         self.path = Path("/dev/null/dev_mode.db")  # sentinel - never accessed
         self.name = "[DEV MODE]"
+        # In-memory only, never persisted - resets every DevDatabase() re-init.
+        self._identifiers: list[str] = ["Adult", "Curvy", "Fantasy"]
 
     # ── API surface (matches Database) ────────────────────────────────────
 
-    def search(self, query: str, limit: int = 2000, folder_only: bool = False) -> list[dict]:
-        """Filter fake assets by name (or folder name), case-insensitive substring match."""
+    def search(
+        self,
+        query: str,
+        limit: int = 2000,
+        folder_only: bool = False,
+        json_only: bool = False,
+        id_only: bool = False,
+    ) -> list[dict]:
+        """Filter fake assets by name (or folder name, or json contents), case-insensitive substring match."""
         q = query.lower()
+        if id_only:
+            results = []
+            for a in self._assets:
+                try:
+                    data = json.loads(a.get("json_data", "{}"))
+                except Exception:
+                    data = {}
+                ident = str(data.get("Identifier", "") or "").lower()
+                if q in ident:
+                    results.append(a)
+            return results[:limit]
         if not q:
             return list(self._assets)[:limit]
-        if folder_only:
+        if json_only:
+            # Search the raw json_data text (matches ';query' UI behaviour).
+            results = [a for a in self._assets if q in a.get("json_data", "").lower()]
+        elif folder_only:
             # Collect unique folder names that contain the query
             matching_folders = {
                 a["folder"] for a in self._assets if q in a["folder"].lower()
@@ -788,6 +821,25 @@ class DevDatabase:
     def close(self) -> None:
         """DEV NO-OP: nothing to close."""
         pass
+
+    # ── Identifiers (Manage ID / Edit ID) - in-memory only, never saved ────
+
+    def get_identifiers(self) -> list[str]:
+        return list(self._identifiers)
+
+    def add_identifier(self, name: str) -> None:
+        self._identifiers.append(name)
+
+    def rename_identifier(self, old_name: str, new_name: str) -> None:
+        self._identifiers = [
+            new_name if n == old_name else n for n in self._identifiers
+        ]
+
+    def remove_identifier(self, name: str) -> None:
+        self._identifiers = [n for n in self._identifiers if n != name]
+
+    def set_identifiers_order(self, names: list[str]) -> None:
+        self._identifiers = list(names)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -832,15 +884,57 @@ class Database:
                 copy_value  TEXT    NOT NULL DEFAULT ''
             )
         """)
+        # Per-database Identifier list (Manage ID / Edit ID feature). "sort_order"
+        # drives both the order shown in the Manage Identifiers window AND the
+        # order the identifiers are listed in the card's "Edit ID" submenu.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS identifiers (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT    NOT NULL,
+                sort_order  INTEGER NOT NULL
+            )
+        """)
         self._conn.commit()
 
     def index(self, folder: Path, full_rebuild: bool = False) -> tuple[int, int]:
         """Blocking index on the *calling* thread's connection. Returns (total, changes)."""
         return _run_index(self.path, folder, full_rebuild, progress_cb=None)
 
-    def search(self, query: str, limit: int = 2000, folder_only: bool = False) -> list[dict]:
+    def search(
+        self,
+        query: str,
+        limit: int = 2000,
+        folder_only: bool = False,
+        json_only: bool = False,
+        id_only: bool = False,
+    ) -> list[dict]:
+        if id_only:
+            # "id-<value>" mode: case-insensitive substring match against the
+            # "Identifier" field's value specifically (not any other field).
+            q = query.lower()
+            rows = self._conn.execute(
+                "SELECT * FROM assets ORDER BY folder, name"
+            ).fetchall()
+            results = []
+            for row in rows:
+                d = dict(row)
+                try:
+                    data = json.loads(d.get("json_data", "{}"))
+                except Exception:
+                    data = {}
+                ident = str(data.get("Identifier", "") or "").lower()
+                if q in ident:
+                    results.append(d)
+            return results[:limit]
         q = f"%{query}%"
-        if folder_only:
+        if json_only:
+            # Search the raw JSON text itself (values, keys, anything) rather
+            # than just the asset name. Triggered by a leading ';' in the UI.
+            rows = self._conn.execute(
+                "SELECT * FROM assets WHERE json_data LIKE ? ORDER BY folder, name LIMIT ?",
+                (q, limit),
+            ).fetchall()
+        elif folder_only:
             # Return all assets that belong to folders whose relative path contains
             # the query string (covers both shallow and nested folder names).
             rows = self._conn.execute(
@@ -865,6 +959,45 @@ class Database:
         self._conn.execute(
             "UPDATE assets SET json_data=? WHERE image_path=?",
             (new_json_text, image_path),
+        )
+        self._conn.commit()
+
+    # ── Identifiers (Manage ID / Edit ID) ───────────────────────────────
+    # Per-database list of identifier strings. Order matters: it drives both
+    # the Manage Identifiers window and the card's "Edit ID" submenu.
+
+    def get_identifiers(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT name FROM identifiers ORDER BY sort_order"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def add_identifier(self, name: str) -> None:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM identifiers"
+        ).fetchone()
+        next_order = (row[0] if row and row[0] is not None else -1) + 1
+        self._conn.execute(
+            "INSERT INTO identifiers(name, sort_order) VALUES(?,?)",
+            (name, next_order),
+        )
+        self._conn.commit()
+
+    def rename_identifier(self, old_name: str, new_name: str) -> None:
+        self._conn.execute(
+            "UPDATE identifiers SET name=? WHERE name=?", (new_name, old_name)
+        )
+        self._conn.commit()
+
+    def remove_identifier(self, name: str) -> None:
+        self._conn.execute("DELETE FROM identifiers WHERE name=?", (name,))
+        self._conn.commit()
+
+    def set_identifiers_order(self, names: list[str]) -> None:
+        """Persist a full reordering. `names` must contain every identifier."""
+        self._conn.executemany(
+            "UPDATE identifiers SET sort_order=? WHERE name=?",
+            [(i, n) for i, n in enumerate(names)],
         )
         self._conn.commit()
 
@@ -1447,6 +1580,57 @@ class AddTagDialog(_DraggableDialog):
         self.accept()
 
 
+class _IdentifierMenuRow(QWidget):
+    """One row in the card's 'Edit ID' submenu.
+
+    A plain widget (not a QAction) so that clicking it toggles the identifier
+    and repaints its dot without the QMenu chain closing - this is what makes
+    selecting several identifiers in one right-click possible. The click is
+    fully consumed here; the menu only closes when the user clicks elsewhere,
+    presses Escape, or picks a real QAction like "Edit JSON...".
+    """
+
+    def __init__(self, name: str, active: bool, on_toggle, parent=None):
+        super().__init__(parent)
+        self._name = name
+        self._active = active
+        self._on_toggle = on_toggle
+        self.setFixedHeight(22)
+        self.setMinimumWidth(140)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 16, 0)
+        lay.setSpacing(8)
+
+        self._dot = QLabel()
+        self._dot.setFixedSize(6, 6)
+        lay.addWidget(self._dot)
+
+        self._label = QLabel(name)
+        self._label.setStyleSheet("color: rgba(220,220,220,0.88); font-size: 11px;")
+        lay.addWidget(self._label)
+        lay.addStretch()
+
+        self._update_dot()
+
+    def _update_dot(self) -> None:
+        if self._active:
+            self._dot.setStyleSheet(
+                "background-color: rgba(232,184,75,0.9); border-radius: 3px;"
+            )
+        else:
+            self._dot.setStyleSheet("background: transparent;")
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._active = not self._active
+            self._update_dot()
+            self._on_toggle(self._name)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class ThumbnailCard(QWidget):
     deleted = Signal(str)
     edited = Signal(str)       # emitted after a successful JSON edit (image_path)
@@ -1469,6 +1653,7 @@ class ThumbnailCard(QWidget):
         self._hovered = False
         self._drag_start_pos: Optional[QPoint] = None
         self._show_tagged_mode = False
+        self._id_menu_dirty = False  # set True while an Edit ID menu session toggles anything
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1647,6 +1832,12 @@ class ThumbnailCard(QWidget):
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
         menu.setObjectName("cardMenu")
+        # Batches Edit ID toggles: each toggle just flips this flag instead of
+        # reloading the grid immediately. We only reload once, after the menu
+        # has fully closed - see the bottom of this method. Reloading while
+        # the menu's own exec() loop is still running would rebuild (and
+        # could destroy) the very card/menu currently on screen.
+        self._id_menu_dirty = False
 
         try:
             data: dict = json.loads(self.asset.get("json_data", "{}"))
@@ -1668,8 +1859,22 @@ class ThumbnailCard(QWidget):
             wa.setDefaultWidget(lora_lbl)
             menu.addAction(wa)
 
-        # Copy actions - always shown, but "lora" key is excluded
-        copy_data = {k: v for k, v in data.items() if k != "lora"}
+        # Copy actions - always shown, but "lora" and "Identifier" keys are excluded
+        # (case-insensitive, since "lora" is lowercase and "Identifier" is
+        # capitalized in practice, but either casing should still be excluded).
+        _EXCLUDED_COPY_KEYS = {"lora", "identifier"}
+        copy_data = {
+            k: v for k, v in data.items() if k.lower() not in _EXCLUDED_COPY_KEYS
+        }
+
+        # "Copy Name" copies the asset's filename without its extension. Both
+        # the .png and its sibling .json share this same stem, so either works.
+        name_stem = Path(self.asset.get("image_path", "")).stem
+        if name_stem:
+            copy_name_act = menu.addAction("Copy Name")
+            copy_name_act.setData(name_stem)
+            menu.addSeparator()
+
         for key, value in copy_data.items():
             text = str(value).strip()
             if not text:
@@ -1683,9 +1888,23 @@ class ThumbnailCard(QWidget):
 
         add_tag_act = menu.addAction("Add Tag")
         menu.addSeparator()
+
+        # ── Edit ID submenu ──────────────────────────────────────────────
+        # Hover expands the list of this database's Identifiers, in the exact
+        # order configured in "Manage Identifiers". Clicking one toggles it on
+        # this asset's JSON without closing the menu (multi-select). Active
+        # identifiers are marked with an orange dot.
+        id_menu = menu.addMenu("Edit ID")
+        self._build_edit_id_menu(id_menu)
+
         edit_act = menu.addAction("Edit JSON...")
         chosen = menu.exec(event.globalPos())
+        # Menu is fully closed now - safe to reload the grid if any Edit ID
+        # toggles happened during this session (one reload for however many
+        # identifiers were clicked, not one per click).
         if chosen is None:
+            if self._id_menu_dirty:
+                self.edited.emit(self.asset["image_path"])
             return
         if chosen is edit_act:
             dlg = EditJsonDialog(self.asset, self._db, self)
@@ -1696,6 +1915,88 @@ class ThumbnailCard(QWidget):
             self._add_tag()
         elif chosen.data():
             QApplication.clipboard().setText(chosen.data())
+
+    def _build_edit_id_menu(self, id_menu: QMenu) -> None:
+        """Populate the 'Edit ID' submenu with one toggleable row per
+        Identifier configured for the active database, in Manage Identifiers
+        order. Rows consume their own clicks so the menu stays open, letting
+        the user select/deselect multiple identifiers in one go."""
+        if self._db is None:
+            id_menu.setEnabled(False)
+            return
+        identifiers = self._db.get_identifiers()
+        if not identifiers:
+            id_menu.setEnabled(False)
+            return
+        active = set(self._get_active_identifiers())
+        for name in identifiers:
+            row = _IdentifierMenuRow(name, name in active, self._toggle_identifier)
+            wa = QWidgetAction(id_menu)
+            wa.setDefaultWidget(row)
+            id_menu.addAction(wa)
+
+    def _get_active_identifiers(self) -> list[str]:
+        """Identifiers currently set on this asset's 'Identifier' field."""
+        try:
+            data = json.loads(self.asset.get("json_data", "{}"))
+        except Exception:
+            data = {}
+        raw = str(data.get("Identifier", "") or "")
+        if not raw.strip():
+            return []
+        return [tok.strip() for tok in raw.split(",") if tok.strip()]
+
+    def _toggle_identifier(self, name: str) -> None:
+        """Add/remove `name` from this asset's 'Identifier' field and persist.
+
+        The field is a comma-separated list of active identifier names. If
+        toggling off empties the list, the 'Identifier' key is removed from
+        the JSON entirely; if toggling on and the key is missing, it's added.
+
+        This writes to disk/DB immediately (so a search run right after still
+        sees correct data - search always reads live from the DB anyway) but
+        deliberately does NOT emit `edited` here. Emitting per click would
+        rebuild the whole card grid while this menu's own exec() loop is
+        still running - risking tearing down this very card/menu mid-click.
+        Instead we just flag the session as dirty; contextMenuEvent fires one
+        reload after the menu actually closes, however many were toggled.
+        """
+        try:
+            data = json.loads(self.asset.get("json_data", "{}"))
+        except Exception:
+            data = {}
+
+        current = self._get_active_identifiers()
+        if name in current:
+            current = [c for c in current if c != name]
+        else:
+            current.append(name)
+
+        if current:
+            data["Identifier"] = ", ".join(current)
+        else:
+            data.pop("Identifier", None)
+        new_text = json.dumps(data, indent=2, ensure_ascii=False)
+
+        if DEV_MODE:
+            self.asset["json_data"] = new_text
+            if self._db:
+                self._db.update_json(self.asset["image_path"], new_text)
+            self._id_menu_dirty = True
+            return
+
+        json_path = self.asset.get("json_path", "")
+        if json_path:
+            try:
+                Path(json_path).write_text(new_text, encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.critical(self, APP_NAME, f"Could not write file:\n{exc}")
+                return
+
+        if self._db:
+            self._db.update_json(self.asset["image_path"], new_text)
+        self.asset["json_data"] = new_text
+        self._id_menu_dirty = True
 
     def _add_tag(self) -> None:
         dlg = AddTagDialog(self)
@@ -2257,8 +2558,16 @@ class ResultsPanel(QScrollArea):
         restore_keys: Optional[set[str]] = None,
         restore_scroll: int = 0,
         folder_only: bool = False,
+        json_only: bool = False,
+        id_only: bool = False,
     ) -> None:
-        assets = self._db.search(query, folder_only=folder_only) if self._db else []
+        assets = (
+            self._db.search(
+                query, folder_only=folder_only, json_only=json_only, id_only=id_only
+            )
+            if self._db
+            else []
+        )
         if assets:
             # Show a message BEFORE the UI freezes while rendering all thumbnails.
             # processEvents() flushes it to screen before the heavy _populate() call.
@@ -2344,7 +2653,9 @@ class ResultsPanel(QScrollArea):
                 all_folders_set.add("/".join(parts[:depth]))
 
         # Sort all folders; this controls display order within each level
-        all_folders = sorted(all_folders_set, reverse=not self._az_sort)
+        all_folders = sorted(
+            all_folders_set, key=_natural_sort_key, reverse=not self._az_sort
+        )
 
         # Build sections depth-first (parents before children) so that
         # add_child_section always finds its parent already in `sections`,
@@ -2385,7 +2696,16 @@ class ResultsPanel(QScrollArea):
                 else:
                     self._layout.addWidget(sec)
 
-        for asset in assets:
+        # Sort cards by natural (numeric-aware) name order before adding.
+        # The DB query only does a plain SQL "ORDER BY folder, name", which
+        # is a raw text sort (1, 10, 11, ..., 2, 20, ...) -- this is what
+        # actually re-sorts them into 1, 2, 3, ... within each folder.
+        sorted_assets = sorted(
+            assets,
+            key=lambda a: _natural_sort_key(a.get("name", "")),
+            reverse=not self._az_sort,
+        )
+        for asset in sorted_assets:
             fk = (asset.get("folder", "") or "").replace("\\", "/")
             if fk in sections:
                 sections[fk].add_card(asset, self._db)
@@ -3075,6 +3395,352 @@ class StartupScriptsDialog(_DraggableDialog):
             self._refresh_list()
             self._list.setCurrentRow(row + 1)
 
+
+
+# ── Add Identifier Dialog ────────────────────────────────────────────────────
+
+
+class AddIdentifierDialog(_DraggableDialog):
+    """Frameless dialog for adding a single Identifier string. Also reused
+    for editing an existing one (title/text is swapped by the caller)."""
+
+    _PREFS_KEY = "add_identifier_pos"
+    W, H = 360, 148
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.identifier_text: str = ""
+        self.setWindowTitle("Add Identifier")
+        self.setModal(True)
+        self.setFixedSize(self.W, self.H)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        shadow_frame = QFrame(self)
+        shadow_frame.setObjectName("dialogShadow")
+        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
+
+        frame = QFrame(self)
+        frame.setObjectName("editDialogFrame")
+        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # ── Header ────────────────────────────────────────────────────────
+        header = QWidget()
+        header.setObjectName("editDialogHeader")
+        header.setFixedHeight(26)
+        h_lay = QHBoxLayout(header)
+        h_lay.setContentsMargins(14, 0, 10, 0)
+        h_lay.setSpacing(8)
+
+        dot = QWidget()
+        dot.setObjectName("editDialogDot")
+        dot.setFixedSize(6, 6)
+
+        self._title_lbl = QLabel("Add Identifier")
+        self._title_lbl.setObjectName("editDialogTitle")
+
+        close_btn = QToolButton()
+        close_btn.setText("✕")
+        close_btn.setObjectName("dbDialogClose")
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(self.reject)
+
+        h_lay.addWidget(dot)
+        h_lay.addWidget(self._title_lbl)
+        h_lay.addStretch()
+        h_lay.addWidget(close_btn)
+        lay.addWidget(header)
+
+        sep = QFrame()
+        sep.setObjectName("dbDialogSep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(sep)
+
+        # ── Body: single text field ───────────────────────────────────────
+        body = QWidget()
+        b_lay = QVBoxLayout(body)
+        b_lay.setContentsMargins(14, 10, 14, 8)
+        b_lay.setSpacing(0)
+
+        self._name_edit = QLineEdit()
+        self._name_edit.setObjectName("scriptArgsEdit")
+        self._name_edit.setPlaceholderText("Enter identifier...")
+        self._name_edit.setFixedHeight(24)
+        self._name_edit.returnPressed.connect(self._accept)
+        b_lay.addWidget(self._name_edit)
+        b_lay.addStretch()
+        lay.addWidget(body, 1)
+
+        sep2 = QFrame()
+        sep2.setObjectName("dbDialogSep")
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(sep2)
+
+        # ── Footer: Save (left), Cancel (right) ───────────────────────────
+        footer = QWidget()
+        footer.setObjectName("editDialogFooter")
+        f_lay = QHBoxLayout(footer)
+        f_lay.setContentsMargins(10, 5, 10, 6)
+        f_lay.setSpacing(0)
+
+        save_btn = QPushButton("Save")
+        save_btn.setObjectName("editSaveBtn")
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("editCancelBtn")
+
+        f_lay.addWidget(save_btn)
+        f_lay.addStretch()
+        f_lay.addWidget(cancel_btn)
+        lay.addWidget(footer)
+
+        save_btn.clicked.connect(self._accept)
+        cancel_btn.clicked.connect(self.reject)
+
+        self._restore_pos()
+        QTimer.singleShot(0, self._name_edit.setFocus)
+
+    def set_title(self, title: str) -> None:
+        self.setWindowTitle(title)
+        self._title_lbl.setText(title)
+
+    def set_text(self, text: str) -> None:
+        self._name_edit.setText(text)
+
+    def _accept(self) -> None:
+        self.identifier_text = self._name_edit.text().strip()
+        if not self.identifier_text:
+            return
+        self.accept()
+
+
+# ── Manage Identifiers Dialog ────────────────────────────────────────────────
+
+
+class ManageIdentifiersDialog(_DraggableDialog):
+    """Per-database Identifier list manager. Looks and functions exactly like
+    Startup Scripts: add/edit/remove entries and reorder with ↑/↓. The order
+    shown here is the exact order the identifiers later appear in a card's
+    'Edit ID' submenu."""
+
+    _PREFS_KEY = "manage_identifiers_pos"
+    W, H = 280, 340
+
+    def __init__(self, db, parent=None, readonly: bool = False):
+        super().__init__(parent)
+        self._db = db
+        # ── DEV MODE: when readonly=True, changes are visually interactive
+        #    but never persisted beyond the in-memory DevDatabase instance.
+        self._readonly = readonly
+
+        self.setWindowTitle(
+            "Manage Identifiers" + ("  [dev - changes not saved]" if readonly else "")
+        )
+        self.setModal(True)
+        self.setFixedSize(self.W, self.H)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self._identifiers: list[str] = self._db.get_identifiers() if self._db else []
+
+        shadow_frame = QFrame(self)
+        shadow_frame.setObjectName("dialogShadow")
+        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
+
+        frame = QFrame(self)
+        frame.setObjectName("editDialogFrame")
+        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Header
+        header = QWidget()
+        header.setObjectName("editDialogHeader")
+        header.setFixedHeight(26)
+        h_lay = QHBoxLayout(header)
+        h_lay.setContentsMargins(14, 0, 10, 0)
+        h_lay.setSpacing(8)
+        dot = QWidget()
+        dot.setObjectName("editDialogDot")
+        dot.setFixedSize(6, 6)
+        title_lbl = QLabel("Manage Identifiers")
+        title_lbl.setObjectName("editDialogTitle")
+        close_btn = QToolButton()
+        close_btn.setText("✕")
+        close_btn.setObjectName("dbDialogClose")
+        close_btn.setFixedSize(18, 18)
+        close_btn.clicked.connect(self.reject)
+        h_lay.addWidget(dot)
+        h_lay.addWidget(title_lbl)
+        h_lay.addStretch()
+        h_lay.addWidget(close_btn)
+        lay.addWidget(header)
+
+        sep = QFrame()
+        sep.setObjectName("dbDialogSep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(sep)
+
+        # List
+        list_wrap = QWidget()
+        list_wrap.setObjectName("dbListWrap")
+        lw_lay = QVBoxLayout(list_wrap)
+        lw_lay.setContentsMargins(8, 6, 8, 4)
+        lw_lay.setSpacing(0)
+        self._list = QListWidget()
+        self._list.setObjectName("dbDialogList")
+        self._list.setFrameShape(QFrame.Shape.NoFrame)
+        self._list.currentRowChanged.connect(self._on_selection_changed)
+        lw_lay.addWidget(self._list)
+        lay.addWidget(list_wrap, 1)
+        self._refresh_list()
+
+        sep2 = QFrame()
+        sep2.setObjectName("dbDialogSep")
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        lay.addWidget(sep2)
+
+        # Footer with +/- and ↑/↓ buttons centered
+        footer = QWidget()
+        footer.setObjectName("editDialogFooter")
+        f_lay = QHBoxLayout(footer)
+        f_lay.setContentsMargins(10, 6, 10, 7)
+        f_lay.setSpacing(6)
+
+        self._up_btn = QToolButton()
+        self._up_btn.setText("↑")
+        self._up_btn.setObjectName("scriptOrderBtn")
+        self._up_btn.setFixedSize(22, 22)
+        self._up_btn.setToolTip("Move Up")
+        self._up_btn.setEnabled(False)
+        self._up_btn.clicked.connect(self._move_up)
+
+        self._down_btn = QToolButton()
+        self._down_btn.setText("↓")
+        self._down_btn.setObjectName("scriptOrderBtn")
+        self._down_btn.setFixedSize(22, 22)
+        self._down_btn.setToolTip("Move Down")
+        self._down_btn.setEnabled(False)
+        self._down_btn.clicked.connect(self._move_down)
+
+        self._edit_btn = QToolButton()
+        self._edit_btn.setText("Edit")
+        self._edit_btn.setObjectName("scriptEditBtn")
+        self._edit_btn.setFixedSize(48, 20)
+        self._edit_btn.setToolTip("Edit Identifier")
+        self._edit_btn.setEnabled(False)
+        self._edit_btn.clicked.connect(self._edit_identifier)
+
+        self._add_btn = QToolButton()
+        self._add_btn.setText("+")
+        self._add_btn.setObjectName("scriptAddBtn")
+        self._add_btn.setFixedSize(22, 22)
+        self._add_btn.setToolTip("Add Identifier")
+        self._add_btn.clicked.connect(self._add_identifier)
+
+        self._remove_btn = QToolButton()
+        self._remove_btn.setText("−")
+        self._remove_btn.setObjectName("scriptRemoveBtn")
+        self._remove_btn.setFixedSize(22, 22)
+        self._remove_btn.setToolTip("Remove Identifier")
+        self._remove_btn.setEnabled(False)
+        self._remove_btn.clicked.connect(self._remove_identifier)
+
+        f_lay.addStretch()
+        f_lay.addWidget(self._up_btn)
+        f_lay.addWidget(self._down_btn)
+        f_lay.addSpacing(8)
+        f_lay.addWidget(self._edit_btn)
+        f_lay.addSpacing(8)
+        f_lay.addWidget(self._add_btn)
+        f_lay.addWidget(self._remove_btn)
+        f_lay.addStretch()
+        lay.addWidget(footer)
+
+        self._restore_pos()
+
+    def _persist_order(self) -> None:
+        if self._db:
+            self._db.set_identifiers_order(self._identifiers)
+
+    def _refresh_list(self) -> None:
+        row = self._list.currentRow()
+        self._list.clear()
+        for name in self._identifiers:
+            self._list.addItem(name)
+        if 0 <= row < self._list.count():
+            self._list.setCurrentRow(row)
+
+    def _on_selection_changed(self, row: int) -> None:
+        has = row >= 0
+        count = len(self._identifiers)
+        self._remove_btn.setEnabled(has)
+        self._edit_btn.setEnabled(has)
+        self._up_btn.setEnabled(has and row > 0)
+        self._down_btn.setEnabled(has and row < count - 1)
+
+    def _edit_identifier(self) -> None:
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        old_name = self._identifiers[row]
+        dlg = AddIdentifierDialog(self)
+        dlg.set_title("Edit Identifier")
+        dlg.set_text(old_name)
+        if dlg.exec():
+            new_name = dlg.identifier_text
+            self._identifiers[row] = new_name
+            if self._db:
+                self._db.rename_identifier(old_name, new_name)
+            self._refresh_list()
+            self._list.setCurrentRow(row)
+
+    def _add_identifier(self) -> None:
+        dlg = AddIdentifierDialog(self)
+        if dlg.exec():
+            name = dlg.identifier_text
+            self._identifiers.append(name)
+            if self._db:
+                self._db.add_identifier(name)
+            self._refresh_list()
+            self._list.setCurrentRow(len(self._identifiers) - 1)
+
+    def _remove_identifier(self) -> None:
+        row = self._list.currentRow()
+        if row >= 0:
+            name = self._identifiers[row]
+            del self._identifiers[row]
+            if self._db:
+                self._db.remove_identifier(name)
+            self._refresh_list()
+
+    def _move_up(self) -> None:
+        row = self._list.currentRow()
+        if row > 0:
+            self._identifiers[row - 1], self._identifiers[row] = (
+                self._identifiers[row],
+                self._identifiers[row - 1],
+            )
+            self._persist_order()
+            self._refresh_list()
+            self._list.setCurrentRow(row - 1)
+
+    def _move_down(self) -> None:
+        row = self._list.currentRow()
+        if row < len(self._identifiers) - 1:
+            self._identifiers[row], self._identifiers[row + 1] = (
+                self._identifiers[row + 1],
+                self._identifiers[row],
+            )
+            self._persist_order()
+            self._refresh_list()
+            self._list.setCurrentRow(row + 1)
 
 
 # ── Image Viewer Overlay ───────────────────────────────────────────────────────
@@ -3899,15 +4565,36 @@ class MainWindow(QMainWindow):
         self._search_timer.stop()
         text = self._search.text().strip()
 
+        # ── JSON-contents mode: query starting with ';' ────────────────────────
+        # e.g. ";short hair" → search the raw JSON data for "short hair"
+        # anywhere it appears (keys or values), instead of just the asset name.
+        # Takes precedence over folder-only mode below.
+        json_only = False
+        folder_only = False
+        id_only = False
+        effective_text = text
+        if text.startswith(";"):
+            json_only = True
+            effective_text = text[1:].strip()  # strip the leading ';'
+        # ── Identifier-field mode: query starting with 'id-' ──────────────────
+        # e.g. "id-adult" → case-insensitive substring match against the
+        # "Identifier" field's value only (not any other field or the name).
+        elif text.lower().startswith("id-"):
+            id_only = True
+            effective_text = text[3:].strip()  # strip the leading 'id-'
         # ── Folder-only mode: query ending with ' f' ──────────────────────────
         # e.g. "pokemon f" → search only folder names for "pokemon"
-        folder_only = False
-        effective_text = text
-        if text.lower().endswith(" f"):
+        elif text.lower().endswith(" f"):
             folder_only = True
             effective_text = text[:-2].strip()  # strip the trailing ' f'
 
-        if not effective_text and not folder_only and self._pre_search_expanded is not None:
+        if (
+            not effective_text
+            and not folder_only
+            and not json_only
+            and not id_only
+            and self._pre_search_expanded is not None
+        ):
             # Search cleared → restore exactly where the user was
             self._results.refresh(
                 "",
@@ -3917,7 +4604,12 @@ class MainWindow(QMainWindow):
             self._pre_search_expanded = None
             self._pre_search_scroll = 0
         else:
-            self._results.refresh(effective_text, folder_only=folder_only)
+            self._results.refresh(
+                effective_text,
+                folder_only=folder_only,
+                json_only=json_only,
+                id_only=id_only,
+            )
 
     def _set_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
@@ -3950,6 +4642,7 @@ class MainWindow(QMainWindow):
         menu.addAction(tagged_label, self._action_toggle_tagged)
         menu.addSeparator()
         menu.addAction("Startup Scripts", self._action_startup_scripts)
+        menu.addAction("Manage ID", self._action_manage_identifiers)
         menu.aboutToHide.connect(self._on_menu_hide)
         self._app_menu = menu
         menu.exec(self._menu_btn.mapToGlobal(self._menu_btn.rect().bottomLeft()))
@@ -4036,6 +4729,22 @@ class MainWindow(QMainWindow):
         #    nothing is written to disk. Changes are lost on close.
         dlg = StartupScriptsDialog(self, readonly=DEV_MODE)
         dlg.exec()
+
+    def _action_manage_identifiers(self) -> None:
+        """Identifiers are a per-database feature, so this needs an active
+        database (or the in-memory dev stub while in DEV_MODE)."""
+        db = self._dev_db if DEV_MODE else self.db_manager.get(self._active_db)
+        if db is None:
+            QMessageBox.information(
+                self, APP_NAME, "Open a database first to manage its Identifiers."
+            )
+            return
+        dlg = ManageIdentifiersDialog(db, self, readonly=DEV_MODE)
+        dlg.exec()
+        # Reflects any Identifier field changes made indirectly, though
+        # Manage Identifiers itself doesn't touch asset JSON - safe no-op
+        # refresh keeps the results view consistent if a rename affected it.
+        self._do_search()
 
     # ── Windows: native hit-testing so the OS drives move/resize/snap ─────
 
@@ -4823,7 +5532,7 @@ class NotePanel(QScrollArea):
                 for depth in range(1, len(parts) + 1):
                     all_folder_paths.add("/".join(parts[:depth]))
 
-            folder_list = sorted(all_folder_paths)
+            folder_list = sorted(all_folder_paths, key=_natural_sort_key)
             sections: dict[str, NoteSection] = {}
 
             for folder_path in folder_list:

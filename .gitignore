@@ -36,6 +36,10 @@ indexer/scripts/
 chess/vael_chess_settings.json
 chess/piece_templates/
 
+# cover local settings
+cover/workflows/
+cover/outputs/
+
 # === OS cruft ===
 .DS_Store
 Thumbs.db

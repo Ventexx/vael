@@ -7,7 +7,7 @@ let win;
 // Windows keys the taskbar icon/grouping off the app's AppUserModelID, not
 // just the BrowserWindow `icon` option below -- without this, a dev run (or
 // even some packaged installs) can silently fall back to the generic
-// Electron icon in the taskbar even though icon.png loads fine for the
+// Electron icon in the taskbar even though icon.ico loads fine for the
 // window itself. Matches the appId in package.json's build config. No-op
 // on other platforms.
 if (process.platform === 'win32') {
@@ -16,7 +16,7 @@ if (process.platform === 'win32') {
 
 function createWindow() {
   // Load icon
-  const iconPath = path.join(__dirname, 'icon.png');
+  const iconPath = path.join(__dirname, 'icon.ico');
   const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
 
   win = new BrowserWindow({
@@ -54,11 +54,40 @@ ipcMain.on('win-close',    () => { win.destroy(); app.quit(); });
 // Open a whole folder of images at once (core workflow: batch-pixelate a shoot)
 const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 
+// How big (long edge, px) the thumbnails we hand back to the renderer are.
+// This only needs to comfortably cover the filmstrip thumbnail's max on-screen
+// size (~160x60 CSS px at up to 2x devicePixelRatio == ~320px) — it does NOT
+// need to be anywhere near full resolution, because the renderer no longer
+// keeps every opened image's full-size pixels in memory (see editor.html's
+// lazy-load/eviction code). Keeping this small is what makes it possible to
+// import thousands of images without stalling or exhausting memory.
+const THUMB_MAX_PX = 480;
+
+// Used to keep the main process responsive (it also owns the window/dialogs)
+// while walking a folder with hundreds or thousands of files: after this many
+// files we yield back to the event loop for a tick before continuing.
+const YIELD_EVERY = 25;
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
 // Shared by the dialog-based "Open Folder" button and by drag-and-drop of a
-// folder from the OS file explorer: reads every image directly inside `dir`
-// (non-recursive, matching the old behavior) and returns {name, path, dataUrl}
-// for each so the renderer never needs raw filesystem access.
-function readImagesFromDir(dir) {
+// folder from the OS file explorer. Reads every image directly inside `dir`
+// (non-recursive, matching the old behavior) and returns lightweight entries
+// — {name, path, w, h, thumbDataUrl} — instead of the full-resolution file
+// bytes.
+//
+// This used to fs.readFileSync + base64-encode the FULL file for every image
+// up front, all in one synchronous pass, and hand the entire batch back to
+// the renderer in a single IPC message. That's fine for a couple dozen
+// photos; for 10 folders totaling 1-2k images it means gigabytes of base64
+// built up in memory and one enormous IPC payload — which is exactly what
+// was crashing (or freezing, then getting killed as unresponsive) the app.
+// Now we only ever produce small thumbnails here (via Electron's native
+// nativeImage decoder/resizer, so no giant intermediate buffers), and the
+// renderer fetches a given image's real bytes lazily, one at a time, only
+// once it's actually opened or edited (see 'read-image-full' below).
+async function readImagesFromDir(dir) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -70,14 +99,19 @@ function readImagesFromDir(dir) {
     .map(e => e.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
   const images = [];
-  for (const name of names) {
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
     const filePath = path.join(dir, name);
     try {
-      const buf = fs.readFileSync(filePath);
-      const ext = path.extname(name).slice(1).toLowerCase();
-      const mime = ext === 'jpg' ? 'jpeg' : ext;
-      images.push({ name, path: filePath, dataUrl: `data:image/${mime};base64,${buf.toString('base64')}` });
+      const full = nativeImage.createFromPath(filePath);
+      const { width, height } = full.getSize();
+      if (!width || !height) continue; // unreadable/corrupt image, skip it
+      const thumb = width > THUMB_MAX_PX || height > THUMB_MAX_PX
+        ? full.resize(width >= height ? { width: THUMB_MAX_PX } : { height: THUMB_MAX_PX })
+        : full;
+      images.push({ name, path: filePath, w: width, h: height, thumbDataUrl: thumb.toDataURL() });
     } catch (e) { /* skip unreadable file */ }
+    if (i % YIELD_EVERY === 0) await yieldToEventLoop();
   }
   return images;
 }
@@ -89,7 +123,7 @@ ipcMain.handle('open-folder', async () => {
   });
   if (canceled || !filePaths || !filePaths[0]) return null;
   const dir = filePaths[0];
-  const images = readImagesFromDir(dir);
+  const images = await readImagesFromDir(dir);
   if (images === null) return null;
   return { dir, images };
 });
@@ -99,7 +133,9 @@ ipcMain.handle('open-folder', async () => {
 // can't be read as a directory. The renderer collects the dropped paths and
 // hands them here; we stat each one and, for directories, read their images
 // the same way "Open Folder" does, so a dropped folder becomes its own
-// category with no further prompting.
+// category with no further prompting. Multiple folders dropped at once
+// (e.g. 10 at a time) are handled fine now since each only produces
+// thumbnails, not full image data.
 ipcMain.handle('inspect-dropped-paths', async (_, paths) => {
   const results = [];
   for (const p of paths || []) {
@@ -111,13 +147,26 @@ ipcMain.handle('inspect-dropped-paths', async (_, paths) => {
       continue;
     }
     if (stat.isDirectory()) {
-      const images = readImagesFromDir(p) || [];
+      const images = (await readImagesFromDir(p)) || [];
       results.push({ path: p, isDirectory: true, name: path.basename(p), images });
     } else {
       results.push({ path: p, isDirectory: false });
     }
   }
   return results;
+});
+
+// Fetches one image's real full-resolution bytes as a data URL, on demand.
+// The renderer calls this the moment it actually needs the pixels — an image
+// gets opened/selected, edited, exported, etc. — instead of every image in
+// an imported folder being fully decoded and held in memory up front. Reads
+// asynchronously (not readFileSync) so a slow/large file never blocks the
+// main process or the UI.
+ipcMain.handle('read-image-full', async (_, filePath) => {
+  const buf = await fs.promises.readFile(filePath);
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const mime = ext === 'jpg' ? 'jpeg' : ext;
+  return `data:image/${mime};base64,${buf.toString('base64')}`;
 });
 
 // Save-as via native dialog

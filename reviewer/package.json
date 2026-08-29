@@ -13,16 +13,16 @@
   "build": {
     "appId": "com.vael.reviewer",
     "productName": "reviewer.",
-    "icon": "icon.png",
-    "files": ["reviewer.html", "main.js", "preload.js", "icon.png"],
+    "icon": "icon.ico",
+    "files": ["reviewer.html", "main.js", "preload.js", "icon.ico"],
     "win": {
       "target": "nsis",
-      "icon": "icon.png"
+      "icon": "icon.ico"
     },
     "linux": {
       "target": "AppImage",
       "category": "Graphics",
-      "icon": "icon.png"
+      "icon": "icon.ico"
     }
   },
   "devDependencies": {

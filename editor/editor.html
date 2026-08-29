@@ -1991,6 +1991,13 @@ async function runFilter(type, value) {
   if (state.multiSelected.size >= 2) { runFilterBatch(type, value); return; }
   const img = state.images[state.activeIdx];
   if (!img) { setStatus('No image open', false); return; }
+  // Normally already hydrated by the time it's selected, but guard against
+  // the filter hotkey landing before that finishes (or against any lazy
+  // stub somehow becoming active).
+  if (img._lazy) {
+    try { await hydrateImage(img); }
+    catch (e) { setStatus(`Failed to open ${img.name}`, false); return; }
+  }
   // Core workflow: either draw a selection first, or hit the hotkey with
   // nothing selected to pixelate the entire frame. No selection is treated
   // as "select all" for the duration of this one filter call, then reverted
@@ -2033,9 +2040,18 @@ async function runFilterBatch(type, value) {
     // Sequential, not parallel: keeps memory bounded (each job transfers a
     // full-image buffer) and keeps the status line meaningful. The UI still
     // stays responsive throughout since each filter itself runs off-thread.
+    // This is also what makes batch-applying to an entire freshly-imported
+    // folder viable: most of these images are still lazy stubs (never
+    // opened), so each is decoded here right before it's needed and folded
+    // back down again afterward (via the same LRU as normal viewing) instead
+    // of every selected image's full-res canvas being held in memory at once.
     for (const i of indices) {
       const img = state.images[i];
       if (!img) continue;
+      if (img._lazy) {
+        try { await hydrateImage(img); }
+        catch (err) { console.error(err); continue; }
+      }
       const savedMask = img.mask;
       img.mask = makeMask(img.w, img.h).fill(255);
       let success = false;
@@ -2086,6 +2102,103 @@ function markDirty(img) {
   updateThumbCanvas(img);
   if (state.images[state.activeIdx] === img) renderDisplay();
 }
+// ────────────────────────────────────────────────────────────────────
+// LAZY IMAGE LOADING & EVICTION
+// A folder (or a handful of folders dropped at once) can be hundreds or
+// thousands of images. Every image used to get a full-resolution canvas +
+// a full-resolution ImageData baseline decoded and held in memory forever,
+// the moment it was imported — at typical photo resolutions that's tens of
+// MB per image, times thousands of images, which is what was crashing the
+// app well before the old IPC-blob problem even came into play (see main.js).
+//
+// Now an imported image starts as a lightweight "lazy" stub: just its name,
+// path, dimensions and a small thumbnail — cheap enough that thousands of
+// them cost almost nothing. The real pixels (img.canvas/img.ctx/img.history)
+// only get decoded via hydrateImage() the moment something actually needs
+// them — opening it, running a filter on it, saving/exporting it. A small
+// LRU cap (LAZY_HOT_CAP) keeps only a bounded number of images fully
+// resident at once; once that cap is exceeded the least-recently-used ones
+// get folded back down to lazy stubs via evictImage() (preserving any edits
+// by first flattening them into img.src, so nothing is lost — it just needs
+// a quick re-decode if you come back to it).
+const LAZY_HOT_CAP = 24;
+state._hydratedLRU = [];
+// Marks `img` as recently used and, if that pushes the resident set over the
+// cap, folds the least-recently-used ones (never the currently active image)
+// back down to lazy stubs to keep memory bounded regardless of how many
+// images are open in total.
+async function touchHydrated(img) {
+  const lru = state._hydratedLRU;
+  const at = lru.indexOf(img);
+  if (at !== -1) lru.splice(at, 1);
+  lru.push(img);
+  let guard = lru.length; // safety valve, never loop more than this many times
+  while (lru.length > LAZY_HOT_CAP && guard-- > 0) {
+    const victim = lru[0];
+    if (victim === state.images[state.activeIdx]) {
+      // Never evict the currently active image — shuffle it to the back and
+      // try the next-oldest instead.
+      lru.shift(); lru.push(victim);
+      continue;
+    }
+    lru.shift();
+    await evictImage(victim);
+  }
+}
+// Folds a fully-loaded image back down to a lazy stub, freeing its canvas,
+// history, and mask. If it has unsaved edits, those are flattened into
+// img.src first (via a cheap toBlob encode) so re-opening it later restores
+// the edited pixels rather than the original file on disk.
+async function evictImage(img) {
+  if (img._lazy || !img.canvas) return;
+  try {
+    if (img._fullSrcDirty || !img.src) {
+      img.src = await canvasToDataURLAsync(img.canvas);
+      img._fullSrcDirty = false;
+    }
+  } catch (e) {
+    return; // couldn't safely flatten edits — keep it resident rather than risk losing them
+  }
+  img.canvas = null;
+  img.ctx = null;
+  img.history = null;
+  img.historyIndex = 0;
+  img.mask = null;
+  img._lazy = true;
+}
+// Decodes a lazy stub's real pixels into a working canvas + baseline undo
+// history. Pulls from img.src if we already have the bytes in memory
+// (loose-file drops, or a previously-evicted-with-edits image); otherwise
+// fetches the original file's bytes from disk on demand via IPC. No-op if
+// the image is already hydrated.
+async function hydrateImage(img) {
+  if (!img._lazy) { await touchHydrated(img); return; }
+  let dataUrl = img.src;
+  if (!dataUrl) {
+    if (!window.electronAPI?.readImageFull || !img.path) throw new Error(`No source to load "${img.name}" from`);
+    dataUrl = await window.electronAPI.readImageFull(img.path);
+  }
+  const tmpImg = new Image();
+  await new Promise((resolve, reject) => {
+    tmpImg.onload = resolve;
+    tmpImg.onerror = () => reject(new Error(`Could not decode "${img.name}"`));
+    tmpImg.src = dataUrl;
+  });
+  const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
+  const { canvas, ctx } = makeCanvas(tmpImg, w, h);
+  const wasUnsaved = img.unsaved;
+  img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
+  img.src = dataUrl; img._fullSrcDirty = false;
+  img.history = [{ label: 'Opened image', imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
+  img.historyIndex = 0;
+  // Preserve the unsaved flag across a hydrate — historyIndex/savedAt get
+  // reset to a single fresh baseline, so nudge savedAt off 0 when the image
+  // was unsaved so `unsaved` still reads true after this.
+  img.savedAt = wasUnsaved ? -1 : 0;
+  img.unsaved = wasUnsaved;
+  img._lazy = false;
+  await touchHydrated(img);
+}
 function canvasToDataURLAsync(canvas) {
   return new Promise((resolve, reject) => {
     canvas.toBlob(blob => {
@@ -2101,6 +2214,7 @@ function canvasToDataURLAsync(canvas) {
 // fallback, the metadata panel's size estimate). Cheap no-op if nothing has
 // changed since the last time it was computed.
 async function ensureFullSrc(img) {
+  if (img._lazy) await hydrateImage(img);
   if (img._fullSrcDirty || !img.src) {
     img.src = await canvasToDataURLAsync(img.canvas);
     img._fullSrcDirty = false;
@@ -2117,7 +2231,10 @@ function ensureThumbCanvas(img) {
   if (!img._thumbCanvas) img._thumbCanvas = document.createElement('canvas');
   return img._thumbCanvas;
 }
-function updateThumbCanvas(img) {
+// `source` defaults to img.canvas (the normal case, e.g. right after an
+// edit), but lazy stubs pass in a small decoded thumbnail image instead,
+// since they don't have a full-res canvas to draw from until hydrated.
+function updateThumbCanvas(img, source) {
   const ratio = img.w && img.h ? img.w / img.h : 1;
   const dpr = Math.min(FS_THUMB_MAX_DPR, window.devicePixelRatio || 1);
   const cssW = Math.max(22, Math.min(160, Math.round(FS_THUMB_H * ratio)));
@@ -2127,7 +2244,7 @@ function updateThumbCanvas(img) {
   if (c.width !== pxW || c.height !== pxH) { c.width = pxW; c.height = pxH; }
   const tctx = c.getContext('2d');
   tctx.clearRect(0, 0, c.width, c.height);
-  tctx.drawImage(img.canvas, 0, 0, c.width, c.height);
+  tctx.drawImage(source || img.canvas, 0, 0, c.width, c.height);
 }
 function renderDisplay() {
   const img = state.images[state.activeIdx];
@@ -2219,25 +2336,26 @@ function updateStatusBar() {
 // ════════════════════════════════════════════════════════════════════
 // Shared by both loading paths (drag/drop & file-input, and Open Folder):
 // decodes a data URL into a canvas + baseline history entry.
+// Builds a lazy stub for a loose dropped/opened file. We already have its
+// full bytes in memory (dataUrl, from FileReader) so no disk round-trip is
+// needed to hydrate it later — but we still decode it once here just to
+// draw the small filmstrip thumbnail, then let that full-res <img> get
+// garbage-collected immediately rather than keeping a full canvas resident.
+// The real canvas + undo history only get built when the image is actually
+// opened (see hydrateImage), same as folder imports.
 function loadImageFromSrc(name, path, dataUrl) {
   return new Promise((resolve, reject) => {
     const tmpImg = new Image();
     tmpImg.onload = () => {
       const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
-      const { canvas, ctx } = makeCanvas(tmpImg, w, h);
-      const baseline = { label: 'Opened image', imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null };
-      const newImg = {
-        // dataUrl is already the file's own bytes — reuse it as-is instead of
-        // paying for a fresh toDataURL() PNG encode of every image up front.
-        // _fullSrcDirty stays false until an actual edit happens, at which
-        // point ensureFullSrc() will regenerate src from the (now-edited)
-        // canvas the next time something needs it.
-        name, path: path || null, unsaved: false, w, h, canvas, ctx, src: dataUrl, _fullSrcDirty: false,
+      const stub = {
+        name, path: path || null, unsaved: false, w, h,
+        canvas: null, ctx: null, src: dataUrl, _fullSrcDirty: false,
         mask: null, categoryId: null,
-        history: [baseline], historyIndex: 0, savedAt: 0,
+        history: null, historyIndex: 0, savedAt: 0, _lazy: true,
       };
-      updateThumbCanvas(newImg);
-      resolve(newImg);
+      updateThumbCanvas(stub, tmpImg);
+      resolve(stub);
     };
     tmpImg.onerror = reject;
     tmpImg.src = dataUrl;
@@ -2249,6 +2367,27 @@ function loadImageFile(file) {
     reader.onload = e => loadImageFromSrc(file.name, file.path || null, e.target.result).then(resolve, reject);
     reader.onerror = reject;
     reader.readAsDataURL(file);
+  });
+}
+// Builds a lazy stub for a folder-imported image. Unlike loadImageFromSrc,
+// there's no full-res data at all here yet — main.js only sent back a small
+// pre-made thumbnail (via nativeImage) plus the real dimensions, so this is
+// essentially free even for thousands of images at once. The full pixels get
+// fetched from disk (electronAPI.readImageFull) only once this image is
+// actually opened, edited, or exported (see hydrateImage).
+function makeLazyStub(item) {
+  return new Promise(resolve => {
+    const stub = {
+      name: item.name, path: item.path, unsaved: false, w: item.w || 0, h: item.h || 0,
+      canvas: null, ctx: null, src: null, _fullSrcDirty: false,
+      mask: null, categoryId: null,
+      history: null, historyIndex: 0, savedAt: 0, _lazy: true,
+    };
+    if (!item.thumbDataUrl) { resolve(stub); return; }
+    const t = new Image();
+    t.onload = () => { updateThumbCanvas(stub, t); resolve(stub); };
+    t.onerror = () => resolve(stub); // missing thumbnail isn't fatal, just shows an empty box
+    t.src = item.thumbDataUrl;
   });
 }
 // ────────────────────────────────────────────────────────────────────
@@ -2341,7 +2480,7 @@ async function triggerOpenFolder() {
 async function importFolderAsCategory(folderName, images) {
   if (!images || !images.length) { setStatus(`No images found in "${folderName}"`, false); return; }
   const startAt = state.images.length;
-  const loaded = await loadImagesWithProgress(images, f => loadImageFromSrc(f.name, f.path, f.dataUrl));
+  const loaded = await loadImagesWithProgress(images, makeLazyStub);
   const ok = loaded.filter(Boolean);
   if (!ok.length) { setStatus(`Failed to load images from "${folderName}"`, false); return; }
   ok.forEach(img => state.images.push(img));
@@ -2402,9 +2541,22 @@ function categoryPromptAction(action) {
   renderGallery();
   setStatus(`Filed ${indices.length} image${indices.length === 1 ? '' : 's'} into "${name}"`, true);
 }
+// Deliberately stays synchronous in signature (doesn't return a Promise) so
+// every existing call site keeps working unchanged, including ones that read
+// state.activeIdx / state.images[state.activeIdx] on the very next line
+// (e.g. the arrow-key handlers). Everything that's available immediately —
+// dimensions, filename, category, thumbnail — updates right away. If the
+// newly-active image is still a lazy stub, its pixels get decoded in the
+// background (hydrateImage) and the canvas/history panel are filled in once
+// that resolves; a _selectToken guard makes sure a slow hydrate for an image
+// the person has already clicked past doesn't clobber whatever they clicked
+// next.
+let _selectToken = 0;
 function selectImage(idx) {
   if (idx < 0 || idx >= state.images.length) return;
+  const myToken = ++_selectToken;
   state.activeIdx = idx;
+  const img = state.images[idx];
   // Keep the filmstrip's category filter following whatever image just
   // became active. Without this, the filmstrip only updates its highlight
   // for images that happen to already be inside the currently-filtered
@@ -2417,15 +2569,34 @@ function selectImage(idx) {
   // different category while a different image stays "active" elsewhere
   // is untouched — this only fires once the person actually navigates to
   // an image that lives in a different category than the current filter.
-  const activeCat = state.images[idx].categoryId ?? null;
+  const activeCat = img.categoryId ?? null;
   if (state.categoryFilter !== activeCat) state.categoryFilter = activeCat;
   dropZone.classList.add('has-image');
   clearSelection();
   fitImage(false);
-  renderDisplay();
   renderGallery();
   updateStatusBar();
-  renderHistoryPanel();
+  if (img._lazy) {
+    // Nothing to draw yet — keep the previous frame off-screen rather than
+    // drawing null/stale pixels, and let the status line show it's working.
+    displayCanvas.style.display = 'none';
+    setStatus(`Opening ${img.name}…`, true);
+    hydrateImage(img).then(() => {
+      if (myToken !== _selectToken) return; // superseded by a newer selection
+      fitImage(false);
+      renderDisplay();
+      renderHistoryPanel();
+      updateStatusBar();
+      setStatus(`Opened ${img.name}`, true);
+    }).catch(err => {
+      console.error(err);
+      if (myToken === _selectToken) setStatus(`Failed to open ${img.name}`, false);
+    });
+  } else {
+    touchHydrated(img);
+    renderDisplay();
+    renderHistoryPanel();
+  }
 }
 function removeImage(idx) {
   state.images.splice(idx, 1);

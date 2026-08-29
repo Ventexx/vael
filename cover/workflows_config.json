@@ -1,0 +1,25 @@
+{
+  "server": "http://127.0.0.1:8188",
+  "output_dir": "C:\\Users\\redle\\Documents\\DevHub\\vael\\cover\\outputs",
+  "tabs": [
+    {
+      "workflow_path": "C:/Users/redle/Documents/DevHub/vael/cover/workflows/2-Split.json",
+      "optional_identifier": "",
+      "slot_node_order": [
+        "437",
+        "438"
+      ],
+      "splitter_sizes": [
+        628,
+        627
+      ]
+    }
+  ],
+  "window_geometry": {
+    "x": 1382,
+    "y": 144,
+    "width": 1296,
+    "height": 879
+  },
+  "sidebar_width": 340
+}

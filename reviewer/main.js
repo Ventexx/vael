@@ -7,7 +7,7 @@ let win;
 // Windows keys the taskbar icon/grouping off the app's AppUserModelID, not
 // just the BrowserWindow `icon` option below -- without this, a dev run
 // (or even some packaged installs) can silently fall back to the generic
-// Electron icon in the taskbar even though icon.png loads fine for the
+// Electron icon in the taskbar even though icon.ico loads fine for the
 // window itself. Matches the appId in package.json's build config. No-op
 // on other platforms.
 if (process.platform === 'win32') {
@@ -15,7 +15,7 @@ if (process.platform === 'win32') {
 }
 
 function createWindow() {
-  const iconPath = path.join(__dirname, 'icon.png');
+  const iconPath = path.join(__dirname, 'icon.ico');
   const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
 
   const saved = loadWindowState();
