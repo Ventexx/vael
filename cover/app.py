@@ -33,6 +33,9 @@ from PySide6.QtWidgets import (
 # config.py — config persistence
 # ===========================================================================
 CONFIG_FILE = Path(__file__).resolve().with_name("workflows_config.json")
+ICON_FILE = Path(__file__).resolve().with_name(
+    "icon.ico" if sys.platform == "win32" else "icon.png"
+)
 DEFAULT_SERVER = "http://127.0.0.1:8188"
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().with_name("outputs"))
 
@@ -1679,6 +1682,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        if ICON_FILE.exists():
+            self.setWindowIcon(QIcon(str(ICON_FILE)))
         self._is_windows = _IS_WINDOWS
         self._RESIZE_MARGIN = 6
         self._size_grip = None
@@ -2186,6 +2191,9 @@ class MainWindow(QMainWindow):
 
 def apply_style(app: QApplication) -> None:
     app.setStyle("Fusion")
+
+    if ICON_FILE.exists():
+        app.setWindowIcon(QIcon(str(ICON_FILE)))
 
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(10, 10, 10))

@@ -15,7 +15,7 @@ if (process.platform === 'win32') {
 }
 
 function createWindow() {
-  const iconPath = path.join(__dirname, 'icon.ico');
+  const iconPath = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
   const icon = fs.existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
 
   const saved = loadWindowState();

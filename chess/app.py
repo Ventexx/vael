@@ -36,8 +36,11 @@ import capture
 from engine import EngineManager
 
 APP_TITLE = "vael. chess"
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
-SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".vael_chess_settings.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(SCRIPT_DIR, "frontend")
+SETTINGS_PATH = os.path.join(SCRIPT_DIR, ".vael_chess_settings.json")
+# .ico isn't reliably supported outside Windows, so use icon.png on Linux/macOS.
+ICON_PATH = os.path.join(SCRIPT_DIR, "icon.ico" if sys.platform == "win32" else "icon.png")
 
 window = None  # set once webview.create_window() runs
 
@@ -492,7 +495,13 @@ def main():
             print("[startup] engine auto-connect failed:", e)
 
     window.events.shown += on_shown
-    webview.start(debug="--debug" in sys.argv)
+
+    start_kwargs = {"debug": "--debug" in sys.argv}
+    if os.path.exists(ICON_PATH):
+        start_kwargs["icon"] = ICON_PATH
+    else:
+        print(f"[startup] icon not found at {ICON_PATH}; using default icon.")
+    webview.start(**start_kwargs)
 
 
 if __name__ == "__main__":

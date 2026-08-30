@@ -65,7 +65,7 @@ APP_DIR = Path.home() / ".vael_indexer"
 # Pre-rebrand data folder ("Asset Indexer"). Migrated automatically on first
 # launch of this version -- see _migrate_legacy_app_dir() near main().
 _LEGACY_APP_DIR = Path.home() / ".asset_indexer"
-ICON_PATH = Path(__file__).parent / "icon.ico"
+ICON_PATH = Path(__file__).parent / ("icon.ico" if sys.platform == "win32" else "icon.png")
 PREFS_FILE = APP_DIR / "prefs.json"
 NOTES_FILE = APP_DIR / "notes.json"
 

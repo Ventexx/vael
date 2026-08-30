@@ -10,16 +10,16 @@
         "438"
       ],
       "splitter_sizes": [
-        628,
-        627
+        636,
+        635
       ]
     }
   ],
   "window_geometry": {
-    "x": 1382,
-    "y": 144,
-    "width": 1296,
-    "height": 879
+    "x": 298,
+    "y": 72,
+    "width": 1312,
+    "height": 918
   },
   "sidebar_width": 340
 }
