@@ -921,6 +921,33 @@ function updateStatusbar() {
 function splitPath(p) { return p.split(/[\\\/]/).filter(Boolean); }
 function leafName(p) { const parts = splitPath(p); return parts[parts.length - 1] || p; }
 function parentDirKey(p) { const parts = splitPath(p); parts.pop(); return parts.join('/') || p; }
+
+// A scan result's `dir` is a real folder that contains images directly --
+// for a watched root with subfolders (e.g. "0824-Mass_0/CH17") that's a
+// subfolder several levels below the root, but for a watched root that has
+// its images sitting directly inside it (e.g. "Nahida;Genshin" itself, with
+// no subfolder) `dir` IS the root. parentDirKey() alone can't tell these
+// apart -- it just pops the last path segment unconditionally, so a
+// root-with-direct-images ends up grouped under whatever *its own* OS
+// parent happens to be named (an arbitrary, possibly unrelated folder one
+// level further up, e.g. "3-KIM"), making the watched root look like a
+// subfolder of that unrelated folder instead of a folder in its own right.
+// Grouping by the nearest *watched* ancestor instead fixes that: a result
+// dir groups under whichever entry in config.folders actually contains it
+// (which may be the dir itself), not under its raw OS parent.
+function watchedRootFor(dir) {
+  const dirParts = splitPath(dir);
+  let best = null, bestLen = -1;
+  for (const root of config.folders) {
+    const rootParts = splitPath(root);
+    if (rootParts.length > dirParts.length) continue;
+    if (rootParts.every((part, i) => part === dirParts[i]) && rootParts.length > bestLen) {
+      best = root;
+      bestLen = rootParts.length;
+    }
+  }
+  return best;
+}
 function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
 // Plain .sort() on set names is lexicographic, so "B10" sorts before "B2"
@@ -936,6 +963,105 @@ function naturalCompare(a, b) {
 // ---------------------------------------------------------------- SIDEBAR (folders / characters only)
 function emptyStateHtml(msg, btnLabel) {
   return '<div class="sb-empty">' + msg + '<br><button id="sb-empty-btn" class="add-folder-btn" style="margin-top:10px;">' + btnLabel + '</button></div>';
+}
+
+// A scan result's `dir` is a real folder that contains images directly.
+// Building the sidebar straight from that flat list of dirs, one level deep,
+// can't tell "a subfolder of a watched root" apart from "a totally
+// unrelated folder that happens to share a watched root's OS-level parent"
+// -- and it can't represent a subfolder-of-a-subfolder at all. So instead
+// each watched root's results are assembled into an actual tree mirroring
+// the real on-disk nesting, and the sidebar is rendered recursively from
+// that tree: every real intermediate folder (e.g. "0824-Mass_0", which
+// itself holds no images but whose subfolders CH17/CH26/CH6 do) becomes its
+// own expandable/collapsible node, and only folders that actually contain
+// images directly become clickable leaf rows.
+//
+// A tree node is `{ children: Map<name, node>, leaf: scanResult|null }`.
+// `leaf` is set when this node's own path is a scan result (i.e. that
+// folder has images directly inside it); `children` holds subfolder nodes.
+// A node can have both -- a folder can hold images directly *and* have a
+// subfolder that also holds images -- so the two aren't mutually exclusive.
+function buildFolderTree(root, items) {
+  const makeNode = () => ({ children: new Map(), leaf: null });
+  const rootNode = makeNode();
+  const rootParts = splitPath(root);
+  for (const item of items) {
+    const relParts = splitPath(item.dir).slice(rootParts.length);
+    let cur = rootNode;
+    for (const part of relParts) {
+      if (!cur.children.has(part)) cur.children.set(part, makeNode());
+      cur = cur.children.get(part);
+    }
+    cur.leaf = item;
+  }
+  return rootNode;
+}
+
+function treeLeafCount(node, countFn) {
+  let total = node.leaf ? countFn(node.leaf) : 0;
+  for (const child of node.children.values()) total += treeLeafCount(child, countFn);
+  return total;
+}
+
+// Recursively renders one folder-tree node into `container`.
+// `path` is a unique key for this node's collapsed/expanded state (a chain
+// of path segments, not necessarily a real OS path once joined). `label` is
+// what's shown for this row. `opts` carries the mode-specific bits shared
+// between the per-set sidebar and the general-review sidebar:
+//   countFn(item)   -- number to show in the count badge for a leaf
+//   hasFlag(item)   -- optional, whether to show the flagged-set dot
+//   isActive(item)  -- whether this leaf is the currently open folder
+//   onOpen(item)    -- click handler for a leaf row
+//   rerender()      -- redraws the whole sidebar (called after toggling a
+//                      folder node open/closed)
+function renderFolderNode(container, node, path, label, opts) {
+  const childEntries = [...node.children.entries()];
+  const isPureLeaf = node.leaf && childEntries.length === 0;
+
+  if (isPureLeaf) {
+    const f = node.leaf;
+    const hasFlag = opts.hasFlag ? opts.hasFlag(f) : false;
+    const item = document.createElement('button');
+    item.className = 'sb-item' + (hasFlag ? ' flagged-item' : '') + (opts.isActive(f) ? ' active' : '');
+    item.innerHTML = '<span class="sb-item-name">' + escapeHtml(label) + '</span>' +
+      (hasFlag ? '<span class="sb-item-flag-dot"></span>' : '') +
+      '<span class="sb-item-count">' + opts.countFn(f) + '</span>';
+    item.title = f.dir;
+    item.onclick = () => opts.onOpen(f);
+    container.appendChild(item);
+    return;
+  }
+
+  const collapsed = collapsedFolderHeaders.has(path);
+  const totalCount = treeLeafCount(node, opts.countFn);
+  const header = document.createElement('button');
+  header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
+  header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
+    '<span class="sb-group-label">' + escapeHtml(label) + '</span>' +
+    '<span class="sb-item-count">' + totalCount + '</span>';
+  header.title = path;
+  header.onclick = () => {
+    if (collapsedFolderHeaders.has(path)) collapsedFolderHeaders.delete(path); else collapsedFolderHeaders.add(path);
+    opts.rerender();
+  };
+  container.appendChild(header);
+
+  if (!collapsed) {
+    const childWrap = document.createElement('div');
+    childWrap.className = 'sb-group-children';
+    // A folder that has images directly inside it *and* a subfolder that
+    // also has images gets a synthetic "(this folder)" leaf row alongside
+    // its real subfolder children, so its own images stay reachable
+    // instead of being shadowed entirely by the folder header.
+    if (node.leaf) {
+      renderFolderNode(childWrap, { children: new Map(), leaf: node.leaf }, path + '\u241F.', '(this folder)', opts);
+    }
+    for (const [name, child] of childEntries) {
+      renderFolderNode(childWrap, child, path + '\u241F' + name, name, opts);
+    }
+    container.appendChild(childWrap);
+  }
 }
 
 function renderFoldersList() {
@@ -956,45 +1082,23 @@ function renderFoldersList() {
     return;
   }
 
-  const groups = new Map(); // parentKey -> { label, items:[folderResult] }
+  const byRoot = new Map(); // watched root -> items[]
   for (const f of scanResults) {
-    const pk = parentDirKey(f.dir);
-    if (!groups.has(pk)) groups.set(pk, { label: leafName(pk), items: [] });
-    groups.get(pk).items.push(f);
+    const root = watchedRootFor(f.dir) || parentDirKey(f.dir);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(f);
   }
 
-  for (const [pk, group] of groups) {
-    const collapsed = collapsedFolderHeaders.has(pk);
-    const totalCount = group.items.reduce((n, f) => n + Object.keys(f.groups).length, 0);
-    const header = document.createElement('button');
-    header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
-    header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
-      '<span class="sb-group-label">' + escapeHtml(group.label) + '</span>' +
-      '<span class="sb-item-count">' + totalCount + '</span>';
-    header.title = pk;
-    header.onclick = () => {
-      if (collapsedFolderHeaders.has(pk)) collapsedFolderHeaders.delete(pk); else collapsedFolderHeaders.add(pk);
-      renderFoldersList();
-    };
-    list.appendChild(header);
-
-    if (!collapsed) {
-      const childWrap = document.createElement('div');
-      childWrap.className = 'sb-group-children';
-      for (const f of group.items) {
-        const count = Object.keys(f.groups).length;
-        const hasFlag = [...flaggedKeys].some(k => k.startsWith(f.dir + '||'));
-        const item = document.createElement('button');
-        item.className = 'sb-item' + (hasFlag ? ' flagged-item' : '') + (f.dir === currentFolder ? ' active' : '');
-        item.innerHTML = '<span class="sb-item-name">' + escapeHtml(leafName(f.dir)) + '</span>' +
-          (hasFlag ? '<span class="sb-item-flag-dot"></span>' : '') +
-          '<span class="sb-item-count">' + count + '</span>';
-        item.title = f.dir;
-        item.onclick = () => renderGroupsCanvas(f.dir);
-        childWrap.appendChild(item);
-      }
-      list.appendChild(childWrap);
-    }
+  const opts = {
+    countFn: f => Object.keys(f.groups).length,
+    hasFlag: f => [...flaggedKeys].some(k => k.startsWith(f.dir + '||')),
+    isActive: f => f.dir === currentFolder,
+    onOpen: f => renderGroupsCanvas(f.dir),
+    rerender: renderFoldersList,
+  };
+  for (const [root, items] of byRoot) {
+    const tree = buildFolderTree(root, items);
+    renderFolderNode(list, tree, root, leafName(root), opts);
   }
 }
 
@@ -1013,42 +1117,22 @@ function renderFoldersListGeneral() {
     return;
   }
 
-  const groups = new Map(); // parentKey -> { label, items:[folderResult] }
+  const byRoot = new Map(); // watched root -> items[]
   for (const f of scanResultsAll) {
-    const pk = parentDirKey(f.dir);
-    if (!groups.has(pk)) groups.set(pk, { label: leafName(pk), items: [] });
-    groups.get(pk).items.push(f);
+    const root = watchedRootFor(f.dir) || parentDirKey(f.dir);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(f);
   }
 
-  for (const [pk, group] of groups) {
-    const collapsed = collapsedFolderHeaders.has(pk);
-    const totalCount = group.items.reduce((n, f) => n + f.order.length, 0);
-    const header = document.createElement('button');
-    header.className = 'sb-group-header' + (collapsed ? ' collapsed' : '');
-    header.innerHTML = '<svg class="sb-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>' +
-      '<span class="sb-group-label">' + escapeHtml(group.label) + '</span>' +
-      '<span class="sb-item-count">' + totalCount + '</span>';
-    header.title = pk;
-    header.onclick = () => {
-      if (collapsedFolderHeaders.has(pk)) collapsedFolderHeaders.delete(pk); else collapsedFolderHeaders.add(pk);
-      renderFoldersListGeneral();
-    };
-    list.appendChild(header);
-
-    if (!collapsed) {
-      const childWrap = document.createElement('div');
-      childWrap.className = 'sb-group-children';
-      for (const f of group.items) {
-        const item = document.createElement('button');
-        item.className = 'sb-item' + (f.dir === currentFolder ? ' active' : '');
-        item.innerHTML = '<span class="sb-item-name">' + escapeHtml(leafName(f.dir)) + '</span>' +
-          '<span class="sb-item-count">' + f.order.length + '</span>';
-        item.title = f.dir;
-        item.onclick = () => openGeneralFolder(f.dir);
-        childWrap.appendChild(item);
-      }
-      list.appendChild(childWrap);
-    }
+  const opts = {
+    countFn: f => f.order.length,
+    isActive: f => f.dir === currentFolder,
+    onOpen: f => openGeneralFolder(f.dir),
+    rerender: renderFoldersListGeneral,
+  };
+  for (const [root, items] of byRoot) {
+    const tree = buildFolderTree(root, items);
+    renderFolderNode(list, tree, root, leafName(root), opts);
   }
 }
 
@@ -1217,6 +1301,9 @@ function renderWallTiles(dir, order, tintForBase) {
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
 
     tile.querySelector('img').onclick = () => openFocus(dir, item.base, item.name, wallContext);
+    // Drag the real file out via the main process instead of letting the
+    // browser drag the data: URL -- see main.js's start-drag handler.
+    tile.querySelector('img').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, item.name); };
     tile.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, item.base, item.name); };
     tile.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, item.base, item.name); });
     tile.addEventListener('mouseenter', () => { hoveredTile = { dir, base: item.base, name: item.name }; });
@@ -1518,6 +1605,9 @@ function renderGroupBody(dir, base, body) {
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
     imgwrap.querySelector('img').onclick = () => openFocus(dir, base, img.name);
+    // Drag the real file out via the main process instead of letting the
+    // browser drag the data: URL -- see main.js's start-drag handler.
+    imgwrap.querySelector('img').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, img.name); };
     imgwrap.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, base, img.name); };
     imgwrap.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, base, img.name); });
 
@@ -1759,6 +1849,14 @@ function bindFocusOverlay() {
     if (focusIndex < 0) return;
     const img = (imageCache[focusGroupKey] || [])[focusIndex];
     if (img) onImageRightClick(focusDir, focusBase, img.name);
+  });
+  // Drag the real file out via the main process instead of letting the
+  // browser drag the data: URL -- see main.js's start-drag handler.
+  document.getElementById('focus-img').addEventListener('dragstart', (e) => {
+    e.preventDefault();
+    if (focusIndex < 0 || !focusDir) return;
+    const img = (imageCache[focusGroupKey] || [])[focusIndex];
+    if (img) api.startDrag(focusDir, img.name);
   });
   document.addEventListener('keydown', (e) => {
     if (focusIndex < 0) return;

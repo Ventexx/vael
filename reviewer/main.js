@@ -377,6 +377,49 @@ ipcMain.handle('read-image', async (_, dir, name) => {
 });
 
 // ---------------------------------------------------------------------------
+// Native drag-out. The renderer shows every image as an <img src="data:...">
+// for speed/simplicity, but dragging *that* element out to an external app
+// (e.g. ComfyUI) makes Chromium synthesize the drop from the in-memory data
+// URL rather than handing over the real file -- which is unreliable for
+// embedded PNG metadata (ComfyUI's workflow chunk) and for the filename
+// (the target can fall back to using the raw data-URL/URI string as the
+// "name", which is why it showed up long and garbled). Since every image
+// here already exists as a real file on disk, startDrag() hands the OS the
+// actual file path instead, so the drop is indistinguishable from dragging
+// the file out of Explorer/Finder: original bytes, original metadata,
+// original filename. The renderer calls this from an image's `dragstart`
+// after calling preventDefault() to suppress the default HTML5 drag.
+// ---------------------------------------------------------------------------
+ipcMain.on('start-drag', (event, dir, name) => {
+  try {
+    const filePath = path.join(dir, name);
+    if (!fs.existsSync(filePath)) return;
+
+    // Use the image itself as the drag icon when possible (nicer UX, and
+    // avoids depending on the packaged app icons existing under every
+    // platform); fall back to the app icon, then to an empty icon, since
+    // startDrag requires an `icon` to be passed.
+    let icon = nativeImage.createFromPath(filePath);
+    if (!icon.isEmpty()) {
+      const size = icon.getSize();
+      const maxDim = 200;
+      if (size.width > maxDim || size.height > maxDim) {
+        const scale = maxDim / Math.max(size.width, size.height);
+        icon = icon.resize({ width: Math.round(size.width * scale), height: Math.round(size.height * scale) });
+      }
+    } else {
+      const fallbackIconPath = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+      icon = fs.existsSync(fallbackIconPath) ? nativeImage.createFromPath(fallbackIconPath) : nativeImage.createEmpty();
+    }
+
+    event.sender.startDrag({ file: filePath, icon });
+  } catch (e) {
+    // Non-fatal -- worst case the drag silently does nothing and the user
+    // tries again, same as any other transient drag/OS hiccup.
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Execute: send marked files to the OS trash (never a hard delete — this is
 // destructive enough that a safety net matters).
 // ---------------------------------------------------------------------------

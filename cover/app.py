@@ -1202,13 +1202,17 @@ class QueueManager(QObject):
         self.queueChanged.emit()
         self.itemStarted.emit(item["id"])
 
-        self._thread = QThread()
-        self._worker = RunWorker(
+        thread = QThread()
+        worker = RunWorker(
             item["server"], item["raw_workflow"], item["image_map"],
             item["optional_node_id"], item["param_values"],
         )
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        # Keep references alive until Qt tells us the thread has actually
+        # stopped (thread.quit() only *requests* a stop, it doesn't block).
+        self._thread = thread
+        self._worker = worker
 
         def on_finished(data, item=item):
             item["status"] = "Done"
@@ -1216,19 +1220,28 @@ class QueueManager(QObject):
             self.itemFinished.emit(item["id"], True, "Done")
             self.items.remove(item)
             self.queueChanged.emit()
-            self._thread.quit()
-            self._run_next()
 
         def on_error(message, item=item):
             item["status"] = "Error"
             self.itemFinished.emit(item["id"], False, message)
             self.queueChanged.emit()
-            self._thread.quit()
+
+        def on_thread_finished():
+            # Runs only once the worker thread has fully stopped, so it's
+            # safe to drop our references and start the next queue item.
+            worker.deleteLater()
+            thread.deleteLater()
+            if self._thread is thread:
+                self._thread = None
+                self._worker = None
             self._run_next()
 
-        self._worker.finished.connect(on_finished)
-        self._worker.error.connect(on_error)
-        self._thread.start()
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(on_thread_finished)
+        thread.start()
 
 
 # ---------------------------------------------------------------------------

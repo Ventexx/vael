@@ -18,4 +18,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   flagGroup: (dir, base) => ipcRenderer.invoke('flag-group', dir, base),
   unflagGroup: (dir, base) => ipcRenderer.invoke('unflag-group', dir, base),
   getFlags: () => ipcRenderer.invoke('get-flags'),
+
+  // Kicks off a native OS file drag for the given image, instead of letting
+  // the browser drag the in-memory data URL. See main.js for why.
+  startDrag: (dir, name) => ipcRenderer.send('start-drag', dir, name),
 });
