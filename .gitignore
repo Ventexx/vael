@@ -39,6 +39,7 @@ chess/piece_templates/
 # cover local settings
 cover/workflows/
 cover/outputs/
+cover/workflows_config.json
 
 # === OS cruft ===
 .DS_Store
