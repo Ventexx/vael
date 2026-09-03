@@ -15,18 +15,26 @@ import copy
 import time
 import uuid
 import json
+import hashlib
 import datetime
 import requests
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize
-from PySide6.QtGui import QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction
+from PySide6.QtCore import (
+    Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QRunnable, QThreadPool,
+    QAbstractListModel, QModelIndex, QRect,
+)
+from PySide6.QtGui import (
+    QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
+    QColor, QPen, QPainter, QPainterPath,
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QTabBar, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QMessageBox, QSplitter,
-    QScrollArea, QFrame, QListWidget, QListWidgetItem, QProgressBar, QToolButton,
+    QScrollArea, QFrame, QListWidget, QListWidgetItem, QListView, QStyledItemDelegate,
+    QStyle, QProgressBar, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
-    QSizePolicy, QStackedWidget, QMenu
+    QSizePolicy, QStackedWidget, QMenu, QCheckBox
 )
 
 # ===========================================================================
@@ -36,8 +44,16 @@ CONFIG_FILE = Path(__file__).resolve().with_name("workflows_config.json")
 ICON_FILE = Path(__file__).resolve().with_name(
     "icon.ico" if sys.platform == "win32" else "icon.png"
 )
+THUMB_CACHE_DIR = Path(__file__).resolve().with_name("thumb_cache")
 DEFAULT_SERVER = "http://127.0.0.1:8188"
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().with_name("outputs"))
+
+# -- Image Selection soft limits (spec section 9, resolved) -----------------
+# Purely advisory: crossing these never blocks anything, it just surfaces a
+# warning so the user knows before things get unwieldy. See SettingsDialog
+# (folder count) and FolderSection (recursion depth).
+FOLDER_COUNT_WARN = 20
+RECURSION_DEPTH_WARN = 5
 
 DEFAULTS = {
     "server": DEFAULT_SERVER,
@@ -45,6 +61,14 @@ DEFAULTS = {
     "tabs": [],
     "window_geometry": None,
     "sidebar_width": 340,
+    "workflow_sidebar_width": 260,
+    # -- Image Selection (spec sections 4 & 5) --------------------------
+    "image_selection_folders": [],       # [{"path": str, "recursive": bool}, ...]
+    "hide_dotted_bang_folders": True,    # global toggle, default on
+    "image_browser_state": {
+        "expanded_headers": [],          # folder paths (any depth) expanded last session
+        "active_tab": None,              # top-level folder path of the last active tab
+    },
 }
 
 
@@ -260,34 +284,31 @@ QMainWindow {
     border-bottom-right-radius: 0px;
 }
 
-/* ---- Tab bar (workflows) ---- */
-QTabWidget::pane {
-    border: none;
-    border-top: 1px solid rgba(255,255,255,0.07);
-    top: -1px;
-    background: transparent;
+/* ---- Left sidebar (Workflows) ---- */
+#workflowSidebar {
+    background-color: #121212;
+    border-right: 1px solid rgba(255,255,255,0.10);
 }
-
-QTabBar {
-    background: transparent;
+#edgeTab {
+    background-color: #121212;
+    border-right: 1px solid rgba(255,255,255,0.10);
 }
-
-QTabBar::tab {
-    background: transparent;
-    color: rgba(200,200,200,0.55);
-    padding: 8px 14px;
-    margin-right: 2px;
-    border-bottom: 2px solid transparent;
-    min-width: 60px;
+#edgeTab:hover {
+    background-color: rgba(0,212,160,0.14);
 }
-
-QTabBar::tab:selected {
+#edgeTabChevron {
+    color: rgba(200,200,200,0.45);
+    font-weight: 700;
+}
+QListWidget#workflowList::item {
+    padding: 8px 8px;
+    border-radius: 6px;
+    margin-bottom: 2px;
+}
+QListWidget#workflowList::item:selected {
+    background-color: rgba(0,212,160,0.16);
     color: #e8e8e8;
-    border-bottom: 2px solid #00d4a0;
-}
-
-QTabBar::tab:hover:!selected {
-    color: rgba(220,220,220,0.85);
+    border-left: 2px solid #00d4a0;
 }
 
 /* ---- Buttons ---- */
@@ -394,32 +415,105 @@ QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     background-color: #1e1e1e;
 }
 
-/* ---- Image slot frame ---- */
-QFrame#imageSlot {
+/* ---- Roster icon (bottom Input Roster) ---- */
+QFrame#rosterIcon {
     background-color: #141414;
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 7px;
 }
-QFrame#imageSlot[dragOver="true"] {
+QFrame#rosterIcon:hover {
+    border-color: rgba(0,212,160,0.35);
+}
+QFrame#rosterIcon[dragOver="true"] {
     border: 1px dashed #00d4a0;
 }
-QLabel#slotGrip {
+QFrame#rosterIcon[armed="true"] {
+    border: 2px solid #00d4a0;
+    background-color: rgba(0,212,160,0.08);
+}
+QLabel#rosterIconCanvas {
+    background: transparent;
     color: rgba(200,200,200,0.35);
-    font-weight: bold;
-    padding: 0 2px;
+    font-size: 16px;
+    font-weight: 300;
 }
-QLabel#slotGrip:hover {
-    color: #00d4a0;
+
+/* ---- Center — Image Browser ---- */
+#imageBrowserPanel {
+    background-color: #0d0d0d;
 }
-QLabel#slotCaption {
-    color: rgba(220,220,220,0.75);
-    font-weight: 600;
-    padding: 2px 0;
+QTabWidget#browserTabs::pane {
+    border: none;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    top: -1px;
 }
-QLabel#slotCanvas {
-    background-color: #101010;
+QTabWidget#browserTabs QTabBar::tab {
+    background: transparent;
+    color: rgba(200,200,200,0.55);
+    padding: 7px 14px;
+    margin-right: 2px;
+    border-bottom: 2px solid transparent;
+}
+QTabWidget#browserTabs QTabBar::tab:selected {
+    color: #e8e8e8;
+    border-bottom: 2px solid #00d4a0;
+}
+QTabWidget#browserTabs QTabBar::tab:hover:!selected {
+    color: rgba(220,220,220,0.85);
+}
+QFrame#folderHeader {
+    background-color: #141414;
+    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 6px;
-    color: rgba(200,200,200,0.35);
+}
+QFrame#folderHeader:hover {
+    border-color: rgba(0,212,160,0.30);
+}
+QFrame#subHeader {
+    background-color: transparent;
+    border-left: 2px solid rgba(0,212,160,0.55);
+    border-radius: 0px;
+}
+QFrame#subHeader:hover {
+    background-color: rgba(255,255,255,0.03);
+}
+/* Nesting depth reads as a progressively fainter accent, so deeper
+   sub-headers feel "further in" without needing extra chrome (spec 3.4). */
+QFrame#subHeader[depth="2"] { border-left-color: rgba(0,212,160,0.44); }
+QFrame#subHeader[depth="3"] { border-left-color: rgba(0,212,160,0.34); }
+QFrame#subHeader[depth="4"] { border-left-color: rgba(0,212,160,0.26); }
+QFrame#subHeader[depth="5"] { border-left-color: rgba(0,212,160,0.20); }
+QFrame#subHeader[depth="6"] { border-left-color: rgba(0,212,160,0.16); }
+/* Past the recommended recursion-depth guideline (soft warning only, spec
+   section 9) — amber instead of teal, still fully functional. */
+QFrame#subHeader[deep="true"] {
+    border-left: 2px solid rgba(226,163,55,0.55);
+}
+QFrame#subHeader[deep="true"]:hover {
+    background-color: rgba(226,163,55,0.05);
+}
+QLabel#folderHeaderName {
+    color: rgba(230,230,230,0.92);
+    font-weight: 600;
+}
+QLabel#subHeaderName {
+    color: rgba(200,200,200,0.75);
+    font-weight: 500;
+    font-size: 12px;
+}
+QLabel#headerChevron {
+    color: rgba(0,212,160,0.75);
+    font-weight: 700;
+}
+QListView#thumbnailGrid {
+    background: transparent;
+    border: none;
+}
+
+/* ---- Bottom bar — Input Roster ---- */
+#rosterBar {
+    background-color: #101010;
+    border-top: 1px solid rgba(255,255,255,0.08);
 }
 
 /* ---- Splitter handles (manual resizing) ---- */
@@ -491,6 +585,15 @@ QLabel#hint {
     color: rgba(200,200,200,0.45);
     font-size: 11px;
 }
+QLabel#hint[state="warning"] {
+    color: rgba(226,163,55,0.90);
+}
+QLabel#hint[state="error"] {
+    color: rgba(224,110,100,0.85);
+}
+QLabel#hint[state="muted"] {
+    color: rgba(200,200,200,0.30);
+}
 
 QToolTip {
     background-color: #1e1e1e;
@@ -536,12 +639,13 @@ import sys
 import copy
 import time
 import uuid
+import hashlib
 import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QEvent, QPoint, QRect,
-    QPropertyAnimation, QEasingCurve,
+    QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
@@ -552,8 +656,9 @@ from PySide6.QtWidgets import (
     QFormLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QMessageBox, QSplitter,
     QScrollArea, QFrame, QListWidget, QListWidgetItem, QProgressBar, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
-    QSizePolicy, QStackedWidget, QMenu, QSizeGrip
+    QSizePolicy, QStackedWidget, QMenu, QSizeGrip, QCheckBox
 )
+
 
 APP_TITLE = "cover"
 APP_BRAND_PREFIX = "vael. "
@@ -562,14 +667,15 @@ POLL_INTERVAL = 1.0
 POLL_TIMEOUT = 600
 
 HOTKEYS = [
-    ("Ctrl+R", "Run the current workflow tab"),
+    ("Ctrl+R", "Run the active workflow"),
     ("Ctrl+Shift+A", "Add current workflow (with current inputs) to the run queue"),
     ("Ctrl+Shift+R", "Run every queued workflow, one after another"),
     ("Ctrl+Shift+X", "Clear the run queue"),
-    ("Ctrl+N", "Create a new workflow tab"),
-    ("Ctrl+Tab", "Next workflow tab"),
-    ("Ctrl+Shift+Tab", "Previous workflow tab"),
+    ("Ctrl+N", "Create a new workflow"),
+    ("Ctrl+Tab", "Next workflow"),
+    ("Ctrl+Shift+Tab", "Previous workflow"),
     ("Ctrl+O", "Toggle the Outputs / Queue sidebar"),
+    ("Ctrl+Shift+W", "Toggle the Workflows sidebar"),
     ("Ctrl+,", "Open Settings"),
     ("Ctrl+Shift+O", "Open the outputs folder on disk"),
     ("F5", "Refresh the outputs list"),
@@ -645,16 +751,30 @@ class RunWorker(QObject):
 
 
 # ---------------------------------------------------------------------------
-# Draggable / resizable image slot
+# Roster icon — one small square per image input on the *active* workflow,
+# rendered left-to-right in the bottom "input roster" bar. This replaces the
+# old big per-slot panel (ImageSlot): the panel content now belongs to the
+# Image Browser (center), and this icon is just the compact roster target.
+#
+# Primary flow (spec 3.6): click an icon to "arm" it, then click a thumbnail
+# in the Image Browser to assign it. The Image Browser isn't built yet
+# (that's the bulk of section 3), so for now the icon also keeps the old
+# manual fallback alive: double-click to browse via file dialog, or
+# drag-and-drop a file from Explorer straight onto it. Dragging one icon
+# onto another still reorders (grip) or swaps image content (canvas).
 # ---------------------------------------------------------------------------
-class ImageSlot(QFrame):
+class RosterIcon(QFrame):
     reorderRequested = Signal(int, int)     # source_index, target_index (moves the whole slot)
     imageSwapRequested = Signal(int, int)   # source_index, target_index (swaps only image content)
+    armToggled = Signal(int)                # this icon's index was clicked to arm/disarm
     changed = Signal()
+
+    SIZE = 60
 
     def __init__(self, index, node_id, caption, parent=None):
         super().__init__(parent)
-        self.setObjectName("imageSlot")
+        self.setObjectName("rosterIcon")
+        self.setProperty("armed", False)
         self.setAcceptDrops(True)
         self.setFrameShape(QFrame.NoFrame)
         self.index = index
@@ -662,75 +782,63 @@ class ImageSlot(QFrame):
         self.caption = caption
         self.filepath = None
         self._pixmap = None
-        self._press_kind = None
         self._press_pos = None
         self._dragging = False
-        self.setMinimumWidth(150)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.PointingHandCursor)
+        self._update_tooltip()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-
-        header = QHBoxLayout()
-        header.setSpacing(6)
-        self.grip = QLabel("\u22ee\u22ee")
-        self.grip.setObjectName("slotGrip")
-        self.grip.setCursor(Qt.OpenHandCursor)
-        self.grip.setToolTip("Drag to reorder")
-        header.addWidget(self.grip)
-
-        self.caption_label = QLabel(caption)
-        self.caption_label.setObjectName("slotCaption")
-        self.caption_label.setWordWrap(True)
-        header.addWidget(self.caption_label, 1)
-        layout.addLayout(header)
-
-        self.canvas = QLabel("Click to browse\nor drag && drop an image here\n\n(drag onto another slot to swap)")
-        self.canvas.setObjectName("slotCanvas")
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.canvas = QLabel("+")
+        self.canvas.setObjectName("rosterIconCanvas")
         self.canvas.setAlignment(Qt.AlignCenter)
-        self.canvas.setWordWrap(True)
-        self.canvas.setCursor(Qt.PointingHandCursor)
-        self.canvas.setMinimumHeight(140)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.canvas)
+
+    def _update_tooltip(self):
+        base = f"Input #{self.index + 1}: {self.caption}"
+        hint = "\n\nClick to arm for the Image Browser.\nDouble-click or drag a file here to assign manually.\nDrag onto another icon to reorder or swap.\nRight-click to clear."
+        self.setToolTip(base + hint)
 
     # -- drag & drop -----------------------------------------------------
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._press_pos = event.position().toPoint()
-            if self.grip.geometry().contains(self._press_pos):
-                self._press_kind = "reorder"
-            elif self.canvas.geometry().contains(self._press_pos):
-                self._press_kind = "image"
-            else:
-                self._press_kind = None
             self._dragging = False
         elif event.button() == Qt.RightButton:
-            if self.canvas.geometry().contains(event.position().toPoint()):
-                self.clear_image()
+            self.clear_image()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._press_kind and (event.buttons() & Qt.LeftButton) and not self._dragging:
+        if self._press_pos is not None and (event.buttons() & Qt.LeftButton) and not self._dragging:
             if (event.position().toPoint() - self._press_pos).manhattanLength() > QApplication.startDragDistance():
                 self._dragging = True
-                self._start_drag(self._press_kind)
+                self._start_drag()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and not self._dragging and self._press_kind == "image":
-            self.browse_image()
-        self._press_kind = None
+        if event.button() == Qt.LeftButton and not self._dragging:
+            self.armToggled.emit(self.index)
+        self._press_pos = None
         self._dragging = False
         super().mouseReleaseEvent(event)
 
-    def _start_drag(self, kind):
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.browse_image()
+        super().mouseDoubleClickEvent(event)
+
+    def _start_drag(self):
         mime = QMimeData()
-        mime.setData(f"application/x-slot-{kind}", str(self.index).encode())
+        mime.setData("application/x-slot-reorder", str(self.index).encode())
+        # Also register as an image-swap source when this icon already holds
+        # an image, so dropping it onto another filled icon swaps content.
+        if self.filepath:
+            mime.setData("application/x-slot-image", str(self.index).encode())
         drag = QDrag(self)
         drag.setMimeData(mime)
         if self._pixmap is not None:
-            drag.setPixmap(self._pixmap.scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            drag.setPixmap(self._pixmap.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         drag.exec(Qt.MoveAction)
 
     def dragEnterEvent(self, event):
@@ -751,15 +859,15 @@ class ImageSlot(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         md = event.mimeData()
-        if md.hasFormat("application/x-slot-reorder"):
-            src = int(bytes(md.data("application/x-slot-reorder")).decode())
-            if src != self.index:
-                self.reorderRequested.emit(src, self.index)
-            event.acceptProposedAction()
-        elif md.hasFormat("application/x-slot-image"):
+        if md.hasFormat("application/x-slot-image"):
             src = int(bytes(md.data("application/x-slot-image")).decode())
             if src != self.index:
                 self.imageSwapRequested.emit(src, self.index)
+            event.acceptProposedAction()
+        elif md.hasFormat("application/x-slot-reorder"):
+            src = int(bytes(md.data("application/x-slot-reorder")).decode())
+            if src != self.index:
+                self.reorderRequested.emit(src, self.index)
             event.acceptProposedAction()
         elif md.hasUrls():
             path = md.urls()[0].toLocalFile()
@@ -767,14 +875,10 @@ class ImageSlot(QFrame):
                 self.set_image_path(path)
             event.acceptProposedAction()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._render()
-
     # -- image handling ----------------------------------------------------
     def browse_image(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select input image", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+            self, "Select input image (manual override)", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
         )
         if path:
             self.set_image_path(path)
@@ -795,26 +899,39 @@ class ImageSlot(QFrame):
         self._render()
         self.changed.emit()
 
+    def set_armed(self, armed: bool):
+        if self.property("armed") == armed:
+            return
+        self.setProperty("armed", armed)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
     def _render(self):
         if self._pixmap is not None:
-            target = self.canvas.size()
-            scaled = self._pixmap.scaled(
-                max(target.width() - 8, 10), max(target.height() - 8, 10),
-                Qt.KeepAspectRatio, Qt.SmoothTransformation,
-            )
+            inner = self.SIZE - 6
+            scaled = self._pixmap.scaled(inner, inner, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.canvas.setPixmap(scaled)
+            self.canvas.setText("")
         else:
             self.canvas.setPixmap(QPixmap())
-            self.canvas.setText("Click to browse\nor drag && drop an image here\n\n(drag onto another slot to swap)")
+            self.canvas.setText("+")
 
     def set_index(self, new_index):
         self.index = new_index
+        self._update_tooltip()
 
 
 # ---------------------------------------------------------------------------
-# One workflow tab
+# One workflow's data + run logic (no widget of its own any more). Under the
+# revamped shell there's exactly one center Image Browser and one bottom
+# roster shared by whichever workflow is active, so the old per-tab QWidget
+# is replaced by a plain QObject the shared RosterBar renders against.
 # ---------------------------------------------------------------------------
-class WorkflowTab(QWidget):
+class WorkflowState(QObject):
+    statusChanged = Signal(str, bool)     # text, is_error
+    runStateChanged = Signal(bool)        # running
+    slotsRebuilt = Signal()               # slot list replaced wholesale (e.g. on load)
+
     def __init__(self, main_window, data=None):
         super().__init__()
         self.main_window = main_window
@@ -822,15 +939,15 @@ class WorkflowTab(QWidget):
         self.workflow_path = data.get("workflow_path")
         self.optional_identifier = data.get("optional_identifier", "")
         self.saved_slot_node_order = data.get("slot_node_order") or []
-        self.saved_splitter_sizes = data.get("splitter_sizes") or []
         self.name = Path(self.workflow_path).stem if self.workflow_path else "Workflow"
 
         self.raw_workflow = None
-        self.slots = []            # list[ImageSlot], in display order
+        self.slots = []            # list of {"node_id","caption","filepath"}, display order
         self.optional_node_id = None
-        self.param_widgets = {}    # key -> (widget, type_name)
-
-        self._build_ui()
+        self.param_values = {}     # key -> current value for the optional node's editable inputs
+        self.status_text = "Ready."
+        self.status_error = False
+        self.running = False
         self._thread = None
         self._worker = None
 
@@ -840,48 +957,7 @@ class WorkflowTab(QWidget):
             except Exception as e:
                 self._set_status(f"Couldn't load workflow: {e}", error=True)
         elif self.workflow_path:
-            self._set_status("Workflow file not found - reconfigure this tab.", error=True)
-
-    # -- UI ------------------------------------------------------------
-    def _build_ui(self):
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-
-        toolbar = QHBoxLayout()
-        self.status_label = QLabel("Ready.")
-        self.status_label.setObjectName("hint")
-        toolbar.addWidget(self.status_label)
-
-        toolbar.addStretch(1)
-
-        self.queue_btn = QPushButton("+ Add to Queue")
-        self.queue_btn.clicked.connect(self.add_to_queue)
-        toolbar.addWidget(self.queue_btn)
-
-        self.run_btn = QPushButton("\u25b6  Run")
-        self.run_btn.setObjectName("accentButton")
-        self.run_btn.clicked.connect(self.run_now)
-        toolbar.addWidget(self.run_btn)
-        outer.addLayout(toolbar)
-
-        self.progress = QProgressBar()
-        self.progress.setMaximumHeight(6)
-        self.progress.setTextVisible(False)
-        self.progress.setRange(0, 0)
-        self.progress.hide()
-        outer.addWidget(self.progress)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        self.splitter = QSplitter(Qt.Horizontal)
-        scroll.setWidget(self.splitter)
-        outer.addWidget(scroll, 3)
-
-        self.param_form_widget = QWidget()
-        self.param_form = QFormLayout(self.param_form_widget)
-        outer.addWidget(self.param_form_widget)
-        self.param_form_widget.hide()
+            self._set_status("Workflow file not found - reconfigure this workflow.", error=True)
 
     # -- Workflow loading -------------------------------------------------
     def load_workflow(self, path):
@@ -889,7 +965,7 @@ class WorkflowTab(QWidget):
         self.raw_workflow = wf
         self.workflow_path = path
         self.name = Path(path).stem
-        self.main_window.rename_tab(self, self.name)
+        self.main_window.rename_workflow(self, self.name)
 
         image_nodes = find_load_image_nodes(wf)
         if self.saved_slot_node_order:
@@ -897,115 +973,72 @@ class WorkflowTab(QWidget):
             ordered += [n for n in image_nodes if n not in ordered]
             image_nodes = ordered
 
-        for s in self.slots:
-            s.setParent(None)
-        self.slots = []
-        for i, nid in enumerate(image_nodes):
-            slot = ImageSlot(i, nid, node_label(wf, nid))
-            slot.reorderRequested.connect(self._on_reorder)
-            slot.imageSwapRequested.connect(self._on_image_swap)
-            self.splitter.addWidget(slot)
-            self.slots.append(slot)
-
-        if self.saved_splitter_sizes and len(self.saved_splitter_sizes) == len(self.slots):
-            self.splitter.setSizes(self.saved_splitter_sizes)
+        self.slots = [
+            {"node_id": nid, "caption": node_label(wf, nid), "filepath": None}
+            for nid in image_nodes
+        ]
 
         self.optional_node_id = find_node(wf, self.optional_identifier) if self.optional_identifier else None
-        self._refresh_param_panel()
+        self.param_values = {}
+        for key, (value, _type_name) in self.editable_params().items():
+            self.param_values[key] = value
+
+        self.slotsRebuilt.emit()
         self._set_status(f"Loaded. {len(self.slots)} image input(s) found.")
 
-    def _refresh_param_panel(self):
-        while self.param_form.rowCount():
-            self.param_form.removeRow(0)
-        self.param_widgets = {}
-        if not self.optional_node_id:
-            self.param_form_widget.hide()
-            return
-        node = self.raw_workflow.get(self.optional_node_id, {})
-        editable = get_editable_inputs(node)
-        if not editable:
-            self.param_form_widget.hide()
-            return
-        for key, (value, type_name) in editable.items():
-            if type_name == "int":
-                w = QSpinBox()
-                w.setRange(-2_147_483_648, 2_147_483_647)
-                w.setValue(value)
-            elif type_name == "float":
-                w = QDoubleSpinBox()
-                w.setRange(-1e12, 1e12)
-                w.setDecimals(4)
-                w.setValue(value)
-            else:
-                w = QLineEdit(str(value))
-            self.param_form.addRow(key, w)
-            self.param_widgets[key] = (w, type_name)
-        self.param_form_widget.show()
+    def editable_params(self):
+        if not self.optional_node_id or not self.raw_workflow:
+            return {}
+        return get_editable_inputs(self.raw_workflow.get(self.optional_node_id, {}))
 
-    # -- Reordering / swapping --------------------------------------------
-    def _on_reorder(self, src, tgt):
+    # -- Reordering / swapping (driven by the roster bar's icons) ---------
+    def reorder_slot(self, src, tgt):
         if src == tgt or src >= len(self.slots) or tgt >= len(self.slots):
             return
-        widget = self.slots.pop(src)
-        self.slots.insert(tgt, widget)
-        for i, s in enumerate(self.slots):
-            self.splitter.insertWidget(i, s)
-            s.set_index(i)
-        self._persist_layout()
-
-    def _on_image_swap(self, src, tgt):
-        if src == tgt or src >= len(self.slots) or tgt >= len(self.slots):
-            return
-        a, b = self.slots[src], self.slots[tgt]
-        a.filepath, b.filepath = b.filepath, a.filepath
-        a._pixmap, b._pixmap = b._pixmap, a._pixmap
-        a._render()
-        b._render()
-
-    def current_layout(self):
-        return {
-            "slot_node_order": [s.node_id for s in self.slots],
-            "splitter_sizes": self.splitter.sizes(),
-        }
-
-    def _persist_layout(self):
+        item = self.slots.pop(src)
+        self.slots.insert(tgt, item)
+        self.slotsRebuilt.emit()
         self.main_window.persist_all()
+
+    def swap_slot_images(self, src, tgt):
+        if src == tgt or src >= len(self.slots) or tgt >= len(self.slots):
+            return
+        self.slots[src]["filepath"], self.slots[tgt]["filepath"] = (
+            self.slots[tgt]["filepath"], self.slots[src]["filepath"],
+        )
+        self.main_window.persist_all()
+
+    def to_dict(self):
+        return {
+            "workflow_path": self.workflow_path,
+            "optional_identifier": self.optional_identifier,
+            "slot_node_order": [s["node_id"] for s in self.slots],
+        }
 
     # -- Running -------------------------------------------------------
     def _gather_image_map(self):
-        return {s.node_id: s.filepath for s in self.slots}
-
-    def _gather_param_values(self):
-        values = {}
-        for key, (w, type_name) in self.param_widgets.items():
-            if type_name == "int":
-                values[key] = w.value()
-            elif type_name == "float":
-                values[key] = w.value()
-            else:
-                values[key] = w.text()
-        return values
+        return {s["node_id"]: s["filepath"] for s in self.slots}
 
     def _validate(self):
         if not self.raw_workflow:
-            QMessageBox.warning(self, "No workflow", "This tab has no valid workflow loaded.")
+            QMessageBox.warning(self.main_window, "No workflow", f"'{self.name}' has no valid workflow loaded.")
             return False
-        missing = [s.caption for s in self.slots if not s.filepath]
+        missing = [s["caption"] for s in self.slots if not s["filepath"]]
         if missing:
-            QMessageBox.warning(self, "Missing images", "Please fill in:\n- " + "\n- ".join(missing))
+            QMessageBox.warning(self.main_window, "Missing images", "Please fill in:\n- " + "\n- ".join(missing))
             return False
         return True
 
     def run_now(self):
         if not self._validate():
             return
-        self.run_btn.setEnabled(False)
-        self.progress.show()
+        self.running = True
+        self.runStateChanged.emit(True)
         self._set_status("Running...")
         self._thread = QThread()
         self._worker = RunWorker(
             self.main_window.server, copy.deepcopy(self.raw_workflow),
-            self._gather_image_map(), self.optional_node_id, self._gather_param_values(),
+            self._gather_image_map(), self.optional_node_id, dict(self.param_values),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -1016,16 +1049,16 @@ class WorkflowTab(QWidget):
         self._thread.start()
 
     def _on_run_finished(self, data):
-        self.run_btn.setEnabled(True)
-        self.progress.hide()
+        self.running = False
+        self.runStateChanged.emit(False)
         self._set_status("Done.")
         self.main_window.save_output(self.name, data)
 
     def _on_run_error(self, message):
-        self.run_btn.setEnabled(True)
-        self.progress.hide()
+        self.running = False
+        self.runStateChanged.emit(False)
         self._set_status(f"Error: {message}", error=True)
-        QMessageBox.critical(self, "Run failed", message)
+        QMessageBox.critical(self.main_window, "Run failed", message)
 
     def add_to_queue(self):
         if not self._validate():
@@ -1037,22 +1070,916 @@ class WorkflowTab(QWidget):
             "raw_workflow": copy.deepcopy(self.raw_workflow),
             "image_map": self._gather_image_map(),
             "optional_node_id": self.optional_node_id,
-            "param_values": self._gather_param_values(),
+            "param_values": dict(self.param_values),
         })
         self._set_status("Added current inputs to the run queue.")
 
     def _set_status(self, text, error=False):
+        self.status_text = text
+        self.status_error = error
+        self.statusChanged.emit(text, error)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail worker plumbing (spec 3.5, 7). QRunnable has no signals of its
+# own, so each worker owns a small QObject to talk back to the GUI thread.
+# All file I/O and image decoding happens off the UI thread; only cheap
+# QPixmap-from-QImage conversion happens back on it.
+# ---------------------------------------------------------------------------
+class _ScanSignals(QObject):
+    done = Signal(str, list, list)   # section_path, files, subdirs
+    failed = Signal(str, str)        # section_path, message
+
+
+IMAGE_FILE_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+)
+
+
+class _RoughScanWorker(QRunnable):
+    """Rough pass: list filenames (and, if recursive, subfolder names) for
+    one folder section. Fast — no image decoding at all."""
+
+    def __init__(self, section_path, recursive, hide_dotted_bang):
+        super().__init__()
+        self.section_path = section_path
+        self.recursive = recursive
+        self.hide_dotted_bang = hide_dotted_bang
+        self.signals = _ScanSignals()
+
+    def run(self):
+        files, subdirs = [], []
+        try:
+            with os.scandir(self.section_path) as it:
+                for entry in it:
+                    name = entry.name
+                    if self.hide_dotted_bang and (name.startswith(".") or name.startswith("!")):
+                        continue
+                    try:
+                        if entry.is_file() and name.lower().endswith(IMAGE_FILE_EXTENSIONS):
+                            files.append(entry.path)
+                        elif self.recursive and entry.is_dir():
+                            subdirs.append(entry.path)
+                    except OSError:
+                        continue
+        except FileNotFoundError:
+            self.signals.failed.emit(self.section_path, "not_found")
+            return
+        except PermissionError:
+            self.signals.failed.emit(self.section_path, "permission_denied")
+            return
+        except OSError as e:
+            self.signals.failed.emit(self.section_path, f"error:{e}")
+            return
+        files.sort(key=str.lower)
+        subdirs.sort(key=str.lower)
+        self.signals.done.emit(self.section_path, files, subdirs)
+
+
+class _ThumbSignals(QObject):
+    ready = Signal(str, QImage)   # filepath, decoded (already scaled) image
+
+
+class _ThumbnailWorker(QRunnable):
+    """Full pass: decode + scale one folder section's images, on the shared
+    thread pool, using a disk cache keyed by (path, mtime) so re-expanding
+    a header later is instant."""
+
+    THUMB_PX = 160
+
+    def __init__(self, filepaths, cache_dir):
+        super().__init__()
+        self.filepaths = filepaths
+        self.cache_dir = cache_dir
+        self.signals = _ThumbSignals()
+
+    def _cache_path(self, filepath, mtime_ns):
+        key = hashlib.sha1(filepath.encode("utf-8")).hexdigest()
+        return self.cache_dir / f"{key}_{mtime_ns}.png"
+
+    def run(self):
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        for path in self.filepaths:
+            try:
+                mtime_ns = os.stat(path).st_mtime_ns
+            except OSError:
+                continue
+            cache_path = self._cache_path(path, mtime_ns)
+            img = None
+            if cache_path.exists():
+                cached = QImage(str(cache_path))
+                if not cached.isNull():
+                    img = cached
+            if img is None:
+                src = QImage(path)
+                if src.isNull():
+                    continue
+                img = src.scaled(
+                    self.THUMB_PX, self.THUMB_PX,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                )
+                try:
+                    img.save(str(cache_path), "PNG")
+                except OSError:
+                    pass
+            self.signals.ready.emit(path, img)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail grid backing store + painter (spec 3.5 / Section 7 technical
+# notes). ThumbnailModel holds nothing but filepaths + decoded pixmaps —
+# no per-item widgets — and ThumbnailDelegate paints each cell directly,
+# so a section's memory/layout cost no longer scales with per-item Qt
+# object overhead the way QListWidgetItem + QIcon did.
+# ---------------------------------------------------------------------------
+class ThumbnailModel(QAbstractListModel):
+    FilepathRole = Qt.UserRole + 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._filepaths = []
+        self._pixmaps = {}   # filepath -> QPixmap, populated as thumbnails decode
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._filepaths)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        path = self._filepaths[index.row()]
+        if role == Qt.DisplayRole:
+            return Path(path).name
+        if role == Qt.ToolTipRole:
+            return path
+        if role == self.FilepathRole:
+            return path
+        if role == Qt.DecorationRole:
+            return self._pixmaps.get(path)
+        return None
+
+    def set_files(self, filepaths):
+        self.beginResetModel()
+        self._filepaths = list(filepaths)
+        self._pixmaps = {}
+        self.endResetModel()
+
+    def set_thumbnail(self, filepath, pixmap):
+        try:
+            row = self._filepaths.index(filepath)
+        except ValueError:
+            return
+        self._pixmaps[filepath] = pixmap
+        idx = self.index(row)
+        self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+
+    def filepath_at(self, index):
+        if index.isValid() and 0 <= index.row() < len(self._filepaths):
+            return self._filepaths[index.row()]
+        return None
+
+
+class ThumbnailDelegate(QStyledItemDelegate):
+    """Paints one thumbnail cell: image (or a soft placeholder while it's
+    still decoding), plus an elided filename caption underneath."""
+
+    ICON_PX = 96
+    CELL_W = 108
+    CELL_H = 108 + 18
+
+    def sizeHint(self, option, index):
+        return QSize(self.CELL_W, self.CELL_H)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = option.rect
+        hovered = bool(option.state & QStyle.State_MouseOver)
+
+        if hovered:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 212, 160, 26))
+            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 8, 8)
+
+        icon_x = rect.x() + (rect.width() - self.ICON_PX) // 2
+        icon_rect = QRect(icon_x, rect.y() + 5, self.ICON_PX, self.ICON_PX)
+
+        pixmap = index.data(Qt.DecorationRole)
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.ICON_PX, self.ICON_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            x = icon_rect.x() + (self.ICON_PX - scaled.width()) // 2
+            y = icon_rect.y() + (self.ICON_PX - scaled.height()) // 2
+            path = _rounded_pixmap_path(scaled.rect(), 6)
+            painter.save()
+            painter.translate(x, y)
+            painter.setClipPath(path)
+            painter.drawPixmap(0, 0, scaled)
+            painter.restore()
+        else:
+            # Placeholder while the background thumbnail worker hasn't
+            # reached this file yet (rough pass reserved the slot already).
+            painter.setPen(QPen(QColor(255, 255, 255, 30)))
+            painter.setBrush(QColor(255, 255, 255, 8))
+            painter.drawRoundedRect(icon_rect, 6, 6)
+
+        name = index.data(Qt.DisplayRole) or ""
+        text_rect = QRect(rect.x() + 3, icon_rect.bottom() + 4, rect.width() - 6, 14)
+        painter.setPen(QColor(200, 200, 200, 145 if not hovered else 210))
+        fm = painter.fontMetrics()
+        elided = fm.elidedText(name, Qt.ElideMiddle, text_rect.width())
+        painter.drawText(text_rect, Qt.AlignHCenter | Qt.AlignVCenter, elided)
+        painter.restore()
+
+
+def _rounded_pixmap_path(rect, radius):
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    return path
+
+
+class ThumbnailGrid(QListView):
+    thumbnailClicked = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("thumbnailGrid")
+        self._model = ThumbnailModel(self)
+        self.setModel(self._model)
+        self._delegate = ThumbnailDelegate(self)
+        self.setItemDelegate(self._delegate)
+        self.setViewMode(QListView.IconMode)
+        self.setResizeMode(QListView.Adjust)
+        self.setMovement(QListView.Static)
+        self.setUniformItemSizes(True)
+        self.setSpacing(4)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSelectionMode(QListView.NoSelection)
+        self.setMouseTracking(True)   # required for hover-state repaint in the delegate
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.clicked.connect(self._on_item_clicked)
+
+    def set_files(self, filepaths):
+        self._model.set_files(filepaths)
+        self._sync_height()
+
+    def set_thumbnail(self, filepath, qimage):
+        self._model.set_thumbnail(filepath, QPixmap.fromImage(qimage))
+
+    def _on_item_clicked(self, index):
+        path = self._model.filepath_at(index)
+        if path:
+            self.thumbnailClicked.emit(path)
+
+    def _sync_height(self):
+        # Fixed-position (non-scrolling) grid: grow to fit its own rows so
+        # the *page* scrolls, not each individual grid (spec 3.5 design
+        # caveat — collapsed sections still never scan/decode anything;
+        # this only governs layout of an already-expanded section).
+        n = self._model.rowCount()
+        if n == 0:
+            self.setFixedHeight(0)
+            return
+        cell_w = self._delegate.CELL_W + self.spacing()
+        cell_h = self._delegate.CELL_H + self.spacing()
+        cols = max(1, self.viewport().width() // cell_w)
+        rows = (n + cols - 1) // cols
+        self.setFixedHeight(rows * cell_h + 8)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_height()
+
+
+# ---------------------------------------------------------------------------
+# One folder header (spec 3.3) or, nested under it, one recursive
+# sub-header (spec 3.4). Closed by default; only scans/generates thumbnails
+# once the user expands it.
+# ---------------------------------------------------------------------------
+class FolderSection(QWidget):
+    def __init__(self, browser, path, depth=0, recursive=False, closable=False):
+        super().__init__()
+        self.browser = browser
+        self.path = path
+        self.depth = depth
+        self.recursive = recursive
+        self.closable = closable
+        self._expanded = False
+        self._rough_done = False
+        self._rough_started = False
+        self._thumb_started = False
+        self._files = []
+        self._child_sections = []
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        header = QFrame()
+        header.setObjectName("subHeader" if depth > 0 else "folderHeader")
+        if depth > 0:
+            # Drives the per-depth accent-color QSS below, so deeper nesting
+            # reads as progressively "further in" at a glance (spec 3.4).
+            header.setProperty("depth", min(depth, 6))
+        is_deep = depth > RECURSION_DEPTH_WARN
+        if is_deep:
+            header.setProperty("deep", True)
+        header.setCursor(Qt.PointingHandCursor)
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(8 + depth * 16, 6, 8, 6)
+        header_lay.setSpacing(6)
+
+        self.chevron_lbl = QLabel("\u25b8")
+        self.chevron_lbl.setObjectName("headerChevron")
+        header_lay.addWidget(self.chevron_lbl)
+
+        name_text = Path(path).name or path
+        self.name_lbl = QLabel(name_text + (" \u26a0" if is_deep else ""))
+        self.name_lbl.setObjectName("subHeaderName" if depth > 0 else "folderHeaderName")
+        tooltip = path
+        if is_deep:
+            tooltip += f"\n\u26a0 Nested {depth} levels deep \u2014 past the recommended {RECURSION_DEPTH_WARN}-level guideline. Still fully functional, just flagged for awareness."
+        self.name_lbl.setToolTip(tooltip)
+        header_lay.addWidget(self.name_lbl)
+
+        self.count_lbl = QLabel("")
+        self.count_lbl.setObjectName("hint")
+        header_lay.addWidget(self.count_lbl)
+        header_lay.addStretch(1)
+
+        if closable:
+            close_btn = QToolButton()
+            close_btn.setObjectName("iconButton")
+            close_btn.setText("\u00d7")
+            close_btn.setToolTip("Hide for this session (not removed from Settings)")
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.clicked.connect(self._close_for_session)
+            header_lay.addWidget(close_btn)
+
+        header.mousePressEvent = self._header_clicked
+        outer.addWidget(header)
+
+        self.body = QWidget()
+        body_lay = QVBoxLayout(self.body)
+        body_lay.setContentsMargins(depth * 16, 0, 0, 0)
+        body_lay.setSpacing(6)
+
+        self.grid = ThumbnailGrid()
+        self.grid.thumbnailClicked.connect(self.browser.thumbnailClicked)
+        body_lay.addWidget(self.grid)
+
+        self.children_container = QWidget()
+        self.children_lay = QVBoxLayout(self.children_container)
+        self.children_lay.setContentsMargins(0, 0, 0, 0)
+        self.children_lay.setSpacing(4)
+        body_lay.addWidget(self.children_container)
+
+        outer.addWidget(self.body)
+        self.body.hide()
+
+    def _header_clicked(self, event):
+        self.toggle()
+
+    def _close_for_session(self):
+        self.browser.close_tab_for_session(self.path)
+
+    # -- expand / collapse -------------------------------------------------
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded, persist=True):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self.chevron_lbl.setText("\u25be" if expanded else "\u25b8")
+        self.body.setVisible(expanded)
+        if expanded:
+            if not self._rough_done:
+                # Rough pass may already be running (e.g. kicked off when the
+                # tab was first opened) — ensure_rough_pass() no-ops in that case.
+                self.ensure_rough_pass()
+            elif not self._thumb_started and self._files:
+                # Rough pass already completed (count was showing on the
+                # still-collapsed header) — the thumbnail pass is the only
+                # thing expand still needs to trigger.
+                self._start_thumbnail_pass()
+        if persist:
+            self.browser.note_expanded(self.path, expanded)
+
+    def is_expanded(self):
+        return self._expanded
+
+    # -- lazy loading (spec 3.5) -----------------------------------------
+    def ensure_rough_pass(self):
+        """Kick off the rough (filename-listing) pass if it hasn't run yet,
+        independent of expand state. Called both on tab activation (per the
+        spec 3.5/6 fix: a still-collapsed header should show a count as soon
+        as its tab is opened) and, as a fallback, on expand."""
+        if self._rough_done or self._rough_started:
+            return
+        self._rough_started = True
+        self.count_lbl.setText("\u2026")
+        worker = _RoughScanWorker(self.path, self.recursive, self.browser.hide_dotted_bang())
+        worker.signals.done.connect(self._on_rough_done)
+        worker.signals.failed.connect(self._on_rough_failed)
+        self.browser.thread_pool.start(worker)
+
+    def _on_rough_failed(self, path, message):
+        if path != self.path:
+            return
+        # Allow a retry: re-expanding (or the tab being reactivated) will
+        # attempt the rough pass again since it never completed.
+        self._rough_started = False
+        labels = {
+            "not_found": "(folder not found)",
+            "permission_denied": "(permission denied)",
+        }
+        self.count_lbl.setText(labels.get(message, "(unreadable)"))
+        self._set_count_state("error")
+
+    def _set_count_state(self, state):
+        self.count_lbl.setProperty("state", state)
+        self.count_lbl.style().unpolish(self.count_lbl)
+        self.count_lbl.style().polish(self.count_lbl)
+
+    def _on_rough_done(self, path, files, subdirs):
+        if path != self.path:
+            return
+        self._rough_done = True
+        self._files = files
+        if files or subdirs:
+            self.count_lbl.setText(f"({len(files)})")
+            self._set_count_state("normal")
+        else:
+            self.count_lbl.setText("(empty)")
+            self._set_count_state("muted")
+        # Reserve grid layout space (filenames only, no thumbnails yet) —
+        # safe to do even while the section is still collapsed.
+        self.grid.set_files(files)
+
+        for sub_path in subdirs:
+            child = FolderSection(self.browser, sub_path, depth=self.depth + 1, recursive=True)
+            self.children_lay.addWidget(child)
+            self._child_sections.append(child)
+            if sub_path in self.browser.saved_expanded_paths:
+                child.set_expanded(True, persist=False)
+
+        # Only decode thumbnails if the section is actually expanded — the
+        # rough pass alone must never trigger image decoding.
+        if self._expanded and files and not self._thumb_started:
+            self._start_thumbnail_pass()
+
+    def _start_thumbnail_pass(self):
+        self._thumb_started = True
+        worker = _ThumbnailWorker(list(self._files), self.browser.thumb_cache_dir)
+        worker.signals.ready.connect(self.grid.set_thumbnail)
+        self.browser.thread_pool.start(worker)
+
+
+# ---------------------------------------------------------------------------
+# Center — Image Browser (spec section 3). A single, persistent, global
+# instance shared by every workflow: one tab per configured top-level
+# folder, closed-by-default headers/sub-headers, lazy rough+thumbnail
+# passes off the UI thread, and a disk thumbnail cache. Switching the
+# active workflow never touches this widget — only the roster below it.
+# ---------------------------------------------------------------------------
+class ImageBrowser(QWidget):
+    thumbnailClicked = Signal(str)   # filepath — MainWindow feeds this to the armed roster slot
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setObjectName("imageBrowserPanel")
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thumb_cache_dir = THUMB_CACHE_DIR
+        self._closed_this_session = set()   # paths ×'d away — in-memory only, cleared on relaunch
+
+        state = main_window.config_data.get("image_browser_state") or {}
+        self.saved_expanded_paths = set(state.get("expanded_headers") or [])
+        self._saved_active_tab = state.get("active_tab")
+        self._top_sections = []   # top-level FolderSection per tab index, in tab order
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("browserTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        # Restore-hidden-folder affordance, in its own row so it stays
+        # visible even when every tab is currently hidden (finishes Section
+        # 5's one loose thread: a ×'d tab previously had no in-session way
+        # back short of restarting the app).
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(6, 4, 6, 0)
+        top_row.addStretch(1)
+        self.restore_hidden_btn = QToolButton()
+        self.restore_hidden_btn.setObjectName("iconButton")
+        self.restore_hidden_btn.setText("\u21bb")
+        self.restore_hidden_btn.setPopupMode(QToolButton.InstantPopup)
+        self.restore_hidden_btn.setCursor(Qt.PointingHandCursor)
+        self.restore_hidden_btn.hide()
+        top_row.addWidget(self.restore_hidden_btn)
+        layout.addLayout(top_row)
+
+        layout.addWidget(self.tabs, 1)
+
+        self.empty_hint = QLabel(
+            "No folders configured yet.\n"
+            "Open Settings \u2192 Image Selection to add one."
+        )
+        self.empty_hint.setObjectName("hint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_hint, 1)
+
+        self.reload_folders()
+
+    def hide_dotted_bang(self):
+        return bool(self.main_window.config_data.get("hide_dotted_bang_folders", True))
+
+    # -- (re)building tabs from Settings -----------------------------------
+    def reload_folders(self):
+        prev_active = self._current_tab_path() or self._saved_active_tab
+        self.tabs.clear()
+        self._top_sections = []
+        folders = self.main_window.config_data.get("image_selection_folders", [])
+        configured_paths = {f.get("path", "") for f in folders}
+        # A folder removed from Settings entirely shouldn't linger in the
+        # restore-hidden menu.
+        self._closed_this_session &= configured_paths
+        has_folders = len(folders) > 0
+
+        restore_index = 0
+        for i, folder_cfg in enumerate(folders):
+            path = folder_cfg.get("path", "")
+            recursive = bool(folder_cfg.get("recursive", False))
+            if path in self._closed_this_session:
+                continue
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            section = FolderSection(self, path, depth=0, recursive=recursive, closable=True)
+            wrapper = QWidget()
+            wrapper_lay = QVBoxLayout(wrapper)
+            wrapper_lay.setContentsMargins(12, 12, 12, 12)
+            wrapper_lay.addWidget(section)
+            wrapper_lay.addStretch(1)
+            scroll.setWidget(wrapper)
+
+            name = Path(path).name or path
+            self.tabs.addTab(scroll, name)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, path)
+            self._top_sections.append(section)
+            if path == prev_active:
+                restore_index = self.tabs.count() - 1
+            if path in self.saved_expanded_paths:
+                section.set_expanded(True, persist=False)
+
+        if self.tabs.count() > 0:
+            self.tabs.setCurrentIndex(restore_index)
+            # currentChanged doesn't fire if restore_index is already 0 (the
+            # default), so make sure the initially-active tab still gets its
+            # rough pass kicked off.
+            self._trigger_rough_pass_for_tab(restore_index)
+
+        self._update_empty_state()
+        self._refresh_restore_hidden_button()
+
+    def _update_empty_state(self):
+        has_tabs = self.tabs.count() > 0
+        self.tabs.setVisible(has_tabs)
+        self.empty_hint.setVisible(not has_tabs)
+        if not has_tabs:
+            if self._closed_this_session:
+                self.empty_hint.setText(
+                    "All configured folders are hidden for this session.\n"
+                    "Click \u21bb above to restore them."
+                )
+            else:
+                self.empty_hint.setText(
+                    "No folders configured yet.\n"
+                    "Open Settings \u2192 Image Selection to add one."
+                )
+
+    def _refresh_restore_hidden_button(self):
+        if not self._closed_this_session:
+            self.restore_hidden_btn.hide()
+            return
+        self.restore_hidden_btn.setToolTip(
+            f"{len(self._closed_this_session)} folder(s) hidden for this session \u2014 click to restore"
+        )
+        menu = QMenu(self.restore_hidden_btn)
+        for path in sorted(self._closed_this_session, key=str.lower):
+            name = Path(path).name or path
+            action = menu.addAction(name)
+            action.setToolTip(path)
+            action.triggered.connect(lambda checked=False, p=path: self._restore_closed_folder(p))
+        menu.addSeparator()
+        restore_all = menu.addAction("Restore all")
+        restore_all.triggered.connect(self._restore_all_closed_folders)
+        self.restore_hidden_btn.setMenu(menu)
+        self.restore_hidden_btn.show()
+
+    def _restore_closed_folder(self, path):
+        self._closed_this_session.discard(path)
+        self.reload_folders()
+
+    def _restore_all_closed_folders(self):
+        self._closed_this_session.clear()
+        self.reload_folders()
+
+    def _trigger_rough_pass_for_tab(self, index):
+        """Spec 3.5/6 fix: the rough pass (filename listing + count) must
+        run as soon as a tab is opened, independent of whether its header is
+        expanded — not only when the user expands it."""
+        if 0 <= index < len(self._top_sections):
+            self._top_sections[index].ensure_rough_pass()
+
+    def close_tab_for_session(self, path):
+        """Hide a folder's tab for the rest of this session (spec 3.3's ×).
+        Removes the tab immediately, rather than only on the next full
+        reload_folders() call — and stays undoable via the restore-hidden
+        control, since nothing here touches Settings/disk."""
+        self._closed_this_session.add(path)
+        for i, section in enumerate(self._top_sections):
+            if section.path == path:
+                self.tabs.removeTab(i)
+                del self._top_sections[i]
+                break
+        self._update_empty_state()
+        self._persist_state()
+        self._refresh_restore_hidden_button()
+
+    def note_expanded(self, path, expanded):
+        if expanded:
+            self.saved_expanded_paths.add(path)
+        else:
+            self.saved_expanded_paths.discard(path)
+        self._persist_state()
+
+    def _current_tab_path(self):
+        idx = self.tabs.currentIndex()
+        if idx < 0:
+            return None
+        tooltip = self.tabs.tabToolTip(idx)
+        return tooltip or None
+
+    def _on_tab_changed(self, index):
+        self._trigger_rough_pass_for_tab(index)
+        self._persist_state()
+
+    def _persist_state(self):
+        self.main_window.config_data["image_browser_state"] = {
+            "expanded_headers": sorted(self.saved_expanded_paths),
+            "active_tab": self._current_tab_path(),
+        }
+        self.main_window.persist_all()
+
+
+# ---------------------------------------------------------------------------
+# Bottom bar — the "input roster" (spec section 2.3), plus the run/queue
+# controls and optional-parameter form for whichever workflow is active.
+# Only this bar changes when the active workflow changes; it never resets
+# the Image Browser above it.
+# ---------------------------------------------------------------------------
+class RosterBar(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setObjectName("rosterBar")
+        self.state = None
+        self.icons = []
+        self.armed_index = None
+        self.param_widgets = {}
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 8, 14, 10)
+        outer.setSpacing(6)
+
+        toolbar = QHBoxLayout()
+        self.status_label = QLabel("No workflow selected.")
+        self.status_label.setObjectName("hint")
+        toolbar.addWidget(self.status_label)
+        toolbar.addStretch(1)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setObjectName("dangerButton")
+        self.clear_btn.clicked.connect(self._on_clear_clicked)
+        toolbar.addWidget(self.clear_btn)
+        self.queue_btn = QPushButton("+ Add to Queue")
+        self.queue_btn.clicked.connect(self._on_queue_clicked)
+        toolbar.addWidget(self.queue_btn)
+        self.run_btn = QPushButton("\u25b6  Run")
+        self.run_btn.setObjectName("accentButton")
+        self.run_btn.clicked.connect(self._on_run_clicked)
+        toolbar.addWidget(self.run_btn)
+        outer.addLayout(toolbar)
+
+        self.progress = QProgressBar()
+        self.progress.setMaximumHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)
+        self.progress.hide()
+        outer.addWidget(self.progress)
+
+        self.param_form_widget = QWidget()
+        self.param_form = QFormLayout(self.param_form_widget)
+        self.param_form.setContentsMargins(0, 4, 0, 4)
+        outer.addWidget(self.param_form_widget)
+        self.param_form_widget.hide()
+
+        roster_label = QLabel("INPUT ROSTER")
+        roster_label.setObjectName("hint")
+        outer.addWidget(roster_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFixedHeight(RosterIcon.SIZE + 16)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.roster_row_widget = QWidget()
+        self.roster_row = QHBoxLayout(self.roster_row_widget)
+        self.roster_row.setContentsMargins(2, 2, 2, 2)
+        self.roster_row.setSpacing(8)
+        self.roster_row.addStretch(1)
+        scroll.setWidget(self.roster_row_widget)
+        outer.addWidget(scroll)
+
+        self.set_workflow(None)
+
+    # -- switching the active workflow --------------------------------------
+    def set_workflow(self, state):
+        if self.state is not None:
+            try:
+                self.state.statusChanged.disconnect(self._on_status_changed)
+                self.state.runStateChanged.disconnect(self._on_run_state_changed)
+                self.state.slotsRebuilt.disconnect(self._on_slots_rebuilt)
+            except (TypeError, RuntimeError):
+                pass
+
+        self.state = state
+        self.armed_index = None
+
+        if state is not None:
+            state.statusChanged.connect(self._on_status_changed)
+            state.runStateChanged.connect(self._on_run_state_changed)
+            state.slotsRebuilt.connect(self._on_slots_rebuilt)
+
+        self._rebuild_icons()
+        self._rebuild_params()
+
+        self.queue_btn.setEnabled(state is not None)
+        self.clear_btn.setEnabled(state is not None)
+        if state is None:
+            self.run_btn.setEnabled(False)
+            self.status_label.setText("No workflow selected. Add one from the workflows sidebar.")
+            self.status_label.setStyleSheet("")
+            self.progress.hide()
+        else:
+            self.run_btn.setEnabled(not state.running)
+            self._on_status_changed(state.status_text, state.status_error)
+            self.progress.setVisible(state.running)
+
+    def _on_slots_rebuilt(self):
+        self._rebuild_icons()
+        self._rebuild_params()
+
+    def _rebuild_icons(self):
+        for icon in self.icons:
+            self.roster_row.removeWidget(icon)
+            icon.setParent(None)
+            icon.deleteLater()
+        self.icons = []
+        while self.roster_row.count():
+            self.roster_row.takeAt(0)
+
+        if self.state is not None:
+            for i, slot in enumerate(self.state.slots):
+                icon = RosterIcon(i, slot["node_id"], slot["caption"])
+                icon.filepath = slot["filepath"]
+                if icon.filepath:
+                    pix = QPixmap(icon.filepath)
+                    if not pix.isNull():
+                        icon._pixmap = pix
+                icon._render()
+                icon.armToggled.connect(self._on_arm_toggled)
+                icon.reorderRequested.connect(self._on_reorder)
+                icon.imageSwapRequested.connect(self._on_swap)
+                icon.changed.connect(lambda idx=i: self._on_icon_changed(idx))
+                self.roster_row.addWidget(icon)
+                self.icons.append(icon)
+        self.roster_row.addStretch(1)
+
+    def _rebuild_params(self):
+        while self.param_form.rowCount():
+            self.param_form.removeRow(0)
+        self.param_widgets = {}
+        editable = self.state.editable_params() if self.state is not None else {}
+        if not editable:
+            self.param_form_widget.hide()
+            return
+        for key, (default_value, type_name) in editable.items():
+            value = self.state.param_values.get(key, default_value)
+            if type_name == "int":
+                w = QSpinBox()
+                w.setRange(-2_147_483_648, 2_147_483_647)
+                w.setValue(int(value))
+                w.valueChanged.connect(lambda v, k=key: self._on_param_changed(k, v))
+            elif type_name == "float":
+                w = QDoubleSpinBox()
+                w.setRange(-1e12, 1e12)
+                w.setDecimals(4)
+                w.setValue(float(value))
+                w.valueChanged.connect(lambda v, k=key: self._on_param_changed(k, v))
+            else:
+                w = QLineEdit(str(value))
+                w.textChanged.connect(lambda v, k=key: self._on_param_changed(k, v))
+            self.param_form.addRow(key, w)
+            self.param_widgets[key] = w
+        self.param_form_widget.show()
+
+    def _on_param_changed(self, key, value):
+        if self.state is not None:
+            self.state.param_values[key] = value
+
+    # -- roster interactions -------------------------------------------
+    def _on_arm_toggled(self, index):
+        self.armed_index = None if self.armed_index == index else index
+        for icon in self.icons:
+            icon.set_armed(icon.index == self.armed_index)
+
+    def assign_armed(self, filepath):
+        """Primary selection flow (spec 3.6): called when a thumbnail is
+        clicked in the Image Browser while a roster slot is armed. Assigns
+        the image, then auto-advances the armed state to the next empty
+        slot so filling several inputs back-to-back doesn't need re-arming
+        after every click."""
+        if self.armed_index is None or self.armed_index >= len(self.icons):
+            return
+        self.icons[self.armed_index].set_image_path(filepath)
+        next_empty = next(
+            (i for i, icon in enumerate(self.icons) if not icon.filepath), None
+        )
+        self.armed_index = next_empty
+        for icon in self.icons:
+            icon.set_armed(icon.index == self.armed_index)
+
+    def _on_icon_changed(self, index):
+        if self.state is None or index >= len(self.state.slots):
+            return
+        self.state.slots[index]["filepath"] = self.icons[index].filepath
+        self.main_window.persist_all()
+
+    def _on_reorder(self, src, tgt):
+        if self.state is not None:
+            self.state.reorder_slot(src, tgt)
+
+    def _on_swap(self, src, tgt):
+        if self.state is None:
+            return
+        self.state.swap_slot_images(src, tgt)
+        a, b = self.icons[src], self.icons[tgt]
+        a.filepath, b.filepath = b.filepath, a.filepath
+        a._pixmap, b._pixmap = b._pixmap, a._pixmap
+        a._render()
+        b._render()
+
+    # -- run / queue / clear ---------------------------------------------
+    def _on_run_clicked(self):
+        if self.state is not None:
+            self.state.run_now()
+
+    def _on_queue_clicked(self):
+        if self.state is not None:
+            self.state.add_to_queue()
+
+    def _on_clear_clicked(self):
+        """Spec 3.7: resets every filled roster slot for the active
+        workflow back to empty. Never touches the Image Browser's own
+        state (open tabs/headers, scroll position)."""
+        if self.state is None:
+            return
+        for icon in self.icons:
+            if icon.filepath:
+                icon.clear_image()
+        self.armed_index = None
+        for icon in self.icons:
+            icon.set_armed(False)
+
+    def _on_status_changed(self, text, error):
         self.status_label.setText(text)
         self.status_label.setStyleSheet("color: rgba(220,140,140,0.9);" if error else "")
 
-    def to_dict(self):
-        layout = self.current_layout()
-        return {
-            "workflow_path": self.workflow_path,
-            "optional_identifier": self.optional_identifier,
-            "slot_node_order": layout["slot_node_order"],
-            "splitter_sizes": layout["splitter_sizes"],
-        }
+    def _on_run_state_changed(self, running):
+        self.run_btn.setEnabled(not running)
+        self.progress.setVisible(running)
 
 
 # ---------------------------------------------------------------------------
@@ -1383,7 +2310,7 @@ class SettingsDialog(QDialog):
         super().__init__(main_window)
         self.main_window = main_window
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -1400,6 +2327,60 @@ class SettingsDialog(QDialog):
         out_wrap.setLayout(out_row)
         form.addRow("Output folder:", out_wrap)
         layout.addLayout(form)
+
+        # -- Image Selection (spec section 4) --------------------------
+        img_title = QLabel("Image Selection")
+        img_title.setObjectName("sectionTitle")
+        layout.addWidget(img_title)
+
+        self.folders = [dict(f) for f in main_window.config_data.get("image_selection_folders", [])]
+
+        self.folder_table = QTableWidget(0, 3)
+        self.folder_table.setHorizontalHeaderLabels(["Folder", "Recursive", ""])
+        self.folder_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.folder_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.folder_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.folder_table.verticalHeader().hide()
+        self.folder_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.folder_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.folder_table.setMaximumHeight(160)
+        layout.addWidget(self.folder_table)
+
+        folder_btns = QHBoxLayout()
+        add_folder_btn = QPushButton("Add Folder\u2026")
+        add_folder_btn.clicked.connect(self._add_folder)
+        folder_btns.addWidget(add_folder_btn)
+        folder_btns.addStretch(1)
+        up_btn = QPushButton("\u2191 Move Up")
+        up_btn.clicked.connect(lambda: self._move_folder(-1))
+        folder_btns.addWidget(up_btn)
+        down_btn = QPushButton("\u2193 Move Down")
+        down_btn.clicked.connect(lambda: self._move_folder(1))
+        folder_btns.addWidget(down_btn)
+        layout.addLayout(folder_btns)
+
+        self.hide_dotted_chk = QCheckBox("Hide folders starting with . or !")
+        self.hide_dotted_chk.setChecked(bool(main_window.config_data.get("hide_dotted_bang_folders", True)))
+        layout.addWidget(self.hide_dotted_chk)
+
+        folder_hint = QLabel(
+            "Order here sets the order of tabs in the Image Browser. \u201cRecursive\u201d\n"
+            "shows a folder's subfolders as nested sub-headers instead of ignoring them."
+        )
+        folder_hint.setObjectName("hint")
+        folder_hint.setWordWrap(True)
+        layout.addWidget(folder_hint)
+
+        # Soft warning only (spec section 9, resolved) — never blocks adding
+        # more folders, just flags when things may get hard to navigate.
+        self.folder_warning_lbl = QLabel("")
+        self.folder_warning_lbl.setObjectName("hint")
+        self.folder_warning_lbl.setProperty("state", "warning")
+        self.folder_warning_lbl.setWordWrap(True)
+        self.folder_warning_lbl.hide()
+        layout.addWidget(self.folder_warning_lbl)
+
+        self._refresh_folder_table()
 
         hk_title = QLabel("Hotkeys")
         hk_title.setObjectName("sectionTitle")
@@ -1431,10 +2412,77 @@ class SettingsDialog(QDialog):
         if path:
             self.output_edit.setText(path)
 
+    # -- Image Selection folders -----------------------------------------
+    def _refresh_folder_table(self):
+        self.folder_table.setRowCount(len(self.folders))
+        for row, f in enumerate(self.folders):
+            path_item = QTableWidgetItem(f.get("path", ""))
+            path_item.setToolTip(f.get("path", ""))
+            self.folder_table.setItem(row, 0, path_item)
+
+            chk_wrap = QWidget()
+            chk_lay = QHBoxLayout(chk_wrap)
+            chk_lay.setContentsMargins(0, 0, 0, 0)
+            chk_lay.setAlignment(Qt.AlignCenter)
+            chk = QCheckBox()
+            chk.setChecked(bool(f.get("recursive", False)))
+            chk.stateChanged.connect(lambda state, r=row: self._set_recursive(r, state))
+            chk_lay.addWidget(chk)
+            self.folder_table.setCellWidget(row, 1, chk_wrap)
+
+            remove_btn = QToolButton()
+            remove_btn.setObjectName("iconButton")
+            remove_btn.setText("\u00d7")
+            remove_btn.setToolTip("Remove folder")
+            remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_btn.clicked.connect(lambda _, r=row: self._remove_folder(r))
+            self.folder_table.setCellWidget(row, 2, remove_btn)
+
+        if len(self.folders) > FOLDER_COUNT_WARN:
+            self.folder_warning_lbl.setText(
+                f"\u26a0 {len(self.folders)} folders configured \u2014 more than "
+                f"~{FOLDER_COUNT_WARN} can get hard to navigate as tabs. Still fully "
+                f"functional, just a heads-up."
+            )
+            self.folder_warning_lbl.show()
+        else:
+            self.folder_warning_lbl.hide()
+
+    def _add_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Select image folder")
+        if not path:
+            return
+        if any(f.get("path") == path for f in self.folders):
+            return
+        self.folders.append({"path": path, "recursive": True})
+        self._refresh_folder_table()
+
+    def _remove_folder(self, row):
+        if 0 <= row < len(self.folders):
+            del self.folders[row]
+            self._refresh_folder_table()
+
+    def _set_recursive(self, row, state):
+        if 0 <= row < len(self.folders):
+            self.folders[row]["recursive"] = bool(state)
+
+    def _move_folder(self, delta):
+        row = self.folder_table.currentRow()
+        if row < 0:
+            return
+        new_row = row + delta
+        if 0 <= new_row < len(self.folders):
+            self.folders[row], self.folders[new_row] = self.folders[new_row], self.folders[row]
+            self._refresh_folder_table()
+            self.folder_table.selectRow(new_row)
+
     def _save(self):
         self.main_window.server = self.server_edit.text().strip() or DEFAULT_SERVER
         self.main_window.output_dir = self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
+        self.main_window.config_data["image_selection_folders"] = self.folders
+        self.main_window.config_data["hide_dotted_bang_folders"] = self.hide_dotted_chk.isChecked()
         self.main_window.persist_all()
+        self.main_window.image_browser.reload_folders()
         self.accept()
 
 
@@ -1543,10 +2591,11 @@ class _TitleBar(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Tab widget that notifies MainWindow when it's resized, so the Outputs /
-# Queue sidebar (an overlay child of this widget) can be repositioned.
+# Center container — holds the persistent Image Browser + the roster bar.
+# Notifies MainWindow when resized so both overlay sidebars (workflows on
+# the left, outputs/queue on the right) can be repositioned to match.
 # ---------------------------------------------------------------------------
-class MainTabs(QTabWidget):
+class CenterContainer(QWidget):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -1554,15 +2603,20 @@ class MainTabs(QTabWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.main_window._position_sidebar()
+        self.main_window._position_workflow_sidebar()
 
 
 # ---------------------------------------------------------------------------
-# Draggable left-edge handle used to resize the Outputs / Queue sidebar
+# Draggable handle used to resize an overlay sidebar. `sign` controls which
+# drag direction grows the sidebar: -1 for a sidebar docked to the right
+# edge (handle on its left, dragging left grows it), +1 for a sidebar
+# docked to the left edge (handle on its right, dragging right grows it).
 # ---------------------------------------------------------------------------
 class _SidebarHandle(QWidget):
-    def __init__(self, sidebar, parent=None):
+    def __init__(self, sidebar, sign=-1, parent=None):
         super().__init__(parent)
         self.sidebar = sidebar
+        self.sign = sign
         self.setObjectName("sidebarHandle")
         self.setFixedWidth(5)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
@@ -1579,7 +2633,7 @@ class _SidebarHandle(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._dragging:
-            dx = self._start_x - event.globalPosition().toPoint().x()
+            dx = self.sign * (self._start_x - event.globalPosition().toPoint().x())
             self.sidebar.set_width(self._start_width + dx, persist=False)
             event.accept()
 
@@ -1591,16 +2645,17 @@ class _SidebarHandle(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Outputs / Queue sidebar — slides in/out over the tab *content* area only
-# (the tab bar itself is untouched). Draggable in width; the width is
-# remembered across launches. Closed by default.
+# Outputs / Queue sidebar — the right-hand counterpart to the workflow
+# sidebar (spec 2.2). Functionally unchanged from before the revamp: it
+# slides in/out over the center content, is draggable in width (remembered
+# across launches), and is closed by default.
 # ---------------------------------------------------------------------------
 class OutputsSidebar(QWidget):
     MIN_WIDTH = 260
     MAX_WIDTH = 640
 
     def __init__(self, main_window):
-        super().__init__(main_window.tabs)
+        super().__init__(main_window.center_container)
         self.main_window = main_window
         self.setObjectName("outputsSidebar")
         self._width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, int(
@@ -1613,7 +2668,7 @@ class OutputsSidebar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.handle = _SidebarHandle(self)
+        self.handle = _SidebarHandle(self, sign=-1)
         layout.addWidget(self.handle)
 
         content = QWidget()
@@ -1651,15 +2706,14 @@ class OutputsSidebar(QWidget):
         if open_ == self._open:
             return
         self._open = open_
-        tabs = self.main_window.tabs
-        bar_h = tabs.tabBar().height()
+        container = self.main_window.center_container
         start_rect = self.geometry()
         if open_:
             self.show()
             self.raise_()
-            end_rect = QRect(max(0, tabs.width() - self._width), bar_h, self._width, max(0, tabs.height() - bar_h))
+            end_rect = QRect(max(0, container.width() - self._width), 0, self._width, container.height())
         else:
-            end_rect = QRect(tabs.width(), bar_h, self._width, max(0, tabs.height() - bar_h))
+            end_rect = QRect(container.width(), 0, self._width, container.height())
 
         anim = QPropertyAnimation(self, b"geometry", self)
         anim.setDuration(180)
@@ -1673,19 +2727,151 @@ class OutputsSidebar(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Tab bar that only allows drag-reordering among the workflow tabs
+# Left sidebar — workflow switcher (spec 2.1). Replaces the old top tab
+# bar entirely: this list is what makes a workflow "active", drag-reorders
+# workflows, and is where "Add workflow" now lives. Mirrors OutputsSidebar's
+# slide animation with the anchor edge flipped, and its handle reversed.
 # ---------------------------------------------------------------------------
-class LockedTabBar(QTabBar):
+class WorkflowSidebar(QWidget):
+    MIN_WIDTH = 200
+    MAX_WIDTH = 460
+
+    def __init__(self, main_window):
+        super().__init__(main_window.center_container)
+        self.main_window = main_window
+        self.setObjectName("workflowSidebar")
+        self._width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, int(
+            main_window.config_data.get("workflow_sidebar_width", 260)
+        )))
+        self._open = False
+        self._anim = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(12, 12, 8, 12)
+        content_layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("WORKFLOWS")
+        title.setObjectName("hint")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.add_btn = QToolButton()
+        self.add_btn.setObjectName("iconButton")
+        self.add_btn.setText("+")
+        self.add_btn.setToolTip("Add workflow")
+        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_btn.clicked.connect(lambda: main_window._new_workflow_flow())
+        header.addWidget(self.add_btn)
+        content_layout.addLayout(header)
+
+        self.list = QListWidget()
+        self.list.setObjectName("workflowList")
+        self.list.setDragDropMode(QListWidget.InternalMove)
+        self.list.currentRowChanged.connect(main_window._on_workflow_selected)
+        self.list.itemDoubleClicked.connect(main_window._edit_workflow_by_item)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(main_window._on_workflow_context_menu)
+        self.list.model().rowsMoved.connect(main_window._on_workflow_rows_moved)
+        content_layout.addWidget(self.list, 1)
+
+        self.empty_hint = QLabel('No workflows yet.\nClick "+" above to add a ComfyUI workflow.')
+        self.empty_hint.setObjectName("hint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        content_layout.addWidget(self.empty_hint)
+
+        layout.addWidget(content, 1)
+        self.handle = _SidebarHandle(self, sign=1)
+        layout.addWidget(self.handle)
+
+        self.resize(self._width, self.height())
+        self.hide()
+        self.update_empty_hint()
+
+    def update_empty_hint(self):
+        empty = self.list.count() == 0
+        self.empty_hint.setVisible(empty)
+        self.list.setVisible(not empty)
+
+
+    # -- width ------------------------------------------------------------
+    def set_width(self, width, persist=True):
+        width = max(self.MIN_WIDTH, min(self.MAX_WIDTH, int(width)))
+        if width == self._width:
+            return
+        self._width = width
+        self.main_window._position_workflow_sidebar()
+        if persist:
+            self.persist_width()
+
+    def persist_width(self):
+        self.main_window.config_data["workflow_sidebar_width"] = self._width
+        self.main_window.persist_all()
+
+    # -- open / close -------------------------------------------------------
+    def is_open(self):
+        return self._open
+
+    def toggle(self):
+        self.set_open(not self._open)
+
+    def set_open(self, open_):
+        if open_ == self._open:
+            return
+        self._open = open_
+        container = self.main_window.center_container
+        start_rect = self.geometry()
+        if open_:
+            self.show()
+            self.raise_()
+            end_rect = QRect(0, 0, self._width, container.height())
+        else:
+            end_rect = QRect(-self._width, 0, self._width, container.height())
+
+        anim = QPropertyAnimation(self, b"geometry", self)
+        anim.setDuration(180)
+        anim.setStartValue(start_rect)
+        anim.setEndValue(end_rect)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if not open_:
+            anim.finished.connect(self.hide)
+        anim.start()
+        self._anim = anim
+        self.main_window._sync_edge_tab()
+
+
+# ---------------------------------------------------------------------------
+# Small always-visible open/closed indicator tab on the left edge of the
+# center content, so the workflow sidebar stays discoverable even when
+# collapsed (spec 2.1).
+# ---------------------------------------------------------------------------
+class _WorkflowEdgeTab(QWidget):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
-        self.setMovable(True)
+        self.setObjectName("edgeTab")
+        self.setFixedWidth(14)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Workflows")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._lbl = QLabel("\u203a")
+        self._lbl.setObjectName("edgeTabChevron")
+        self._lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._lbl)
 
     def mousePressEvent(self, event):
-        idx = self.tabAt(event.position().toPoint() if hasattr(event, "position") else event.pos())
-        fixed_start = self.main_window.fixed_tabs_start_index()
-        self.setMovable(idx < fixed_start if idx >= 0 else True)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.main_window._toggle_workflow_sidebar()
         super().mousePressEvent(event)
+
+    def set_open_state(self, open_):
+        self._lbl.setText("\u2039" if open_ else "\u203a")
 
 
 # ---------------------------------------------------------------------------
@@ -1733,7 +2919,8 @@ class MainWindow(QMainWindow):
                 )
 
         self.queue_manager = QueueManager(self)
-        self.workflow_tabs = []
+        self.workflow_states = []
+        self.active_workflow = None
 
         # ── Outer shell: custom title bar on top, app content below ───────
         shell = QWidget()
@@ -1761,6 +2948,34 @@ class MainWindow(QMainWindow):
         )
         tb_lay.addWidget(brand_lbl)
         tb_lay.addStretch()
+
+        self.workflows_btn = QToolButton()
+        self.workflows_btn.setObjectName("iconButton")
+        self.workflows_btn.setText("\u2630")
+        self.workflows_btn.setToolTip("Workflows")
+        self.workflows_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.workflows_btn.setCheckable(True)
+        self.workflows_btn.clicked.connect(self._toggle_workflow_sidebar)
+        tb_lay.addWidget(self.workflows_btn)
+
+        self.sidebar_btn = QToolButton()
+        self.sidebar_btn.setObjectName("iconButton")
+        self.sidebar_btn.setText("\u25a4")
+        self.sidebar_btn.setToolTip("Outputs / Queue")
+        self.sidebar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sidebar_btn.setCheckable(True)
+        self.sidebar_btn.clicked.connect(self._toggle_sidebar)
+        tb_lay.addWidget(self.sidebar_btn)
+
+        self.settings_btn = QToolButton()
+        self.settings_btn.setObjectName("iconButton")
+        self.settings_btn.setText("\u2699")
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.clicked.connect(self.open_settings)
+        tb_lay.addWidget(self.settings_btn)
+
+        tb_lay.addSpacing(8)
 
         self._min_btn = QToolButton()
         self._min_btn.setObjectName("winMinBtn")
@@ -1806,165 +3021,197 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(4)
 
-        # ── Tabs ─────────────────────────────────────────────────────────
-        self.tabs = MainTabs(self)
-        self.tabs.setTabBar(LockedTabBar(self))
-        self.tabs.setMovable(True)
-        self.tabs.setDocumentMode(True)
-        outer.addWidget(self.tabs, 1)
+        # ── Center: persistent Image Browser + bottom Input Roster ────────
+        self.center_container = CenterContainer(self)
+        outer.addWidget(self.center_container, 1)
 
-        self.plus_placeholder = QWidget()
-        pl = QVBoxLayout(self.plus_placeholder)
-        hint = QLabel('Click the "+" tab above to add a ComfyUI workflow.')
-        hint.setAlignment(Qt.AlignCenter)
-        hint.setObjectName("hint")
-        pl.addWidget(hint)
-        self.tabs.addTab(self.plus_placeholder, "  +  ")
+        center_lay = QVBoxLayout(self.center_container)
+        center_lay.setContentsMargins(0, 0, 0, 0)
+        center_lay.setSpacing(0)
 
-        # ── Corner buttons: sidebar toggle (left) + settings (far right) ──
-        corner = QWidget()
-        corner_lay = QHBoxLayout(corner)
-        corner_lay.setContentsMargins(0, 0, 0, 0)
-        corner_lay.setSpacing(4)
+        self.image_browser = ImageBrowser(self)
+        self.image_browser.thumbnailClicked.connect(self._on_browser_thumbnail_clicked)
+        center_lay.addWidget(self.image_browser, 1)
 
-        self.sidebar_btn = QToolButton()
-        self.sidebar_btn.setObjectName("iconButton")
-        self.sidebar_btn.setText("\u25a4")
-        self.sidebar_btn.setToolTip("Outputs / Queue")
-        self.sidebar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sidebar_btn.setCheckable(True)
-        self.sidebar_btn.clicked.connect(self._toggle_sidebar)
-        corner_lay.addWidget(self.sidebar_btn)
+        self.roster_bar = RosterBar(self)
+        center_lay.addWidget(self.roster_bar, 0)
 
-        self.settings_btn = QToolButton()
-        self.settings_btn.setObjectName("iconButton")
-        self.settings_btn.setText("\u2699")
-        self.settings_btn.setToolTip("Settings")
-        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.settings_btn.clicked.connect(self.open_settings)
-        corner_lay.addWidget(self.settings_btn)
+        # ── Left sidebar: workflow switcher (overlay, closed by default) ──
+        self.workflow_sidebar = WorkflowSidebar(self)
+        self.workflow_edge_tab = _WorkflowEdgeTab(self, self.center_container)
+        self.workflow_edge_tab.raise_()
 
-        self.tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
-
-        self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.tabs.tabBar().tabMoved.connect(self._on_tab_moved)
-        self.tabs.tabBarDoubleClicked.connect(self._on_tab_double_clicked)
-        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tabs.tabBar().customContextMenuRequested.connect(self._on_tab_context_menu)
-
-        # ── Outputs / Queue sidebar (overlay, closed by default) ──────────
+        # ── Right sidebar: Outputs / Queue (overlay, closed by default) ───
         self.outputs_sidebar = OutputsSidebar(self)
         self.outputs_tab = self.outputs_sidebar.outputs_panel
         self.queue_manager.itemFinished.connect(lambda *_: self.outputs_tab.refresh())
 
-        for tab_data in self.config_data.get("tabs", []):
-            self._add_tab(tab_data, select=False)
-        if self.workflow_tabs:
-            self.tabs.setCurrentWidget(self.workflow_tabs[0])
+        for workflow_data in self.config_data.get("tabs", []):
+            self._add_workflow(workflow_data, select=False)
+        if self.workflow_states:
+            self.workflow_sidebar.list.setCurrentRow(0)
 
         self._setup_hotkeys()
         self._position_sidebar()
+        self._position_workflow_sidebar()
 
-    # -- sidebar ---------------------------------------------------------
+
+    # -- sidebars ---------------------------------------------------------
     def _toggle_sidebar(self):
         self.outputs_sidebar.toggle()
         self.sidebar_btn.setChecked(self.outputs_sidebar.is_open())
 
+    def _toggle_workflow_sidebar(self):
+        self.workflow_sidebar.toggle()
+
+    def _sync_edge_tab(self):
+        open_ = self.workflow_sidebar.is_open()
+        self.workflow_edge_tab.set_open_state(open_)
+        self.workflows_btn.setChecked(open_)
+
     def _position_sidebar(self):
-        """Keep the sidebar filling the tab *content* area (never the tab
-        bar itself) whenever the window/tabs are resized."""
+        """Keep the outputs sidebar filling the center content area
+        whenever the window/center area is resized."""
         sidebar = getattr(self, "outputs_sidebar", None)
         if sidebar is None:
             return
-        tabs = self.tabs
-        bar_h = tabs.tabBar().height()
+        container = self.center_container
         w = sidebar._width
-        if sidebar.is_open():
-            x = max(0, tabs.width() - w)
-        else:
-            x = tabs.width()
-        sidebar.setGeometry(x, bar_h, w, max(0, tabs.height() - bar_h))
+        x = max(0, container.width() - w) if sidebar.is_open() else container.width()
+        sidebar.setGeometry(x, 0, w, container.height())
 
-    # -- tab bookkeeping -----------------------------------------------
-    def fixed_tabs_start_index(self):
-        """Index of the first non-workflow tab ('+'), i.e. workflow tab count."""
-        return len(self.workflow_tabs)
+    def _position_workflow_sidebar(self):
+        """Same idea, mirrored: keeps the workflow sidebar (and its always-
+        visible edge tab) anchored to the left of the center content."""
+        sidebar = getattr(self, "workflow_sidebar", None)
+        if sidebar is None:
+            return
+        container = self.center_container
+        w = sidebar._width
+        x = 0 if sidebar.is_open() else -w
+        sidebar.setGeometry(x, 0, w, container.height())
+        edge = getattr(self, "workflow_edge_tab", None)
+        if edge is not None:
+            edge.setGeometry(0, 0, edge.width(), container.height())
 
-    def rename_tab(self, tab, name):
-        idx = self.tabs.indexOf(tab)
-        if idx >= 0:
-            self.tabs.setTabText(idx, name)
+    # -- workflow bookkeeping -------------------------------------------
+    def rename_workflow(self, state, name):
+        if state not in self.workflow_states:
+            return
+        idx = self.workflow_states.index(state)
+        item = self.workflow_sidebar.list.item(idx)
+        if item is not None:
+            item.setText(name)
 
-    def _on_tab_changed(self, index):
-        widget = self.tabs.widget(index)
-        if widget is self.plus_placeholder:
-            self._new_tab_flow()
+    def _on_workflow_selected(self, row):
+        if row < 0 or row >= len(self.workflow_states):
+            self.active_workflow = None
+            self.roster_bar.set_workflow(None)
+            return
+        self.active_workflow = self.workflow_states[row]
+        self.roster_bar.set_workflow(self.active_workflow)
 
-    def _on_tab_double_clicked(self, index):
-        widget = self.tabs.widget(index)
-        if isinstance(widget, WorkflowTab):
-            self._edit_tab(widget)
+    def _edit_workflow_by_item(self, item):
+        row = self.workflow_sidebar.list.row(item)
+        if 0 <= row < len(self.workflow_states):
+            self._edit_workflow(self.workflow_states[row])
 
-    def _on_tab_context_menu(self, pos):
-        """Right-clicking a workflow tab opens that tab's settings."""
-        index = self.tabs.tabBar().tabAt(pos)
-        widget = self.tabs.widget(index)
-        if isinstance(widget, WorkflowTab):
-            self._edit_tab(widget)
+    def _on_workflow_context_menu(self, pos):
+        """Right-clicking a workflow in the sidebar opens a per-row menu
+        (spec 2.1) with quick Edit / Delete actions, replacing the old tab
+        bar's context menu."""
+        item = self.workflow_sidebar.list.itemAt(pos)
+        if item is None:
+            return
+        row = self.workflow_sidebar.list.row(item)
+        if not (0 <= row < len(self.workflow_states)):
+            return
+        state = self.workflow_states[row]
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("Edit\u2026")
+        delete_action = menu.addAction("Delete")
+        chosen = menu.exec(self.workflow_sidebar.list.viewport().mapToGlobal(pos))
+        if chosen is edit_action:
+            self._edit_workflow(state)
+        elif chosen is delete_action:
+            self._delete_workflow(state)
+
+    def _delete_workflow(self, state):
+        if QMessageBox.question(
+            self, "Delete workflow", f"Delete workflow '{state.name}'? This cannot be undone."
+        ) != QMessageBox.Yes:
+            return
+        idx = self.workflow_states.index(state)
+        self.workflow_sidebar.list.takeItem(idx)
+        self.workflow_states.remove(state)
+        self.workflow_sidebar.update_empty_hint()
+        self.persist_all()
 
     def open_settings(self):
         dlg = SettingsDialog(self)
         dlg.exec()
 
-    def _on_tab_moved(self, from_idx, to_idx):
-        # Keep '+' / Outputs pinned after all workflow tabs.
-        fixed_start = self.fixed_tabs_start_index()
-        if to_idx >= fixed_start or from_idx >= fixed_start:
-            self.tabs.tabBar().blockSignals(True)
-            self.tabs.tabBar().moveTab(to_idx, from_idx)
-            self.tabs.tabBar().blockSignals(False)
-            return
-        # keep self.workflow_tabs python list in sync with the visual order
-        self.workflow_tabs.sort(key=lambda t: self.tabs.indexOf(t))
+    def _on_workflow_rows_moved(self, parent, start, end, dest_parent, dest_row):
+        # Drag-reordering in the sidebar list already moved the visual rows;
+        # resync the python list (and persist) to match the new order.
+        lw = self.workflow_sidebar.list
+        self.workflow_states = [lw.item(i).data(Qt.UserRole) for i in range(lw.count())]
         self.persist_all()
 
-    def _new_tab_flow(self):
+    def _new_workflow_flow(self):
         dlg = WorkflowConfigDialog(self, mode="create")
         dlg.exec()
         if dlg.result == "save":
-            self._add_tab({"workflow_path": dlg.workflow_path, "optional_identifier": dlg.optional_identifier}, select=True)
-        else:
-            if self.workflow_tabs:
-                self.tabs.setCurrentWidget(self.workflow_tabs[-1])
+            self._add_workflow(
+                {"workflow_path": dlg.workflow_path, "optional_identifier": dlg.optional_identifier}, select=True,
+            )
 
-    def _edit_tab(self, tab):
-        dlg = WorkflowConfigDialog(self, mode="edit", tab=tab)
+    def _edit_workflow(self, state):
+        dlg = WorkflowConfigDialog(self, mode="edit", tab=state)
         dlg.exec()
         if dlg.result == "delete":
-            idx = self.tabs.indexOf(tab)
-            self.tabs.removeTab(idx)
-            self.workflow_tabs.remove(tab)
+            idx = self.workflow_states.index(state)
+            self.workflow_sidebar.list.takeItem(idx)
+            self.workflow_states.remove(state)
+            self.workflow_sidebar.update_empty_hint()
         elif dlg.result == "save":
-            if dlg.workflow_path != tab.workflow_path:
+            if dlg.workflow_path != state.workflow_path:
                 try:
-                    tab.load_workflow(dlg.workflow_path)
+                    state.load_workflow(dlg.workflow_path)
                 except Exception as e:
                     QMessageBox.critical(self, "Workflow error", str(e))
                     return
-            tab.optional_identifier = dlg.optional_identifier
-            tab.optional_node_id = find_node(tab.raw_workflow, dlg.optional_identifier) if dlg.optional_identifier else None
-            tab._refresh_param_panel()
+            state.optional_identifier = dlg.optional_identifier
+            state.optional_node_id = (
+                find_node(state.raw_workflow, dlg.optional_identifier) if dlg.optional_identifier else None
+            )
+            state.param_values = {k: v for k, (v, _t) in state.editable_params().items()}
+            state.slotsRebuilt.emit()
         self.persist_all()
 
-    def _add_tab(self, data, select=True):
-        tab = WorkflowTab(self, data)
-        plus_index = self.tabs.indexOf(self.plus_placeholder)
-        self.tabs.insertTab(plus_index, tab, tab.name)
-        self.workflow_tabs.append(tab)
+    def _add_workflow(self, data, select=True):
+        state = WorkflowState(self, data)
+        item = QListWidgetItem(state.name)
+        item.setData(Qt.UserRole, state)
+        self.workflow_sidebar.list.addItem(item)
+        self.workflow_states.append(state)
+        self.workflow_sidebar.update_empty_hint()
         if select:
-            self.tabs.setCurrentWidget(tab)
+            self.workflow_sidebar.list.setCurrentRow(self.workflow_sidebar.list.count() - 1)
         self.persist_all()
-        return tab
+        return state
+
+    # -- Image Browser --------------------------------------------------
+    def _on_browser_thumbnail_clicked(self, filepath):
+        """Primary selection flow (spec 3.6): a thumbnail click assigns the
+        currently armed roster slot, if any."""
+        if self.roster_bar.armed_index is None:
+            self.roster_bar.status_label.setText(
+                "Arm a roster slot below first, then click a thumbnail to assign it."
+            )
+            return
+        self.roster_bar.assign_armed(filepath)
 
     # -- outputs ---------------------------------------------------------
     def save_output(self, workflow_name, data):
@@ -1979,8 +3226,7 @@ class MainWindow(QMainWindow):
 
     # -- persistence -------------------------------------------------------
     def persist_all(self):
-        self.workflow_tabs.sort(key=lambda t: self.tabs.indexOf(t))
-        self.config_data["tabs"] = [t.to_dict() for t in self.workflow_tabs]
+        self.config_data["tabs"] = [s.to_dict() for s in self.workflow_states]
         self.config_data["server"] = self.server
         self.config_data["output_dir"] = self.output_dir
         save_config(self.config_data)
@@ -2167,39 +3413,34 @@ class MainWindow(QMainWindow):
         bind("Ctrl+Shift+A", self._hk_queue_current)
         bind("Ctrl+Shift+R", self.queue_manager.run_queue)
         bind("Ctrl+Shift+X", self.queue_manager.clear)
-        bind("Ctrl+N", self._new_tab_flow)
-        bind("Ctrl+Tab", self._hk_next_tab)
-        bind("Ctrl+Shift+Tab", self._hk_prev_tab)
+        bind("Ctrl+N", self._new_workflow_flow)
+        bind("Ctrl+Tab", self._hk_next_workflow)
+        bind("Ctrl+Shift+Tab", self._hk_prev_workflow)
         bind("Ctrl+O", self._toggle_sidebar)
+        bind("Ctrl+Shift+W", self._toggle_workflow_sidebar)
         bind("Ctrl+,", self.open_settings)
         bind("Ctrl+Shift+O", self.outputs_tab._open_folder)
         bind("F5", self.outputs_tab.refresh)
 
-    def _current_workflow_tab(self):
-        w = self.tabs.currentWidget()
-        return w if isinstance(w, WorkflowTab) else None
-
     def _hk_run_current(self):
-        t = self._current_workflow_tab()
-        if t:
-            t.run_now()
+        if self.active_workflow:
+            self.active_workflow.run_now()
 
     def _hk_queue_current(self):
-        t = self._current_workflow_tab()
-        if t:
-            t.add_to_queue()
+        if self.active_workflow:
+            self.active_workflow.add_to_queue()
 
-    def _hk_next_tab(self):
-        if self.workflow_tabs:
-            i = self.tabs.currentIndex()
-            n = self.fixed_tabs_start_index()
-            self.tabs.setCurrentIndex((i + 1) % n if i < n else 0)
+    def _hk_next_workflow(self):
+        lw = self.workflow_sidebar.list
+        n = lw.count()
+        if n:
+            lw.setCurrentRow((lw.currentRow() + 1) % n)
 
-    def _hk_prev_tab(self):
-        if self.workflow_tabs:
-            i = self.tabs.currentIndex()
-            n = self.fixed_tabs_start_index()
-            self.tabs.setCurrentIndex((i - 1) % n if i < n else n - 1)
+    def _hk_prev_workflow(self):
+        lw = self.workflow_sidebar.list
+        n = lw.count()
+        if n:
+            lw.setCurrentRow((lw.currentRow() - 1) % n)
 
 
 def apply_style(app: QApplication) -> None:
