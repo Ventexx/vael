@@ -15,7 +15,7 @@ import copy
 import time
 import uuid
 import json
-import hashlib
+import queue
 import datetime
 import requests
 from pathlib import Path
@@ -44,7 +44,6 @@ CONFIG_FILE = Path(__file__).resolve().with_name("workflows_config.json")
 ICON_FILE = Path(__file__).resolve().with_name(
     "icon.ico" if sys.platform == "win32" else "icon.png"
 )
-THUMB_CACHE_DIR = Path(__file__).resolve().with_name("thumb_cache")
 DEFAULT_SERVER = "http://127.0.0.1:8188"
 DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().with_name("outputs"))
 
@@ -55,6 +54,11 @@ DEFAULT_OUTPUT_DIR = str(Path(__file__).resolve().with_name("outputs"))
 FOLDER_COUNT_WARN = 20
 RECURSION_DEPTH_WARN = 5
 
+# Sidebar "always-on" edge rail width (workflow sidebar left, outputs/queue
+# sidebar right) -- kept identical on both sides so their open/close tabs
+# match exactly, per the shared vael. sidebar design.
+EDGE_TAB_WIDTH = 14
+
 DEFAULTS = {
     "server": DEFAULT_SERVER,
     "output_dir": DEFAULT_OUTPUT_DIR,
@@ -63,12 +67,19 @@ DEFAULTS = {
     "sidebar_width": 340,
     "workflow_sidebar_width": 260,
     # -- Image Selection (spec sections 4 & 5) --------------------------
-    "image_selection_folders": [],       # [{"path": str, "recursive": bool}, ...]
-    "hide_dotted_bang_folders": True,    # global toggle, default on
+    "image_selection_folders": [],       # [{"path": str}, ...] -- always recursive
+    # Folder-name ignore rules: folders whose name matches any of these are
+    # skipped during scanning entirely (not shown, not recursed into).
+    # [{"pattern": str, "mode": "starts_with" | "contains"}, ...]
+    "ignore_folder_patterns": [],
     "image_browser_state": {
         "expanded_headers": [],          # folder paths (any depth) expanded last session
         "active_tab": None,              # top-level folder path of the last active tab
     },
+    # Height (in px) of the bottom Input Roster pane within the center
+    # splitter; the Image Browser gets the rest. None until the user drags
+    # the handle for the first time, at which point it's remembered.
+    "center_split_roster_height": None,
 }
 
 
@@ -300,6 +311,15 @@ QMainWindow {
     color: rgba(200,200,200,0.45);
     font-weight: 700;
 }
+/* Mirror image of #edgeTab, docked to the right edge for the Outputs /
+   Queue sidebar -- same look and behavior, just flipped border side. */
+#outputsEdgeTab {
+    background-color: #121212;
+    border-left: 1px solid rgba(255,255,255,0.10);
+}
+#outputsEdgeTab:hover {
+    background-color: rgba(0,212,160,0.14);
+}
 QListWidget#workflowList::item {
     padding: 8px 8px;
     border-radius: 6px;
@@ -461,53 +481,64 @@ QTabWidget#browserTabs QTabBar::tab:selected {
 QTabWidget#browserTabs QTabBar::tab:hover:!selected {
     color: rgba(220,220,220,0.85);
 }
-QFrame#folderHeader {
-    background-color: #141414;
-    border: 1px solid rgba(255,255,255,0.08);
+/* ---- Folder section header (ported from vael. indexer's #sectionHeader:
+   flat, text-only, no box at rest; depth conveyed by weight/color, not by
+   a bordered frame; hover adds a thin left accent bar). ---- */
+#folderSection     { background: transparent; }
+#sectionHeaderWrap { background: transparent; }
+#sectionBody       { background: transparent; }
+#cardGrid           { background: transparent; }
+
+QToolButton#sectionHeader {
+    background: transparent;
+    border: 1px solid transparent;
+    border-left: 2px solid transparent;
     border-radius: 6px;
-}
-QFrame#folderHeader:hover {
-    border-color: rgba(0,212,160,0.30);
-}
-QFrame#subHeader {
-    background-color: transparent;
-    border-left: 2px solid rgba(0,212,160,0.55);
-    border-radius: 0px;
-}
-QFrame#subHeader:hover {
-    background-color: rgba(255,255,255,0.03);
-}
-/* Nesting depth reads as a progressively fainter accent, so deeper
-   sub-headers feel "further in" without needing extra chrome (spec 3.4). */
-QFrame#subHeader[depth="2"] { border-left-color: rgba(0,212,160,0.44); }
-QFrame#subHeader[depth="3"] { border-left-color: rgba(0,212,160,0.34); }
-QFrame#subHeader[depth="4"] { border-left-color: rgba(0,212,160,0.26); }
-QFrame#subHeader[depth="5"] { border-left-color: rgba(0,212,160,0.20); }
-QFrame#subHeader[depth="6"] { border-left-color: rgba(0,212,160,0.16); }
-/* Past the recommended recursion-depth guideline (soft warning only, spec
-   section 9) — amber instead of teal, still fully functional. */
-QFrame#subHeader[deep="true"] {
-    border-left: 2px solid rgba(226,163,55,0.55);
-}
-QFrame#subHeader[deep="true"]:hover {
-    background-color: rgba(226,163,55,0.05);
-}
-QLabel#folderHeaderName {
-    color: rgba(230,230,230,0.92);
+    text-align: left;
+    padding: 0px 10px 0px 7px;
+    font-size: 11px;
     font-weight: 600;
+    color: rgba(200,200,200,0.68);
+    letter-spacing: 0.2px;
 }
-QLabel#subHeaderName {
-    color: rgba(200,200,200,0.75);
-    font-weight: 500;
+QToolButton#sectionHeader[depth0="true"] {
+    color: rgba(220,220,220,0.86);
+    font-weight: 700;
     font-size: 12px;
 }
-QLabel#headerChevron {
-    color: rgba(0,212,160,0.75);
+QToolButton#sectionHeader[depth0="false"] {
+    color: rgba(195,195,195,0.55);
+    font-weight: 500;
+}
+QToolButton#sectionHeader:hover {
+    background: rgba(255,255,255,0.045);
+    border: 1px solid transparent;
+    border-left: 2px solid #00d4a0;
+    color: rgba(235,235,235,0.95);
     font-weight: 700;
 }
-QListView#thumbnailGrid {
-    background: transparent;
-    border: none;
+/* Past the recommended recursion-depth guideline (soft warning only, spec
+   section 9) — amber instead of teal, still fully functional. */
+QToolButton#sectionHeader[deep="true"] {
+    color: rgba(226,163,55,0.75);
+}
+QToolButton#sectionHeader[deep="true"]:hover {
+    border-left: 2px solid rgba(226,163,55,0.65);
+    background: rgba(226,163,55,0.05);
+}
+QLabel#headerCount {
+    color: rgba(200,200,200,0.35);
+    font-size: 10px;
+}
+QLabel#headerCount[state="error"] {
+    color: rgba(224,110,100,0.85);
+}
+
+/* ---- Thumbnail card (ported from vael. indexer: image only, no
+   filename caption, hover = a faint neutral border, nothing more). ---- */
+#cardImage {
+    background-color: #181818;
+    border-radius: 7px;
 }
 
 /* ---- Bottom bar — Input Roster ---- */
@@ -639,13 +670,13 @@ import sys
 import copy
 import time
 import uuid
-import hashlib
+import queue
 import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QEvent, QPoint, QRect,
-    QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool,
+    QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool, QTimer,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
@@ -656,7 +687,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QMessageBox, QSplitter,
     QScrollArea, QFrame, QListWidget, QListWidgetItem, QProgressBar, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
-    QSizePolicy, QStackedWidget, QMenu, QSizeGrip, QCheckBox
+    QSizePolicy, QStackedWidget, QMenu, QSizeGrip, QCheckBox, QGridLayout, QComboBox,
 )
 
 
@@ -1081,30 +1112,115 @@ class WorkflowState(QObject):
 
 
 # ---------------------------------------------------------------------------
-# Thumbnail worker plumbing (spec 3.5, 7). QRunnable has no signals of its
-# own, so each worker owns a small QObject to talk back to the GUI thread.
-# All file I/O and image decoding happens off the UI thread; only cheap
-# QPixmap-from-QImage conversion happens back on it.
+# In-memory thumbnail cache + background loader — ported one-to-one from
+# vael. indexer's image-handling approach: no disk thumb cache at all, just
+# a process-lifetime dict of already-scaled QPixmaps, filled in by a single
+# long-lived worker thread that drains a queue of (card, path) requests and
+# delivers finished pixmaps back to the GUI thread via a signal.
+# ---------------------------------------------------------------------------
+IMAGE_FILE_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+)
+
+# 2:3 portrait thumbnail, identical crop-to-fill sizing to vael. indexer.
+THUMB_W = 106
+THUMB_H = 159
+
+_PIXMAP_CACHE: dict[str, QPixmap] = {}
+
+
+def _load_pixmap(path: str) -> QPixmap:
+    """Return a cached thumbnail pixmap, or load+scale synchronously."""
+    if path not in _PIXMAP_CACHE:
+        pix = QPixmap(path)
+        if not pix.isNull():
+            scaled = pix.scaled(
+                THUMB_W, THUMB_H,
+                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
+            )
+            x = (scaled.width() - THUMB_W) // 2
+            y = (scaled.height() - THUMB_H) // 2
+            pix = scaled.copy(x, y, THUMB_W, THUMB_H)
+        _PIXMAP_CACHE[path] = pix
+    return _PIXMAP_CACHE[path]
+
+
+class PixmapWorker(QThread):
+    """Loads and scales thumbnail pixmaps off the main thread, one shared
+    long-lived instance for the whole app session (mirrors vael. indexer)."""
+
+    pixmap_ready = Signal(object, QPixmap)   # (card, pixmap)
+
+    def __init__(self):
+        super().__init__()
+        self._queue = queue.Queue()
+        self._stop = False
+
+    def submit(self, card, path):
+        self._queue.put((card, path))
+
+    def stop(self):
+        """Ask the loop to exit at its next queue-poll and wake it up
+        immediately with a no-op sentinel so shutdown doesn't wait out the
+        full poll timeout. Called from MainWindow.closeEvent."""
+        self._stop = True
+        self._queue.put((None, None))
+
+    def run(self):
+        while not self._stop:
+            try:
+                card, path = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if card is None:
+                    continue
+            except RuntimeError:
+                continue
+            self.pixmap_ready.emit(card, _load_pixmap(path))
+
+
+PIXMAP_WORKER = PixmapWorker()
+PIXMAP_WORKER.start()
+
+
+# ---------------------------------------------------------------------------
+# Folder scanning (still needed here, unlike indexer, since this app has no
+# pre-built database of images — it walks the filesystem live). A single
+# pass now always recurses into every subfolder (the "recursive" per-folder
+# flag has been removed: everything configured in Settings is always fully
+# recursive), skipping only folders that match a configured ignore pattern.
 # ---------------------------------------------------------------------------
 class _ScanSignals(QObject):
     done = Signal(str, list, list)   # section_path, files, subdirs
     failed = Signal(str, str)        # section_path, message
 
 
-IMAGE_FILE_EXTENSIONS = (
-    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
-)
+def _folder_is_ignored(name, ignore_patterns):
+    for rule in ignore_patterns:
+        pattern = (rule.get("pattern") or "").strip()
+        if not pattern:
+            continue
+        mode = rule.get("mode", "starts_with")
+        if mode == "contains":
+            if pattern.lower() in name.lower():
+                return True
+        else:
+            if name.lower().startswith(pattern.lower()):
+                return True
+    return False
 
 
 class _RoughScanWorker(QRunnable):
-    """Rough pass: list filenames (and, if recursive, subfolder names) for
-    one folder section. Fast — no image decoding at all."""
+    """Rough pass: list image filenames + immediate subfolders for one
+    folder section. Fast — no image decoding at all. Always recurses (every
+    subfolder is reported, to be turned into its own nested section) except
+    folders matching a configured ignore pattern."""
 
-    def __init__(self, section_path, recursive, hide_dotted_bang):
+    def __init__(self, section_path, ignore_patterns):
         super().__init__()
         self.section_path = section_path
-        self.recursive = recursive
-        self.hide_dotted_bang = hide_dotted_bang
+        self.ignore_patterns = list(ignore_patterns)
         self.signals = _ScanSignals()
 
     def run(self):
@@ -1113,13 +1229,12 @@ class _RoughScanWorker(QRunnable):
             with os.scandir(self.section_path) as it:
                 for entry in it:
                     name = entry.name
-                    if self.hide_dotted_bang and (name.startswith(".") or name.startswith("!")):
-                        continue
                     try:
-                        if entry.is_file() and name.lower().endswith(IMAGE_FILE_EXTENSIONS):
+                        if entry.is_dir():
+                            if not _folder_is_ignored(name, self.ignore_patterns):
+                                subdirs.append(entry.path)
+                        elif entry.is_file() and name.lower().endswith(IMAGE_FILE_EXTENSIONS):
                             files.append(entry.path)
-                        elif self.recursive and entry.is_dir():
-                            subdirs.append(entry.path)
                     except OSError:
                         continue
         except FileNotFoundError:
@@ -1136,280 +1251,201 @@ class _RoughScanWorker(QRunnable):
         self.signals.done.emit(self.section_path, files, subdirs)
 
 
-class _ThumbSignals(QObject):
-    ready = Signal(str, QImage)   # filepath, decoded (already scaled) image
-
-
-class _ThumbnailWorker(QRunnable):
-    """Full pass: decode + scale one folder section's images, on the shared
-    thread pool, using a disk cache keyed by (path, mtime) so re-expanding
-    a header later is instant."""
-
-    THUMB_PX = 160
-
-    def __init__(self, filepaths, cache_dir):
-        super().__init__()
-        self.filepaths = filepaths
-        self.cache_dir = cache_dir
-        self.signals = _ThumbSignals()
-
-    def _cache_path(self, filepath, mtime_ns):
-        key = hashlib.sha1(filepath.encode("utf-8")).hexdigest()
-        return self.cache_dir / f"{key}_{mtime_ns}.png"
-
-    def run(self):
-        try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        for path in self.filepaths:
-            try:
-                mtime_ns = os.stat(path).st_mtime_ns
-            except OSError:
-                continue
-            cache_path = self._cache_path(path, mtime_ns)
-            img = None
-            if cache_path.exists():
-                cached = QImage(str(cache_path))
-                if not cached.isNull():
-                    img = cached
-            if img is None:
-                src = QImage(path)
-                if src.isNull():
-                    continue
-                img = src.scaled(
-                    self.THUMB_PX, self.THUMB_PX,
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
-                )
-                try:
-                    img.save(str(cache_path), "PNG")
-                except OSError:
-                    pass
-            self.signals.ready.emit(path, img)
-
-
 # ---------------------------------------------------------------------------
-# Thumbnail grid backing store + painter (spec 3.5 / Section 7 technical
-# notes). ThumbnailModel holds nothing but filepaths + decoded pixmaps —
-# no per-item widgets — and ThumbnailDelegate paints each cell directly,
-# so a section's memory/layout cost no longer scales with per-item Qt
-# object overhead the way QListWidgetItem + QIcon did.
+# Thumbnail card — ported one-to-one from vael. indexer's ThumbnailCard:
+# image only (no filename caption), a faint neutral border on hover and
+# nothing more, and a drag source so a card can be dragged straight onto a
+# roster icon below (or anywhere else that accepts a file URL drop).
 # ---------------------------------------------------------------------------
-class ThumbnailModel(QAbstractListModel):
-    FilepathRole = Qt.UserRole + 1
+class ThumbnailCard(QWidget):
+    clicked = Signal(str)   # filepath
 
-    def __init__(self, parent=None):
+    CARD_W = THUMB_W
+    CARD_H = THUMB_H
+
+    def __init__(self, filepath, parent=None):
         super().__init__(parent)
-        self._filepaths = []
-        self._pixmaps = {}   # filepath -> QPixmap, populated as thumbnails decode
+        self.filepath = filepath
+        self.setFixedSize(self.CARD_W, self.CARD_H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(Path(filepath).name)
+        self._hovered = False
+        self._drag_start_pos = None
+        self._image_loaded = False
 
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._filepaths)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._img_lbl = QLabel()
+        self._img_lbl.setObjectName("cardImage")
+        self._img_lbl.setFixedSize(THUMB_W, THUMB_H)
+        self._img_lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._img_lbl)
 
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-        path = self._filepaths[index.row()]
-        if role == Qt.DisplayRole:
-            return Path(path).name
-        if role == Qt.ToolTipRole:
-            return path
-        if role == self.FilepathRole:
-            return path
-        if role == Qt.DecorationRole:
-            return self._pixmaps.get(path)
-        return None
+        PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
 
-    def set_files(self, filepaths):
-        self.beginResetModel()
-        self._filepaths = list(filepaths)
-        self._pixmaps = {}
-        self.endResetModel()
-
-    def set_thumbnail(self, filepath, pixmap):
-        try:
-            row = self._filepaths.index(filepath)
-        except ValueError:
+    def request_image(self):
+        """Called by FolderSection once the section is expanded. No-op if
+        this card's image is already loaded/loading."""
+        if self._image_loaded:
             return
-        self._pixmaps[filepath] = pixmap
-        idx = self.index(row)
-        self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
-
-    def filepath_at(self, index):
-        if index.isValid() and 0 <= index.row() < len(self._filepaths):
-            return self._filepaths[index.row()]
-        return None
-
-
-class ThumbnailDelegate(QStyledItemDelegate):
-    """Paints one thumbnail cell: image (or a soft placeholder while it's
-    still decoding), plus an elided filename caption underneath."""
-
-    ICON_PX = 96
-    CELL_W = 108
-    CELL_H = 108 + 18
-
-    def sizeHint(self, option, index):
-        return QSize(self.CELL_W, self.CELL_H)
-
-    def paint(self, painter, option, index):
-        painter.save()
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = option.rect
-        hovered = bool(option.state & QStyle.State_MouseOver)
-
-        if hovered:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 212, 160, 26))
-            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 8, 8)
-
-        icon_x = rect.x() + (rect.width() - self.ICON_PX) // 2
-        icon_rect = QRect(icon_x, rect.y() + 5, self.ICON_PX, self.ICON_PX)
-
-        pixmap = index.data(Qt.DecorationRole)
-        if pixmap and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self.ICON_PX, self.ICON_PX, Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            x = icon_rect.x() + (self.ICON_PX - scaled.width()) // 2
-            y = icon_rect.y() + (self.ICON_PX - scaled.height()) // 2
-            path = _rounded_pixmap_path(scaled.rect(), 6)
-            painter.save()
-            painter.translate(x, y)
-            painter.setClipPath(path)
-            painter.drawPixmap(0, 0, scaled)
-            painter.restore()
+        if self.filepath in _PIXMAP_CACHE:
+            self._apply_pixmap(_PIXMAP_CACHE[self.filepath])
         else:
-            # Placeholder while the background thumbnail worker hasn't
-            # reached this file yet (rough pass reserved the slot already).
-            painter.setPen(QPen(QColor(255, 255, 255, 30)))
-            painter.setBrush(QColor(255, 255, 255, 8))
-            painter.drawRoundedRect(icon_rect, 6, 6)
+            PIXMAP_WORKER.submit(self, self.filepath)
 
-        name = index.data(Qt.DisplayRole) or ""
-        text_rect = QRect(rect.x() + 3, icon_rect.bottom() + 4, rect.width() - 6, 14)
-        painter.setPen(QColor(200, 200, 200, 145 if not hovered else 210))
-        fm = painter.fontMetrics()
-        elided = fm.elidedText(name, Qt.ElideMiddle, text_rect.width())
-        painter.drawText(text_rect, Qt.AlignHCenter | Qt.AlignVCenter, elided)
-        painter.restore()
-
-
-def _rounded_pixmap_path(rect, radius):
-    path = QPainterPath()
-    path.addRoundedRect(rect, radius, radius)
-    return path
-
-
-class ThumbnailGrid(QListView):
-    thumbnailClicked = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("thumbnailGrid")
-        self._model = ThumbnailModel(self)
-        self.setModel(self._model)
-        self._delegate = ThumbnailDelegate(self)
-        self.setItemDelegate(self._delegate)
-        self.setViewMode(QListView.IconMode)
-        self.setResizeMode(QListView.Adjust)
-        self.setMovement(QListView.Static)
-        self.setUniformItemSizes(True)
-        self.setSpacing(4)
-        self.setFrameShape(QFrame.NoFrame)
-        self.setSelectionMode(QListView.NoSelection)
-        self.setMouseTracking(True)   # required for hover-state repaint in the delegate
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.clicked.connect(self._on_item_clicked)
-
-    def set_files(self, filepaths):
-        self._model.set_files(filepaths)
-        self._sync_height()
-
-    def set_thumbnail(self, filepath, qimage):
-        self._model.set_thumbnail(filepath, QPixmap.fromImage(qimage))
-
-    def _on_item_clicked(self, index):
-        path = self._model.filepath_at(index)
-        if path:
-            self.thumbnailClicked.emit(path)
-
-    def _sync_height(self):
-        # Fixed-position (non-scrolling) grid: grow to fit its own rows so
-        # the *page* scrolls, not each individual grid (spec 3.5 design
-        # caveat — collapsed sections still never scan/decode anything;
-        # this only governs layout of an already-expanded section).
-        n = self._model.rowCount()
-        if n == 0:
-            self.setFixedHeight(0)
+    def _on_pixmap_ready(self, card, pix):
+        if card is not self:
             return
-        cell_w = self._delegate.CELL_W + self.spacing()
-        cell_h = self._delegate.CELL_H + self.spacing()
-        cols = max(1, self.viewport().width() // cell_w)
-        rows = (n + cols - 1) // cols
-        self.setFixedHeight(rows * cell_h + 8)
+        self._apply_pixmap(pix)
+        try:
+            PIXMAP_WORKER.pixmap_ready.disconnect(self._on_pixmap_ready)
+        except RuntimeError:
+            pass
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._sync_height()
+    def _apply_pixmap(self, pix):
+        self._image_loaded = True
+        if not pix.isNull():
+            rounded = QPixmap(THUMB_W, THUMB_H)
+            rounded.fill(Qt.GlobalColor.transparent)
+            p = QPainter(rounded)
+            p.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(0, 0, THUMB_W, THUMB_H, 7, 7)
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, pix)
+            p.end()
+            self._img_lbl.setPixmap(rounded)
+        else:
+            self._img_lbl.setText("?")
+
+    # -- click / drag (mirrors indexer's card interactions) ---------------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos is not None and (event.buttons() & Qt.LeftButton):
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._drag_start_pos = None
+                self._start_drag()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
+            self._drag_start_pos = None
+            self.clicked.emit(self.filepath)
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(self.filepath)])
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pix = _load_pixmap(self.filepath)
+        if not pix.isNull():
+            drag.setPixmap(pix.scaled(THUMB_W // 2, THUMB_H // 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        drag.exec(Qt.CopyAction)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._hovered:
+            # Minimal hover: a faint neutral border, nothing else — exactly
+            # the "slightly highlighted" look from vael. indexer.
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor(255, 255, 255, 45))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(1, 1, THUMB_W - 2, THUMB_H - 2, 7, 7)
+            p.end()
 
 
 # ---------------------------------------------------------------------------
-# One folder header (spec 3.3) or, nested under it, one recursive
-# sub-header (spec 3.4). Closed by default; only scans/generates thumbnails
-# once the user expands it.
+# One folder header, or (nested under it) one recursive sub-header — design
+# ported one-to-one from vael. indexer's FolderSection: a flat QToolButton
+# header with an arrow indicator, indent-by-depth, and a QGridLayout card
+# grid that reflows its column count to the available width. Unlike
+# indexer, this app has no pre-built index, so contents are still scanned
+# lazily off the UI thread the first time a section is expanded — but every
+# folder is now always fully recursive, and a top-level (depth 0) section
+# auto-expands itself the moment its scan completes, since folders
+# configured in Settings are guaranteed to hold only more folders, never
+# images directly, so there's no reason to make the user click twice just
+# to see the first level of real subfolders.
 # ---------------------------------------------------------------------------
 class FolderSection(QWidget):
-    def __init__(self, browser, path, depth=0, recursive=False, closable=False):
+    def __init__(self, browser, path, depth=0, closable=False):
         super().__init__()
         self.browser = browser
         self.path = path
         self.depth = depth
-        self.recursive = recursive
         self.closable = closable
+        self.setObjectName("folderSection")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
         self._expanded = False
         self._rough_done = False
         self._rough_started = False
-        self._thumb_started = False
         self._files = []
+        self._cards = []
         self._child_sections = []
+        self._current_cols = 0
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(2)
+        outer.setSpacing(0)
 
-        header = QFrame()
-        header.setObjectName("subHeader" if depth > 0 else "folderHeader")
-        if depth > 0:
-            # Drives the per-depth accent-color QSS below, so deeper nesting
-            # reads as progressively "further in" at a glance (spec 3.4).
-            header.setProperty("depth", min(depth, 6))
+        header_wrap = QWidget()
+        header_wrap.setObjectName("sectionHeaderWrap")
+        header_wrap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        indent = depth * 14
+        hw_lay = QHBoxLayout(header_wrap)
+        hw_lay.setContentsMargins(indent, 0, 0, 0)
+        hw_lay.setSpacing(4)
+
         is_deep = depth > RECURSION_DEPTH_WARN
-        if is_deep:
-            header.setProperty("deep", True)
-        header.setCursor(Qt.PointingHandCursor)
-        header_lay = QHBoxLayout(header)
-        header_lay.setContentsMargins(8 + depth * 16, 6, 8, 6)
-        header_lay.setSpacing(6)
-
-        self.chevron_lbl = QLabel("\u25b8")
-        self.chevron_lbl.setObjectName("headerChevron")
-        header_lay.addWidget(self.chevron_lbl)
-
         name_text = Path(path).name or path
-        self.name_lbl = QLabel(name_text + (" \u26a0" if is_deep else ""))
-        self.name_lbl.setObjectName("subHeaderName" if depth > 0 else "folderHeaderName")
+
+        self.header = QToolButton()
+        self.header.setObjectName("sectionHeader")
+        self.header.setProperty("depth0", "true" if depth == 0 else "false")
+        if is_deep:
+            self.header.setProperty("deep", True)
+        self.header.setArrowType(Qt.ArrowType.RightArrow)
+        self.header.setText(name_text + (" \u26a0" if is_deep else ""))
+        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.header.setFixedHeight(26 if depth == 0 else 22)
+        self.header.setCursor(Qt.PointingHandCursor)
         tooltip = path
         if is_deep:
-            tooltip += f"\n\u26a0 Nested {depth} levels deep \u2014 past the recommended {RECURSION_DEPTH_WARN}-level guideline. Still fully functional, just flagged for awareness."
-        self.name_lbl.setToolTip(tooltip)
-        header_lay.addWidget(self.name_lbl)
+            tooltip += (
+                f"\n\u26a0 Nested {depth} levels deep \u2014 past the recommended "
+                f"{RECURSION_DEPTH_WARN}-level guideline. Still fully functional, "
+                f"just flagged for awareness."
+            )
+        self.header.setToolTip(tooltip)
+        self.header.clicked.connect(self.toggle)
+        hw_lay.addWidget(self.header, 0)
 
         self.count_lbl = QLabel("")
-        self.count_lbl.setObjectName("hint")
-        header_lay.addWidget(self.count_lbl)
-        header_lay.addStretch(1)
+        self.count_lbl.setObjectName("headerCount")
+        hw_lay.addWidget(self.count_lbl, 0)
+        hw_lay.addStretch(1)
 
         if closable:
             close_btn = QToolButton()
@@ -1418,19 +1454,26 @@ class FolderSection(QWidget):
             close_btn.setToolTip("Hide for this session (not removed from Settings)")
             close_btn.setCursor(Qt.PointingHandCursor)
             close_btn.clicked.connect(self._close_for_session)
-            header_lay.addWidget(close_btn)
+            hw_lay.addWidget(close_btn)
 
-        header.mousePressEvent = self._header_clicked
-        outer.addWidget(header)
+        outer.addWidget(header_wrap)
 
         self.body = QWidget()
+        self.body.setObjectName("sectionBody")
+        self.body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         body_lay = QVBoxLayout(self.body)
-        body_lay.setContentsMargins(depth * 16, 0, 0, 0)
+        body_lay.setContentsMargins(indent + 8, 4, 4, 6)
         body_lay.setSpacing(6)
 
-        self.grid = ThumbnailGrid()
-        self.grid.thumbnailClicked.connect(self.browser.thumbnailClicked)
-        body_lay.addWidget(self.grid)
+        self.card_widget = QWidget()
+        self.card_widget.setObjectName("cardGrid")
+        self.card_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.card_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.card_grid = QGridLayout(self.card_widget)
+        self.card_grid.setContentsMargins(0, 0, 0, 0)
+        self.card_grid.setSpacing(6)
+        self.card_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        body_lay.addWidget(self.card_widget)
 
         self.children_container = QWidget()
         self.children_lay = QVBoxLayout(self.children_container)
@@ -1439,10 +1482,7 @@ class FolderSection(QWidget):
         body_lay.addWidget(self.children_container)
 
         outer.addWidget(self.body)
-        self.body.hide()
-
-    def _header_clicked(self, event):
-        self.toggle()
+        self.body.setVisible(False)
 
     def _close_for_session(self):
         self.browser.close_tab_for_session(self.path)
@@ -1455,35 +1495,33 @@ class FolderSection(QWidget):
         if expanded == self._expanded:
             return
         self._expanded = expanded
-        self.chevron_lbl.setText("\u25be" if expanded else "\u25b8")
+        self.header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.header.setProperty("expanded", "true" if expanded else "false")
+        self.header.style().unpolish(self.header)
+        self.header.style().polish(self.header)
         self.body.setVisible(expanded)
         if expanded:
             if not self._rough_done:
-                # Rough pass may already be running (e.g. kicked off when the
-                # tab was first opened) — ensure_rough_pass() no-ops in that case.
                 self.ensure_rough_pass()
-            elif not self._thumb_started and self._files:
-                # Rough pass already completed (count was showing on the
-                # still-collapsed header) — the thumbnail pass is the only
-                # thing expand still needs to trigger.
-                self._start_thumbnail_pass()
+            elif self._cards:
+                self._current_cols = 0
+                QTimer.singleShot(0, self._relayout_cards)
+                for card in self._cards:
+                    card.request_image()
         if persist:
             self.browser.note_expanded(self.path, expanded)
 
     def is_expanded(self):
         return self._expanded
 
-    # -- lazy loading (spec 3.5) -----------------------------------------
+    # -- lazy scanning ------------------------------------------------------
     def ensure_rough_pass(self):
-        """Kick off the rough (filename-listing) pass if it hasn't run yet,
-        independent of expand state. Called both on tab activation (per the
-        spec 3.5/6 fix: a still-collapsed header should show a count as soon
-        as its tab is opened) and, as a fallback, on expand."""
         if self._rough_done or self._rough_started:
             return
         self._rough_started = True
         self.count_lbl.setText("\u2026")
-        worker = _RoughScanWorker(self.path, self.recursive, self.browser.hide_dotted_bang())
+        self._set_count_state("normal")
+        worker = _RoughScanWorker(self.path, self.browser.ignore_folder_patterns())
         worker.signals.done.connect(self._on_rough_done)
         worker.signals.failed.connect(self._on_rough_failed)
         self.browser.thread_pool.start(worker)
@@ -1491,8 +1529,6 @@ class FolderSection(QWidget):
     def _on_rough_failed(self, path, message):
         if path != self.path:
             return
-        # Allow a retry: re-expanding (or the tab being reactivated) will
-        # attempt the rough pass again since it never completed.
         self._rough_started = False
         labels = {
             "not_found": "(folder not found)",
@@ -1511,41 +1547,61 @@ class FolderSection(QWidget):
             return
         self._rough_done = True
         self._files = files
-        if files or subdirs:
-            self.count_lbl.setText(f"({len(files)})")
-            self._set_count_state("normal")
-        else:
-            self.count_lbl.setText("(empty)")
-            self._set_count_state("muted")
-        # Reserve grid layout space (filenames only, no thumbnails yet) —
-        # safe to do even while the section is still collapsed.
-        self.grid.set_files(files)
+        self.count_lbl.setText(f"({len(files)})" if (files or subdirs) else "(empty)")
+        self._set_count_state("normal" if (files or subdirs) else "muted")
+
+        for filepath in files:
+            card = ThumbnailCard(filepath)
+            card.clicked.connect(self.browser.thumbnailClicked)
+            i = len(self._cards)
+            self._cards.append(card)
+            self.card_grid.addWidget(card, i // 4, i % 4)
 
         for sub_path in subdirs:
-            child = FolderSection(self.browser, sub_path, depth=self.depth + 1, recursive=True)
+            child = FolderSection(self.browser, sub_path, depth=self.depth + 1)
             self.children_lay.addWidget(child)
             self._child_sections.append(child)
             if sub_path in self.browser.saved_expanded_paths:
                 child.set_expanded(True, persist=False)
 
-        # Only decode thumbnails if the section is actually expanded — the
-        # rough pass alone must never trigger image decoding.
-        if self._expanded and files and not self._thumb_started:
-            self._start_thumbnail_pass()
+        # A top-level folder is guaranteed (by convention — see Settings)
+        # to hold only more folders, not images. Auto-expand it the moment
+        # its scan finishes so the user lands straight on the first level
+        # of real subfolders instead of clicking once just to reveal them.
+        if self.depth == 0 and not self._expanded:
+            self.set_expanded(True, persist=False)
+        elif self._expanded and self._cards:
+            self._current_cols = 0
+            QTimer.singleShot(0, self._relayout_cards)
+            for card in self._cards:
+                card.request_image()
 
-    def _start_thumbnail_pass(self):
-        self._thumb_started = True
-        worker = _ThumbnailWorker(list(self._files), self.browser.thumb_cache_dir)
-        worker.signals.ready.connect(self.grid.set_thumbnail)
-        self.browser.thread_pool.start(worker)
+    # -- reflow (ported from indexer's _relayout_cards) --------------------
+    def _relayout_cards(self):
+        avail_w = self.card_widget.width()
+        if avail_w < THUMB_W:
+            return
+        cols = max(1, avail_w // (THUMB_W + 6))
+        if cols == self._current_cols:
+            return
+        self._current_cols = cols
+        while self.card_grid.count():
+            self.card_grid.takeAt(0)
+        for i, card in enumerate(self._cards):
+            self.card_grid.addWidget(card, i // cols, i % cols)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._expanded and self._cards:
+            self._relayout_cards()
 
 
 # ---------------------------------------------------------------------------
-# Center — Image Browser (spec section 3). A single, persistent, global
-# instance shared by every workflow: one tab per configured top-level
-# folder, closed-by-default headers/sub-headers, lazy rough+thumbnail
-# passes off the UI thread, and a disk thumbnail cache. Switching the
-# active workflow never touches this widget — only the roster below it.
+# Center — Image Browser. A single, persistent, global instance shared by
+# every workflow: one tab per configured top-level folder (always fully
+# recursive), lazy scanning off the UI thread, and an in-memory-only
+# thumbnail cache. Switching the active workflow never touches this widget
+# — only the roster below it.
 # ---------------------------------------------------------------------------
 class ImageBrowser(QWidget):
     thumbnailClicked = Signal(str)   # filepath — MainWindow feeds this to the armed roster slot
@@ -1555,7 +1611,6 @@ class ImageBrowser(QWidget):
         self.main_window = main_window
         self.setObjectName("imageBrowserPanel")
         self.thread_pool = QThreadPool.globalInstance()
-        self.thumb_cache_dir = THUMB_CACHE_DIR
         self._closed_this_session = set()   # paths ×'d away — in-memory only, cleared on relaunch
 
         state = main_window.config_data.get("image_browser_state") or {}
@@ -1572,10 +1627,6 @@ class ImageBrowser(QWidget):
         self.tabs.setDocumentMode(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # Restore-hidden-folder affordance, in its own row so it stays
-        # visible even when every tab is currently hidden (finishes Section
-        # 5's one loose thread: a ×'d tab previously had no in-session way
-        # back short of restarting the app).
         top_row = QHBoxLayout()
         top_row.setContentsMargins(6, 4, 6, 0)
         top_row.addStretch(1)
@@ -1600,8 +1651,8 @@ class ImageBrowser(QWidget):
 
         self.reload_folders()
 
-    def hide_dotted_bang(self):
-        return bool(self.main_window.config_data.get("hide_dotted_bang_folders", True))
+    def ignore_folder_patterns(self):
+        return self.main_window.config_data.get("ignore_folder_patterns", []) or []
 
     # -- (re)building tabs from Settings -----------------------------------
     def reload_folders(self):
@@ -1610,22 +1661,18 @@ class ImageBrowser(QWidget):
         self._top_sections = []
         folders = self.main_window.config_data.get("image_selection_folders", [])
         configured_paths = {f.get("path", "") for f in folders}
-        # A folder removed from Settings entirely shouldn't linger in the
-        # restore-hidden menu.
         self._closed_this_session &= configured_paths
-        has_folders = len(folders) > 0
 
         restore_index = 0
-        for i, folder_cfg in enumerate(folders):
+        for folder_cfg in folders:
             path = folder_cfg.get("path", "")
-            recursive = bool(folder_cfg.get("recursive", False))
             if path in self._closed_this_session:
                 continue
 
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QFrame.NoFrame)
-            section = FolderSection(self, path, depth=0, recursive=recursive, closable=True)
+            section = FolderSection(self, path, depth=0, closable=True)
             wrapper = QWidget()
             wrapper_lay = QVBoxLayout(wrapper)
             wrapper_lay.setContentsMargins(12, 12, 12, 12)
@@ -1644,9 +1691,6 @@ class ImageBrowser(QWidget):
 
         if self.tabs.count() > 0:
             self.tabs.setCurrentIndex(restore_index)
-            # currentChanged doesn't fire if restore_index is already 0 (the
-            # default), so make sure the initially-active tab still gets its
-            # rough pass kicked off.
             self._trigger_rough_pass_for_tab(restore_index)
 
         self._update_empty_state()
@@ -1696,17 +1740,10 @@ class ImageBrowser(QWidget):
         self.reload_folders()
 
     def _trigger_rough_pass_for_tab(self, index):
-        """Spec 3.5/6 fix: the rough pass (filename listing + count) must
-        run as soon as a tab is opened, independent of whether its header is
-        expanded — not only when the user expands it."""
         if 0 <= index < len(self._top_sections):
             self._top_sections[index].ensure_rough_pass()
 
     def close_tab_for_session(self, path):
-        """Hide a folder's tab for the rest of this session (spec 3.3's ×).
-        Removes the tab immediately, rather than only on the next full
-        reload_folders() call — and stays undoable via the restore-hidden
-        control, since nothing here touches Settings/disk."""
         self._closed_this_session.add(path)
         for i, section in enumerate(self._top_sections):
             if section.path == path:
@@ -2310,7 +2347,7 @@ class SettingsDialog(QDialog):
         super().__init__(main_window)
         self.main_window = main_window
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
@@ -2335,15 +2372,14 @@ class SettingsDialog(QDialog):
 
         self.folders = [dict(f) for f in main_window.config_data.get("image_selection_folders", [])]
 
-        self.folder_table = QTableWidget(0, 3)
-        self.folder_table.setHorizontalHeaderLabels(["Folder", "Recursive", ""])
+        self.folder_table = QTableWidget(0, 2)
+        self.folder_table.setHorizontalHeaderLabels(["Folder", ""])
         self.folder_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.folder_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.folder_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.folder_table.verticalHeader().hide()
         self.folder_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.folder_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.folder_table.setMaximumHeight(160)
+        self.folder_table.setMaximumHeight(150)
         layout.addWidget(self.folder_table)
 
         folder_btns = QHBoxLayout()
@@ -2359,13 +2395,9 @@ class SettingsDialog(QDialog):
         folder_btns.addWidget(down_btn)
         layout.addLayout(folder_btns)
 
-        self.hide_dotted_chk = QCheckBox("Hide folders starting with . or !")
-        self.hide_dotted_chk.setChecked(bool(main_window.config_data.get("hide_dotted_bang_folders", True)))
-        layout.addWidget(self.hide_dotted_chk)
-
         folder_hint = QLabel(
-            "Order here sets the order of tabs in the Image Browser. \u201cRecursive\u201d\n"
-            "shows a folder's subfolders as nested sub-headers instead of ignoring them."
+            "Order here sets the order of tabs in the Image Browser. Every folder\n"
+            "is always searched fully recursively, however deeply nested it is."
         )
         folder_hint.setObjectName("hint")
         folder_hint.setWordWrap(True)
@@ -2381,6 +2413,49 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.folder_warning_lbl)
 
         self._refresh_folder_table()
+
+        # -- Ignored folder names ---------------------------------------
+        ignore_title = QLabel("Ignored Folder Names")
+        ignore_title.setObjectName("sectionTitle")
+        layout.addWidget(ignore_title)
+
+        self.ignore_patterns = [
+            dict(p) for p in main_window.config_data.get("ignore_folder_patterns", [])
+        ]
+
+        self.ignore_table = QTableWidget(0, 3)
+        self.ignore_table.setHorizontalHeaderLabels(["Folder name", "Match", ""])
+        self.ignore_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.ignore_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.ignore_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.ignore_table.verticalHeader().hide()
+        self.ignore_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.ignore_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.ignore_table.setMaximumHeight(140)
+        layout.addWidget(self.ignore_table)
+
+        add_ignore_row = QHBoxLayout()
+        self.ignore_pattern_edit = QLineEdit()
+        self.ignore_pattern_edit.setPlaceholderText("Folder name, e.g. \"cache\"")
+        add_ignore_row.addWidget(self.ignore_pattern_edit, 1)
+        self.ignore_mode_combo = QComboBox()
+        self.ignore_mode_combo.addItem("Starts with", "starts_with")
+        self.ignore_mode_combo.addItem("Contains", "contains")
+        add_ignore_row.addWidget(self.ignore_mode_combo)
+        add_ignore_btn = QPushButton("Add\u2026")
+        add_ignore_btn.clicked.connect(self._add_ignore_pattern)
+        add_ignore_row.addWidget(add_ignore_btn)
+        layout.addLayout(add_ignore_row)
+
+        ignore_hint = QLabel(
+            "Any folder whose name starts with, or contains, one of these is skipped\n"
+            "entirely while scanning \u2014 it and everything inside it is never shown."
+        )
+        ignore_hint.setObjectName("hint")
+        ignore_hint.setWordWrap(True)
+        layout.addWidget(ignore_hint)
+
+        self._refresh_ignore_table()
 
         hk_title = QLabel("Hotkeys")
         hk_title.setObjectName("sectionTitle")
@@ -2420,23 +2495,13 @@ class SettingsDialog(QDialog):
             path_item.setToolTip(f.get("path", ""))
             self.folder_table.setItem(row, 0, path_item)
 
-            chk_wrap = QWidget()
-            chk_lay = QHBoxLayout(chk_wrap)
-            chk_lay.setContentsMargins(0, 0, 0, 0)
-            chk_lay.setAlignment(Qt.AlignCenter)
-            chk = QCheckBox()
-            chk.setChecked(bool(f.get("recursive", False)))
-            chk.stateChanged.connect(lambda state, r=row: self._set_recursive(r, state))
-            chk_lay.addWidget(chk)
-            self.folder_table.setCellWidget(row, 1, chk_wrap)
-
             remove_btn = QToolButton()
             remove_btn.setObjectName("iconButton")
             remove_btn.setText("\u00d7")
             remove_btn.setToolTip("Remove folder")
             remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             remove_btn.clicked.connect(lambda _, r=row: self._remove_folder(r))
-            self.folder_table.setCellWidget(row, 2, remove_btn)
+            self.folder_table.setCellWidget(row, 1, remove_btn)
 
         if len(self.folders) > FOLDER_COUNT_WARN:
             self.folder_warning_lbl.setText(
@@ -2454,17 +2519,13 @@ class SettingsDialog(QDialog):
             return
         if any(f.get("path") == path for f in self.folders):
             return
-        self.folders.append({"path": path, "recursive": True})
+        self.folders.append({"path": path})
         self._refresh_folder_table()
 
     def _remove_folder(self, row):
         if 0 <= row < len(self.folders):
             del self.folders[row]
             self._refresh_folder_table()
-
-    def _set_recursive(self, row, state):
-        if 0 <= row < len(self.folders):
-            self.folders[row]["recursive"] = bool(state)
 
     def _move_folder(self, delta):
         row = self.folder_table.currentRow()
@@ -2476,11 +2537,60 @@ class SettingsDialog(QDialog):
             self._refresh_folder_table()
             self.folder_table.selectRow(new_row)
 
+    # -- Ignored folder names ----------------------------------------------
+    def _refresh_ignore_table(self):
+        self.ignore_table.setRowCount(len(self.ignore_patterns))
+        for row, rule in enumerate(self.ignore_patterns):
+            pattern_item = QTableWidgetItem(rule.get("pattern", ""))
+            self.ignore_table.setItem(row, 0, pattern_item)
+
+            mode_wrap = QWidget()
+            mode_lay = QHBoxLayout(mode_wrap)
+            mode_lay.setContentsMargins(0, 0, 0, 0)
+            mode_lay.setAlignment(Qt.AlignCenter)
+            combo = QComboBox()
+            combo.addItem("Starts with", "starts_with")
+            combo.addItem("Contains", "contains")
+            idx = combo.findData(rule.get("mode", "starts_with"))
+            combo.setCurrentIndex(max(0, idx))
+            combo.currentIndexChanged.connect(lambda _i, r=row, c=combo: self._set_ignore_mode(r, c))
+            mode_lay.addWidget(combo)
+            self.ignore_table.setCellWidget(row, 1, mode_wrap)
+
+            remove_btn = QToolButton()
+            remove_btn.setObjectName("iconButton")
+            remove_btn.setText("\u00d7")
+            remove_btn.setToolTip("Remove")
+            remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            remove_btn.clicked.connect(lambda _, r=row: self._remove_ignore_pattern(r))
+            self.ignore_table.setCellWidget(row, 2, remove_btn)
+
+    def _add_ignore_pattern(self):
+        pattern = self.ignore_pattern_edit.text().strip()
+        if not pattern:
+            return
+        mode = self.ignore_mode_combo.currentData()
+        if any(p.get("pattern") == pattern and p.get("mode") == mode for p in self.ignore_patterns):
+            self.ignore_pattern_edit.clear()
+            return
+        self.ignore_patterns.append({"pattern": pattern, "mode": mode})
+        self.ignore_pattern_edit.clear()
+        self._refresh_ignore_table()
+
+    def _remove_ignore_pattern(self, row):
+        if 0 <= row < len(self.ignore_patterns):
+            del self.ignore_patterns[row]
+            self._refresh_ignore_table()
+
+    def _set_ignore_mode(self, row, combo):
+        if 0 <= row < len(self.ignore_patterns):
+            self.ignore_patterns[row]["mode"] = combo.currentData()
+
     def _save(self):
         self.main_window.server = self.server_edit.text().strip() or DEFAULT_SERVER
         self.main_window.output_dir = self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
         self.main_window.config_data["image_selection_folders"] = self.folders
-        self.main_window.config_data["hide_dotted_bang_folders"] = self.hide_dotted_chk.isChecked()
+        self.main_window.config_data["ignore_folder_patterns"] = self.ignore_patterns
         self.main_window.persist_all()
         self.main_window.image_browser.reload_folders()
         self.accept()
@@ -2711,7 +2821,10 @@ class OutputsSidebar(QWidget):
         if open_:
             self.show()
             self.raise_()
-            end_rect = QRect(max(0, container.width() - self._width), 0, self._width, container.height())
+            end_rect = QRect(
+                max(0, container.width() - self._width - EDGE_TAB_WIDTH), 0,
+                self._width, container.height(),
+            )
         else:
             end_rect = QRect(container.width(), 0, self._width, container.height())
 
@@ -2724,6 +2837,13 @@ class OutputsSidebar(QWidget):
             anim.finished.connect(self.hide)
         anim.start()
         self._anim = anim  # keep a reference alive for the duration
+        edge = getattr(self.main_window, "outputs_edge_tab", None)
+        if edge is not None:
+            edge.raise_()
+            edge.set_open_state(open_)
+        sidebar_btn = getattr(self.main_window, "sidebar_btn", None)
+        if sidebar_btn is not None:
+            sidebar_btn.setChecked(open_)
 
 
 # ---------------------------------------------------------------------------
@@ -2829,7 +2949,7 @@ class WorkflowSidebar(QWidget):
         if open_:
             self.show()
             self.raise_()
-            end_rect = QRect(0, 0, self._width, container.height())
+            end_rect = QRect(EDGE_TAB_WIDTH, 0, self._width, container.height())
         else:
             end_rect = QRect(-self._width, 0, self._width, container.height())
 
@@ -2843,6 +2963,9 @@ class WorkflowSidebar(QWidget):
         anim.start()
         self._anim = anim
         self.main_window._sync_edge_tab()
+        edge = getattr(self.main_window, "workflow_edge_tab", None)
+        if edge is not None:
+            edge.raise_()
 
 
 # ---------------------------------------------------------------------------
@@ -2872,6 +2995,36 @@ class _WorkflowEdgeTab(QWidget):
 
     def set_open_state(self, open_):
         self._lbl.setText("\u2039" if open_ else "\u203a")
+
+
+# ---------------------------------------------------------------------------
+# Mirror image of _WorkflowEdgeTab, docked to the right edge of the center
+# content for the Outputs / Queue sidebar — same always-visible open/close
+# chevron design, just flipped: closed shows ‹ (pull left to open), open
+# shows › (push right to close).
+# ---------------------------------------------------------------------------
+class _OutputsEdgeTab(QWidget):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setObjectName("outputsEdgeTab")
+        self.setFixedWidth(EDGE_TAB_WIDTH)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Outputs / Queue")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._lbl = QLabel("\u2039")
+        self._lbl.setObjectName("edgeTabChevron")
+        self._lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self._lbl)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.main_window._toggle_sidebar()
+        super().mousePressEvent(event)
+
+    def set_open_state(self, open_):
+        self._lbl.setText("\u203a" if open_ else "\u2039")
 
 
 # ---------------------------------------------------------------------------
@@ -3029,21 +3182,45 @@ class MainWindow(QMainWindow):
         center_lay.setContentsMargins(0, 0, 0, 0)
         center_lay.setSpacing(0)
 
+        # The space between the browser and the roster is manually
+        # adjustable by dragging the splitter handle between them, and the
+        # chosen split is remembered across launches.
+        self.center_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.center_splitter.setObjectName("centerSplitter")
+        self.center_splitter.setChildrenCollapsible(False)
+        self.center_splitter.setHandleWidth(6)
+        center_lay.addWidget(self.center_splitter, 1)
+
         self.image_browser = ImageBrowser(self)
         self.image_browser.thumbnailClicked.connect(self._on_browser_thumbnail_clicked)
-        center_lay.addWidget(self.image_browser, 1)
+        self.center_splitter.addWidget(self.image_browser)
 
         self.roster_bar = RosterBar(self)
-        center_lay.addWidget(self.roster_bar, 0)
+        self.center_splitter.addWidget(self.roster_bar)
+
+        self.center_splitter.setStretchFactor(0, 1)
+        self.center_splitter.setStretchFactor(1, 0)
+        self.center_splitter.splitterMoved.connect(self._on_center_splitter_moved)
+        # Give the roster a sane initial height (either the remembered one,
+        # or its natural size-hint the very first time the app runs).
+        saved_roster_h = self.config_data.get("center_split_roster_height")
+        if saved_roster_h:
+            total = max(self.height() - 120, 300)
+            self.center_splitter.setSizes([max(120, total - saved_roster_h), saved_roster_h])
 
         # ── Left sidebar: workflow switcher (overlay, closed by default) ──
         self.workflow_sidebar = WorkflowSidebar(self)
         self.workflow_edge_tab = _WorkflowEdgeTab(self, self.center_container)
         self.workflow_edge_tab.raise_()
 
-        # ── Right sidebar: Outputs / Queue (overlay, closed by default) ───
+        # ── Right sidebar: Outputs / Queue (overlay, closed by default) ──
+        # Mirrors the left sidebar exactly: an always-visible edge rail with
+        # an open/close chevron, so the arrow never gets buried under the
+        # sidebar the way it used to.
         self.outputs_sidebar = OutputsSidebar(self)
         self.outputs_tab = self.outputs_sidebar.outputs_panel
+        self.outputs_edge_tab = _OutputsEdgeTab(self, self.center_container)
+        self.outputs_edge_tab.raise_()
         self.queue_manager.itemFinished.connect(lambda *_: self.outputs_tab.refresh())
 
         for workflow_data in self.config_data.get("tabs", []):
@@ -3056,43 +3233,71 @@ class MainWindow(QMainWindow):
         self._position_workflow_sidebar()
 
 
+    # -- center splitter (Image Browser / Input Roster) --------------------
+    def _on_center_splitter_moved(self, pos, index):
+        sizes = self.center_splitter.sizes()
+        if len(sizes) == 2:
+            self.config_data["center_split_roster_height"] = sizes[1]
+            self.persist_all()
+
     # -- sidebars ---------------------------------------------------------
     def _toggle_sidebar(self):
         self.outputs_sidebar.toggle()
         self.sidebar_btn.setChecked(self.outputs_sidebar.is_open())
+        self._sync_outputs_edge_tab()
+        self.outputs_edge_tab.raise_()
 
     def _toggle_workflow_sidebar(self):
         self.workflow_sidebar.toggle()
+        self.workflow_edge_tab.raise_()
 
     def _sync_edge_tab(self):
+        # The edge tab is re-raised on every toggle (see _toggle_workflow_
+        # sidebar / WorkflowSidebar.set_open), so its arrow always stays on
+        # top of the sliding sidebar instead of disappearing underneath it.
         open_ = self.workflow_sidebar.is_open()
         self.workflow_edge_tab.set_open_state(open_)
         self.workflows_btn.setChecked(open_)
 
+    def _sync_outputs_edge_tab(self):
+        open_ = self.outputs_sidebar.is_open()
+        self.outputs_edge_tab.set_open_state(open_)
+        self.sidebar_btn.setChecked(open_)
+
     def _position_sidebar(self):
-        """Keep the outputs sidebar filling the center content area
-        whenever the window/center area is resized."""
+        """Keep the outputs sidebar (and its always-visible edge tab)
+        anchored to the right of the center content. The sidebar's open
+        position leaves room for EDGE_TAB_WIDTH so the tab's arrow is never
+        covered by the sidebar sliding over it."""
         sidebar = getattr(self, "outputs_sidebar", None)
         if sidebar is None:
             return
         container = self.center_container
         w = sidebar._width
-        x = max(0, container.width() - w) if sidebar.is_open() else container.width()
+        x = max(0, container.width() - w - EDGE_TAB_WIDTH) if sidebar.is_open() else container.width()
         sidebar.setGeometry(x, 0, w, container.height())
+        edge = getattr(self, "outputs_edge_tab", None)
+        if edge is not None:
+            edge.setGeometry(container.width() - EDGE_TAB_WIDTH, 0, EDGE_TAB_WIDTH, container.height())
+            edge.raise_()
 
     def _position_workflow_sidebar(self):
         """Same idea, mirrored: keeps the workflow sidebar (and its always-
-        visible edge tab) anchored to the left of the center content."""
+        visible edge tab) anchored to the left of the center content. The
+        sidebar's open position starts after EDGE_TAB_WIDTH so the tab's
+        arrow always stays visible on top, instead of the sidebar sliding
+        out over it and hiding it."""
         sidebar = getattr(self, "workflow_sidebar", None)
         if sidebar is None:
             return
         container = self.center_container
         w = sidebar._width
-        x = 0 if sidebar.is_open() else -w
+        x = EDGE_TAB_WIDTH if sidebar.is_open() else -w
         sidebar.setGeometry(x, 0, w, container.height())
         edge = getattr(self, "workflow_edge_tab", None)
         if edge is not None:
-            edge.setGeometry(0, 0, edge.width(), container.height())
+            edge.setGeometry(0, 0, EDGE_TAB_WIDTH, container.height())
+            edge.raise_()
 
     # -- workflow bookkeeping -------------------------------------------
     def rename_workflow(self, state, name):
@@ -3398,6 +3603,10 @@ class MainWindow(QMainWindow):
             "x": self.x(), "y": self.y(), "width": self.width(), "height": self.height(),
         }
         self.persist_all()
+        # Cleanly stop the shared background pixmap-loading thread so Qt
+        # doesn't warn (or abort) about a running QThread at interpreter exit.
+        PIXMAP_WORKER.stop()
+        PIXMAP_WORKER.wait(1500)
         super().closeEvent(event)
 
     # -- hotkeys -------------------------------------------------------
