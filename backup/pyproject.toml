@@ -1,0 +1,85 @@
+[project]
+name = "backup-utility"
+version = "1.0.0"
+description = "Single-file 7-Zip-based backup utility (see app_py_production_readiness_roadmap.md)"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# --------------------------------------------------------------------
+# Why >=3.9, not something newer:
+#
+# The code uses `from __future__ import annotations` throughout, which
+# defers all annotation evaluation to strings — so the modern-looking
+# generic hints (`list[BackupItem]`, `dict[str, str]`, `tuple[bool,
+# list[str]]`, etc.) never actually execute as PEP 585 subscripting at
+# runtime and don't require 3.9+ on their own; the `from __future__`
+# line alone works back to 3.7. There is no use of match/case (3.10),
+# the `X | Y` union syntax outside annotations, `str.removeprefix`/
+# `removesuffix` (3.9), `Path.walk` (3.12), `zip(strict=...)` (3.10),
+# or the walrus operator anywhere in the module.
+#
+# >=3.9 is chosen anyway, not because the syntax demands it, but as a
+# deliberately conservative floor: 3.8 reached end-of-life in October
+# 2024, and there's no reason to promise support for an EOL interpreter
+# just because nothing here happens to require a newer one. If you need
+# to run this on 3.7/3.8 specifically, the syntax will very likely work
+# unmodified — but that combination has not been tested and isn't a
+# supported configuration.
+#
+# Actually tested against: CPython 3.12 (primary dev/CI environment)
+# and 3.14 (per the .pytest_cache artifacts in this repo). Nothing
+# version-specific was found or is expected between 3.9 and 3.14.
+# --------------------------------------------------------------------
+
+# --------------------------------------------------------------------
+# Supported 7-Zip version range (Roadmap 2.1):
+#
+# Empirically verified:
+#   - 7-Zip 23.01, Linux ("7zip"/p7zip-style package).
+#   - NanaZip 6.5, Windows 11 (NanaZip is a Windows Store archiver app
+#     wrapping the 7-Zip core — "6.5" is NanaZip's own version, not the
+#     underlying 7-Zip core version; run `python backup.py --check` on
+#     that machine and record the core version it detects here once
+#     known). Verified via the full test suite (77 passed, 2 skipped —
+#     skips are test_permissions.py's root-only cases, N/A on Windows),
+#     including all 8 test_integration.py tests: full --new/--update/
+#     --verify cycle, multi-item isolation across 3 update rounds,
+#     Technique-B double-rename across 2 updates, deletion sync,
+#     interrupted-process recovery, duplicate-member validation,
+#     concurrent-invocation locking (2.2), and --history dir wiring (2.4).
+#
+# The original mutation-bug concern this section used to document
+# (-u<state>!<newArchiveName> mutating the destination archive) is moot
+# for this codebase as shipped: SEVENZIP_UPDATE_SWITCHES is empty and
+# add_or_update never passes that switch at all (see the module
+# docstring — it was found unsafe even on Linux, for a different reason:
+# it operates on the archive's whole sync state, not just the item being
+# updated). The design instead always stages a full copy and runs a
+# plain `7z u <archive> <item>` against that copy. What the Windows run
+# above actually validates is that plain add/update/rename/delete stay
+# correctly isolated per item under that staged-copy design — confirmed
+# by the multi-item-isolation and Technique-B tests specifically, which
+# are the exact regression class the original concern was about.
+#
+# NOT yet verified, and worth confirming before trusting these:
+#   - Any other Windows 7-Zip distribution/version (official 7-Zip.org
+#     installer, a different NanaZip version, etc.) — the NanaZip 6.5
+#     result confirms one specific build, not the whole Windows
+#     ecosystem. Spot-check test_integration.py's multi-item and rename
+#     tests against a new build before trusting it.
+#   - macOS, any 7-Zip build.
+#
+# There is no hard version check in the code today beyond confirming
+# *some* binary responds (SevenZipRunner.version_check, exercised by
+# `python backup.py --check`). If you verify a new platform/version
+# combination, record it here.
+# --------------------------------------------------------------------
+
+# pytest config intentionally NOT duplicated here — pytest.ini already
+# exists in this repo and registers the `integration` marker; pytest
+# picks the first config file it finds (pytest.ini before pyproject.toml),
+# so a [tool.pytest.ini_options] section here would just be silently
+# ignored. Keep pytest.ini as the single source of truth for that.

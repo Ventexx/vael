@@ -9,11 +9,44 @@ traceback on stderr) rather than a designed outcome.
 | Code | Meaning | What a wrapper should do |
 |---|---|---|
 | **0** | Success. Backup created/updated, or verification passed and archive history is consistent. | Nothing. Log success and move on. |
-| **1** | `BackupError` — an expected, operational failure: missing source, 7-Zip reported a warning or error, post-sync validation failed, insufficient disk space, configuration-change confirmation needed and not given, interrupted mid-transaction, etc. **The archive was not modified** — every `BackupError` path in the code is reached before `ArchiveTransactionManager.publish()`, or after it's already too late to matter (only in `--new`'s exception handler, which runs before any publish is possible). | Treat as a real failure. Alert. The primary archive is safe (see "The archive is always safe on failure" below), but the intended backup did **not** happen — do not treat "exit code 1, but I have an archive file" as success. |
+| **1** | `BackupError` — an expected, operational failure: missing source, 7-Zip reported a warning or error, post-sync validation failed, insufficient disk space, configuration-change confirmation needed and not given, interrupted mid-transaction, **another backup process already running against this archive** (Roadmap 2.2 — see below), etc. **The archive was not modified** — every `BackupError` path in the code is reached before `ArchiveTransactionManager.publish()`, or after it's already too late to matter (only in `--new`'s exception handler, which runs before any publish is possible). | Treat as a real failure. Alert. The primary archive is safe (see "The archive is always safe on failure" below), but the intended backup did **not** happen — do not treat "exit code 1, but I have an archive file" as success. |
 | **2** | `ConfigError` — the configuration itself is invalid (empty `BACKUP_ITEMS`, name collisions, non-absolute paths, overlapping physical paths, `--dry-run` used without `--update`). | Alert as a deployment/config bug, not a transient failure. Retrying without fixing the config will fail the same way every time. |
 | **3** | `DependencyError` — 7-Zip could not be located on `PATH` (or at the `--sevenzip` path given). | Alert as an environment problem. Check the 7-Zip install / `PATH` / `--sevenzip` argument on the machine running the job. |
 | **4** | Verification failed (`--verify` only) — `7z t` integrity check failed on the archive. | Treat as urgent/high-severity. This means the archive itself may be corrupt, not just that the run failed — investigate promptly, don't wait for the next scheduled run to "fix itself." |
 | **5** | **Partial success** — the backup archive itself was created/updated and published successfully, but the entry could not be written to `backup_history.txt` (see "Exit code 5 in detail" below). | **Do not treat as a hard failure**, but do not treat as silent success either. See below. |
+
+## Concurrent invocation (Roadmap 2.2)
+
+Two `--new`/`--update` invocations targeting the *same* archive path are
+not supported and are actively rejected, not merely undefined. Each run
+takes a non-blocking, per-archive lock (`.<archive-name>.lock`, next to
+the archive itself — a different file from `backup_history.txt.lock`)
+for the full duration of its transaction. A second invocation that finds
+the lock already held fails immediately with exit code 1 and a message
+starting "Another backup process appears to already be running against
+...", rather than waiting — the two runs are meant to be mutually
+exclusive, not queued behind each other, so a wrapper doesn't need to
+worry about a scheduled job silently piling up if a previous run is
+still going. This is a normal, expected exit-code-1 outcome if you have
+an overlapping schedule (e.g. a slow run plus a fixed-interval cron); it
+is not a sign of a stuck lock unless it keeps happening well after the
+previous run should have finished — see `RUNBOOK.md`.
+
+**`--verify` is not affected** — it only reads the published archive
+(protected by the same atomic `os.replace()` that makes a `.new` file's
+promotion all-or-nothing), so it's safe to run concurrently with a
+`--new`/`--update` against the same archive, or with itself.
+
+## `--check`: environment self-test (Roadmap 2.1)
+
+`python backup.py --check` is a separate diagnostic mode — it doesn't
+touch `BACKUP_ITEMS`, doesn't run a backup, and isn't part of the
+exit-code contract above (it prints a `PASS`/`FAIL` self-check report
+and exits 0 on pass, 1 on fail). It confirms: a 7-Zip binary is
+reachable, `app.py`'s own directory is writable, and the locking
+mechanism above actually works on this filesystem — useful for a new
+deployment to run once before pointing it at real data, or as a health
+check separate from an actual backup run.
 
 ## The archive is always safe on failure
 

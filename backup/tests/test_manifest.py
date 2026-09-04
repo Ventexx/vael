@@ -8,7 +8,13 @@ def mgr():
 
 
 def old_items(*pairs):
-    return [{"name": n, "source": s} for n, s in pairs]
+    # Simulates what a previously-written manifest.json would contain:
+    # the *stringified* Path, not a raw literal. The real code always
+    # builds this via str(BackupItem.path), which on Windows renders
+    # with backslashes (str(Path("/d")) == "\\d"), not the forward-slash
+    # form. Using a raw literal here worked by accident on Linux/macOS
+    # and produced false path-changed mismatches on Windows.
+    return [{"name": n, "source": str(Path(s))} for n, s in pairs]
 
 
 def new_items(*pairs):
@@ -50,7 +56,7 @@ def test_renamed_item_same_source():
     old = old_items(("Documents", "/d"))
     new = new_items(("MyDocs", "/d"))
     plan = mgr().detect_config_changes(old, new)
-    assert plan["renamed"] == [{"old_name": "Documents", "new_name": "MyDocs", "source": "/d"}]
+    assert plan["renamed"] == [{"old_name": "Documents", "new_name": "MyDocs", "source": str(Path("/d"))}]
     assert plan["removed"] == []
     assert plan["added"] == []
     assert plan["has_changes"] is True
@@ -68,7 +74,7 @@ def test_multiple_simultaneous_changes():
     old = old_items(("Documents", "/d"), ("Projects", "/p"), ("Old", "/old"))
     new = new_items(("MyDocs", "/d"), ("Projects", "/new_p"), ("New", "/new"))
     plan = mgr().detect_config_changes(old, new)
-    assert plan["renamed"] == [{"old_name": "Documents", "new_name": "MyDocs", "source": "/d"}]
+    assert plan["renamed"] == [{"old_name": "Documents", "new_name": "MyDocs", "source": str(Path("/d"))}]
     assert plan["path_changed"] == ["Projects"]
     assert plan["removed"] == ["Old"]
     assert plan["added"] == ["New"]
@@ -82,6 +88,6 @@ def test_rename_prefers_exact_source_match_not_first_added():
     old = old_items(("A", "/a"), ("B", "/b"))
     new = new_items(("A2", "/other"), ("B2", "/b"))
     plan = mgr().detect_config_changes(old, new)
-    assert plan["renamed"] == [{"old_name": "B", "new_name": "B2", "source": "/b"}]
+    assert plan["renamed"] == [{"old_name": "B", "new_name": "B2", "source": str(Path("/b"))}]
     assert plan["removed"] == ["A"]
     assert plan["added"] == ["A2"]

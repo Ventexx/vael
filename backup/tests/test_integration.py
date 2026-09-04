@@ -350,3 +350,112 @@ def test_duplicate_member_validation_catches_corrupted_transaction(tmp_path):
     assert any("more than once" in p for p in problems), problems
 
     txn.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------
+# Concurrent invocation protection (Roadmap 2.2): two real update_backup
+# calls racing for the same archive. The pure-mechanism version of this
+# test (no 7z needed) lives in test_locking.py; this is the end-to-end
+# regression test using an actual 7z subprocess to create a realistic
+# race window, confirming what happens today isn't two transaction files
+# racing to os.replace() the same destination.
+# ---------------------------------------------------------------------
+
+
+@requires_7z
+def test_concurrent_update_invocations_one_wins_one_rejected(tmp_path):
+    import threading
+    import time
+
+    import backup as backup_module
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    src = tmp_path / "src" / "Documents"
+    _make_tree(src, {"a.txt": "hello"})
+
+    manager = BackupManager(app_dir)
+    items = [BackupItem("Documents", src)]
+    result = manager.new_backup(items)
+    assert result.ok, result.message
+    archive = app_dir / "Backup.7z"
+
+    # Widen the race window: make synchronize_item slower so the second
+    # invocation's lock attempt reliably lands while the first is still
+    # inside its transaction, rather than racing to even start first.
+    original_sync = ArchiveManager.synchronize_item
+
+    def slow_sync(self, *args, **kwargs):
+        time.sleep(0.4)
+        return original_sync(self, *args, **kwargs)
+
+    backup_module.ArchiveManager.synchronize_item = slow_sync
+
+    results = {}
+
+    def run(label):
+        # A second BackupManager instance, as a second `python backup.py
+        # --update` invocation would be — not the same Python object.
+        mgr = BackupManager(app_dir)
+        results[label] = mgr.update_backup(archive, items, accept_config_changes=False)
+
+    try:
+        t1 = threading.Thread(target=run, args=("first",))
+        t1.start()
+        time.sleep(0.1)  # let the first thread acquire the archive lock
+        t2 = threading.Thread(target=run, args=("second",))
+        t2.start()
+        t1.join()
+        t2.join()
+    finally:
+        backup_module.ArchiveManager.synchronize_item = original_sync
+
+    outcomes = [results["first"].ok, results["second"].ok]
+    assert outcomes.count(True) == 1, f"expected exactly one winner: {results['first'].message!r} / {results['second'].message!r}"
+    assert outcomes.count(False) == 1
+
+    loser = results["first"] if not results["first"].ok else results["second"]
+    assert loser.exit_code == 1
+    assert "already" in loser.message.lower()
+
+    # Archive must still be intact and reflect the winner's successful run.
+    verifier_runner = SevenZipRunner()
+    test_result = verifier_runner.test(archive)
+    assert test_result.ok, "archive corrupted by concurrent invocation"
+
+
+# ---------------------------------------------------------------------
+# --history wiring for --new/--update (Roadmap 2.4): confirm the audit
+# log can live in a directory other than the archive's own app_dir, and
+# that --new/--update actually honor it (previously silently ignored —
+# only --verify respected --history).
+# ---------------------------------------------------------------------
+
+
+@requires_7z
+def test_history_dir_override_used_by_new_and_update(tmp_path):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    history_dir = tmp_path / "elsewhere" / "history"
+    history_dir.mkdir(parents=True)
+    src = tmp_path / "src" / "Documents"
+    _make_tree(src, {"a.txt": "hello"})
+
+    manager = BackupManager(app_dir, history_dir=history_dir)
+    items = [BackupItem("Documents", src)]
+
+    result = manager.new_backup(items)
+    assert result.ok, result.message
+
+    # History must be written where requested, not beside app_dir.
+    assert (history_dir / "backup_history.txt").exists()
+    assert not (app_dir / "backup_history.txt").exists()
+
+    (src / "b.txt").write_text("second file")
+    archive = app_dir / "Backup.7z"
+    result = manager.update_backup(archive, items, accept_config_changes=False)
+    assert result.ok, result.message
+
+    history_text = (history_dir / "backup_history.txt").read_text(encoding="utf-8")
+    assert "SUCCESS" in history_text
+    assert history_text.count("[BACKUP_META]") == 2  # one entry per run, newest first

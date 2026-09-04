@@ -60,7 +60,7 @@ out as implementation-time decisions, not settled facts):
      specific 7-Zip build/version, SevenZipRunner.add_or_update and
      its callers can be restored to the copy-free design.
 
-Run `python app.py --new / --update <archive> / --verify <archive>`
+Run `python app.py --new / --update <archive> / --verify <archive> / --check`
 or just `python app.py` for the interactive menu.
 """
 
@@ -879,6 +879,14 @@ class Manifest:
 
 
 class ManifestManager:
+    """Reads and writes `manifest.json`, the small metadata file stored
+    at the root of every archive this tool creates. The manifest is how
+    the tool recognizes "this archive belongs to me" on a later
+    `--update`/`--verify`, and is the source of truth for detecting
+    configuration changes (items added/removed/renamed/moved) between
+    runs — see detect_config_changes().
+    """
+
     def create(self, items: list[BackupItem]) -> Manifest:
         ts = iso(now_utc())
         return Manifest(
@@ -942,6 +950,32 @@ class ManifestManager:
             "path_changed": path_changed,
             "has_changes": bool(removed_remaining or added_remaining or renamed or path_changed),
         }
+
+
+def format_config_change_plan(plan: dict) -> str:
+    """Human-readable, multi-line rendering of a detect_config_changes()
+    plan — used both in the --update confirmation error (Roadmap Phase 3:
+    a first-time user hitting this needs an actionable summary, not a
+    raw Python dict repr) and in the interactive-mode confirmation
+    prompt, so the two surfaces stay consistent.
+    """
+    lines = []
+    if plan["added"]:
+        lines.append("  Added (will be backed up for the first time):")
+        lines.extend(f"    + {name}" for name in plan["added"])
+    if plan["removed"]:
+        lines.append("  Removed (will be deleted from the archive):")
+        lines.extend(f"    - {name}" for name in plan["removed"])
+    if plan.get("renamed"):
+        lines.append("  Renamed (same source, new logical name):")
+        lines.extend(
+            f"    {r['old_name']} -> {r['new_name']}  (source: {r['source']})"
+            for r in plan["renamed"]
+        )
+    if plan["path_changed"]:
+        lines.append("  Source path changed (same logical name, different directory):")
+        lines.extend(f"    {name}" for name in plan["path_changed"])
+    return "\n".join(lines) if lines else "  (no changes)"
 
 
 # ======================================================================
@@ -1216,11 +1250,31 @@ class ArchiveManager:
 # ======================================================================
 
 
-class _CrossPlatformLock:
-    """Exclusive advisory lock on a sidecar file (Section 18A.1)."""
+class LockBusyError(Exception):
+    """Raised by _CrossPlatformLock(blocking=False) when the lock is
+    already held by another process (Roadmap 2.2)."""
 
-    def __init__(self, lock_path: Path):
+
+class _CrossPlatformLock:
+    """Exclusive advisory lock on a sidecar file (Section 18A.1).
+
+    `blocking=True` (default; used for the history-file lock): waits
+    until the lock is free. The critical section it guards is a few
+    milliseconds of file I/O, so a brief wait is normal and expected.
+
+    `blocking=False` (used for the archive-level run lock, Roadmap 2.2):
+    fails immediately with LockBusyError instead of waiting. The
+    critical section it guards is an entire backup run — potentially
+    long-running — and the two invocations it separates are meant to be
+    mutually exclusive, not queued: silently blocking a second
+    `--update` behind a first one for however long the first takes would
+    turn a fast, legible "another backup is already running" failure
+    into an opaque hang with no indication anything is wrong.
+    """
+
+    def __init__(self, lock_path: Path, blocking: bool = True):
         self.lock_path = lock_path
+        self.blocking = blocking
         self._fh = None
 
     def __enter__(self):
@@ -1229,11 +1283,23 @@ class _CrossPlatformLock:
             if platform.system() == "Windows":
                 import msvcrt
 
-                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
+                mode = msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK
+                try:
+                    msvcrt.locking(self._fh.fileno(), mode, 1)
+                except OSError as exc:
+                    if self.blocking:
+                        raise
+                    raise LockBusyError(f"Lock already held: {self.lock_path}") from exc
             else:
                 import fcntl
 
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+                flags = fcntl.LOCK_EX if self.blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(self._fh.fileno(), flags)
+                except OSError as exc:
+                    if self.blocking:
+                        raise
+                    raise LockBusyError(f"Lock already held: {self.lock_path}") from exc
         except Exception:
             self._fh.close()
             raise
@@ -1270,6 +1336,19 @@ class HistoryEntry:
 
 
 class HistoryManager:
+    """Reads, writes, and reconciles `backup_history.txt` — the
+    human-readable, append-only audit log of every backup run (see the
+    `[BACKUP_META]` line in each entry for the machine-parseable
+    portion). Writes are serialized with a cross-process lock
+    (`backup_history.txt.lock`) so concurrent runs against different
+    archives that happen to share a history directory don't corrupt
+    each other's entries. If a write can't be completed (lock
+    contention, disk full, permissions), it's durably queued as a
+    pending record and merged in automatically on the next call to
+    reconcile_pending() — see EXIT_CODES.md's "Exit code 5" section for
+    the full lifecycle.
+    """
+
     def __init__(self, history_dir: Path):
         self.history_path = history_dir / HISTORY_FILENAME
         self.lock_path = history_dir / f"{HISTORY_FILENAME}.lock"
@@ -1282,6 +1361,12 @@ class HistoryManager:
                sorted(self.history_dir.glob(".backup_history.pending.*.json"))
 
     def reconcile_pending(self) -> None:
+        """Merge any `.backup_history.txt.pending.*.json` sidecar files
+        left by a previous run's failed write into `backup_history.txt`,
+        in the correct (newest-first) position, then delete the sidecar.
+        Called automatically at the start of every real run — safe to
+        call any time, including when there's nothing pending (no-op).
+        """
         pending = self._pending_paths()
         if not pending:
             return
@@ -1341,6 +1426,13 @@ class HistoryManager:
     # -- reading -----------------------------------------------------
 
     def read_entries(self) -> list[HistoryEntry]:
+        """Parse `backup_history.txt` into structured entries. Tolerant
+        of decorative-prose-only lines and malformed `[BACKUP_META]`
+        JSON in any single entry — a corrupt or hand-edited entry is
+        skipped rather than failing the whole read. Returns an empty
+        list if the file doesn't exist yet (a brand-new archive with no
+        history is a normal, expected state, not an error).
+        """
         if not self.history_path.exists():
             return []
         text = self.history_path.read_text(encoding="utf-8", errors="replace")
@@ -1373,6 +1465,11 @@ class HistoryManager:
         return entries
 
     def latest_successful(self) -> Optional[HistoryEntry]:
+        """Most recent entry with status SUCCESS and a recorded SHA-256 —
+        used by `--verify` as the known-good checksum to compare the
+        current archive against. Returns None if there's no history yet
+        or no successful run has ever completed.
+        """
         for e in self.read_entries():
             if e.status == "SUCCESS" and e.sha256:
                 return e
@@ -1549,11 +1646,27 @@ class VerificationResult:
 
 
 class VerificationManager:
+    """Implements `--verify`: checks an archive's 7-Zip integrity
+    (`7z t`), confirms it contains a valid `manifest.json`, computes its
+    SHA-256, and — if a history file is available — compares that
+    checksum against the most recent recorded SUCCESS entry. Read-only:
+    never modifies the archive, and safe to run concurrently with a
+    `--new`/`--update` against the same archive (see EXIT_CODES.md).
+    """
+
     def __init__(self, runner: SevenZipRunner, manifest_mgr: ManifestManager):
         self.runner = runner
         self.manifest_mgr = manifest_mgr
 
     def verify(self, archive: Path, history: Optional[HistoryManager]) -> VerificationResult:
+        """Run the full read-only verification: 7-Zip integrity test,
+        manifest presence/validity, SHA-256 computation, and (if
+        `history` is provided and has a prior SUCCESS entry) a checksum
+        comparison against the last known-good run. Never raises for an
+        ordinary "archive is bad" outcome — that's reflected in the
+        returned VerificationResult's fields instead, so callers (CLI,
+        interactive menu) can decide how to present it.
+        """
         logger.info("verifying archive %s", archive)
         if not archive.exists():
             logger.error("verify: archive does not exist: %s", archive)
@@ -1613,7 +1726,29 @@ class ProcessResult:
 
 
 class BackupManager:
-    def __init__(self, app_dir: Path, compression_level: int = COMPRESSION_LEVEL):
+    """The main entry point for creating and updating backup archives —
+    `--new` calls new_backup(), `--update` calls update_backup(). Every
+    method here is safe by construction: no primary archive is ever
+    modified except by a single atomic `os.replace()` at the very end of
+    a fully validated transaction (see ArchiveTransactionManager), and
+    every write path is guarded by a non-blocking, per-archive lock
+    (Roadmap 2.2) so two invocations against the same archive can't race
+    each other. See EXIT_CODES.md for what each returned ProcessResult's
+    exit code means to an automation caller.
+    """
+
+    def __init__(
+        self,
+        app_dir: Path,
+        compression_level: int = COMPRESSION_LEVEL,
+        history_dir: Optional[Path] = None,
+    ):
+        """`history_dir` (Roadmap 2.4) lets the audit log live somewhere
+        other than beside app.py/the archive — the spec's documented
+        supported use case is the user moving Backup.7z elsewhere later,
+        and the CLI's --history flag is meant to point at wherever
+        backup_history.txt actually lives in that case. Defaults to
+        app_dir, matching every prior version's behavior."""
         self.app_dir = app_dir.resolve()
         self.compression_level = compression_level
         self.runner = SevenZipRunner()
@@ -1621,7 +1756,7 @@ class BackupManager:
         self.manifest_mgr = ManifestManager()
         self.archive_mgr = ArchiveManager(self.runner)
         self.txn_mgr = ArchiveTransactionManager(self.runner)
-        self.history = HistoryManager(app_dir)
+        self.history = HistoryManager(history_dir.resolve() if history_dir else self.app_dir)
 
     # -- shared helpers ------------------------------------------------
 
@@ -1644,13 +1779,56 @@ class BackupManager:
             for p in leftovers
         ]
 
+    def _with_archive_lock(self, archive: Path, operation_label: str, run_body) -> "ProcessResult":
+        """Roadmap 2.2 — serialize whole backup runs against a given
+        archive path with a non-blocking sidecar lock (`.<archive>.lock`,
+        beside the archive itself), so two concurrent invocations (e.g.
+        an overlapping cron schedule after a slow run) fail fast and
+        loudly instead of racing each other's transaction copy/publish.
+
+        This is a deliberately separate lock from HistoryManager's
+        (`backup_history.txt.lock`): that one protects the shared
+        history log — potentially serving many archives via --history —
+        across every run; this one protects a single archive's own
+        transaction lifecycle and is scoped to just that archive.
+        """
+        lock_path = archive.parent / f".{archive.name}.lock"
+        try:
+            with _CrossPlatformLock(lock_path, blocking=False):
+                return run_body()
+        except LockBusyError:
+            run_id = self.history.next_run_id()
+            now = now_utc()
+            msg = (
+                f"Another backup process appears to already be running against {archive} "
+                f"(could not acquire {lock_path.name} without waiting). Concurrent invocation "
+                "against the same archive is not supported — wait for the other run to finish. "
+                "If you're confident no backup.py process is actually running, the lock file is "
+                "stale and safe to delete (see RUNBOOK.md)."
+            )
+            logger.error("run #%s: %s", run_id, msg)
+            entry_text = format_history_entry(run_id, "FAILED", operation_label, archive, now, now, errors=[msg])
+            self._write_history(entry_text, {"run_id": run_id})
+            return ProcessResult(False, 1, msg)
+
     # -- New -------------------------------------------------------------
 
     def new_backup(self, items: list[BackupItem]) -> ProcessResult:
+        """Create a brand-new archive at the default location
+        (`ARCHIVE_NAME` beside app.py) from the configured `items`. Fails
+        (BackupError, exit 1) if a required source is unavailable, if
+        7-Zip reports a problem, or if post-creation validation against
+        the expected source inventory doesn't match — in every failure
+        case, nothing is left behind except the log/history entry
+        recording what happened.
+        """
+        archive = (self.app_dir / ARCHIVE_NAME).resolve()
+        return self._with_archive_lock(archive, "NEW", lambda: self._new_backup_locked(items, archive))
+
+    def _new_backup_locked(self, items: list[BackupItem], archive: Path) -> ProcessResult:
         start = now_utc()
         self.history.reconcile_pending()
         run_id = self.history.next_run_id()
-        archive = (self.app_dir / ARCHIVE_NAME).resolve()
         leftover_warnings = self._leftover_transaction_warnings(archive)
         for w in leftover_warnings:
             logger.warning(w)
@@ -1776,6 +1954,26 @@ class BackupManager:
     # -- Update ------------------------------------------------------
 
     def update_backup(self, archive: Path, items: list[BackupItem], accept_config_changes: bool, interactive_confirm=None) -> ProcessResult:
+        """Synchronize an existing archive at `archive` against the
+        current `items` configuration: adds new/changed source content,
+        removes content for any source no longer configured, and applies
+        renames. If the configuration itself changed since the archive
+        was last updated (item added/removed/renamed/moved) and
+        `accept_config_changes` is False, this raises BackupError unless
+        `interactive_confirm` is given and returns True when called with
+        the change plan — see format_config_change_plan() for how that
+        plan is presented to a human. Like new_backup(), every failure
+        path leaves the existing archive untouched.
+        """
+        resolved = archive.resolve() if archive.exists() else archive.absolute()
+        return self._with_archive_lock(
+            resolved, "UPDATE",
+            lambda: self._update_backup_locked(resolved, items, accept_config_changes, interactive_confirm),
+        )
+
+    def _update_backup_locked(
+        self, archive: Path, items: list[BackupItem], accept_config_changes: bool, interactive_confirm=None
+    ) -> ProcessResult:
         start = now_utc()
         self.history.reconcile_pending()
         run_id = self.history.next_run_id()
@@ -1783,7 +1981,6 @@ class BackupManager:
 
         try:
             validate_configuration(items)
-            archive = archive.resolve() if archive.exists() else archive.absolute()
             if not archive.exists():
                 raise BackupError(f"Archive does not exist: {archive}")
             leftover_warnings = self._leftover_transaction_warnings(archive)
@@ -1807,10 +2004,12 @@ class BackupManager:
                         pass
                     else:
                         raise BackupError(
-                            "Configuration changes detected (added="
-                            f"{plan['added']}, removed={plan['removed']}, "
-                            f"renamed={plan.get('renamed', [])}, path_changed={plan['path_changed']}). "
-                            "Re-run with --accept-config-changes to apply this change, or confirm interactively."
+                            "Configuration changes were detected and must be confirmed before "
+                            "this update can proceed:\n\n"
+                            f"{format_config_change_plan(plan)}\n\n"
+                            "Removed items will have their content DELETED from the archive. "
+                            "If this is expected, re-run with --accept-config-changes to apply "
+                            "it, or confirm interactively (no arguments)."
                         )
 
             txn_archive = self.txn_mgr.new_transaction_path(archive)
@@ -1937,6 +2136,73 @@ class BackupManager:
 # ======================================================================
 
 
+def _resolve_history_dir(history_arg: Optional[str], default: Path) -> Path:
+    """Roadmap 2.4 — resolve --history consistently for every command.
+
+    Previously this logic was only wired up for --verify; --new and
+    --update silently ignored --history and always used the archive's
+    own app_dir, even though the spec's documented use case (the user
+    moves Backup.7z elsewhere later) implies the audit log may live
+    somewhere else entirely. Accepts either a path to backup_history.txt
+    itself or a bare directory meant to contain it, matching the
+    interactive menu's existing convention for --verify.
+    """
+    if not history_arg:
+        return default
+    p = Path(history_arg)
+    return p.parent if p.name == HISTORY_FILENAME else p
+
+
+def run_self_check(app_dir: Path) -> "ProcessResult":
+    """Roadmap 2.1 — `--check`: a new deployment can run this before
+    trusting the tool with real backups. Confirms a working 7-Zip binary
+    is reachable, and exercises a real read/write/lock cycle against a
+    scratch file beside app.py — the same directory every real run's
+    history lock, transaction files, and log file live in — so a
+    permissions or filesystem problem is caught up front, not mid-backup.
+    """
+    lines = ["ENVIRONMENT SELF-CHECK", ""]
+    ok = True
+
+    try:
+        runner = SevenZipRunner()
+        version_line = runner.version_check()
+        lines.append(f"7-Zip:      OK  ({runner.exe})")
+        lines.append(f"            {version_line}")
+    except DependencyError as exc:
+        ok = False
+        lines.append(f"7-Zip:      FAIL — {exc}")
+
+    scratch = app_dir / f".selfcheck.{uuid.uuid4().hex[:8]}.tmp"
+    lock_path = app_dir / f".selfcheck.{uuid.uuid4().hex[:8]}.lock"
+    try:
+        scratch.write_text("self-check", encoding="utf-8")
+        if scratch.read_text(encoding="utf-8") != "self-check":
+            raise OSError("read-back content did not match what was written")
+        with _CrossPlatformLock(lock_path, blocking=False):
+            pass
+        lines.append(f"Read/write: OK  ({app_dir})")
+        lines.append("Locking:    OK")
+    except OSError as exc:
+        ok = False
+        lines.append(f"Read/write: FAIL — {exc}")
+    finally:
+        with contextlib.suppress(OSError):
+            scratch.unlink()
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
+
+    try:
+        usage = shutil.disk_usage(app_dir)
+        lines.append(f"Disk space: {human_size(usage.free)} free at {app_dir}")
+    except OSError as exc:
+        lines.append(f"Disk space: could not determine ({exc})")
+
+    lines.append("")
+    lines.append("Result: " + ("PASS — environment looks sane." if ok else "FAIL — see above."))
+    return ProcessResult(ok, 0 if ok else 1, "\n".join(lines))
+
+
 def _print_verification(result: VerificationResult) -> None:
     print("ARCHIVE VERIFICATION")
     print()
@@ -1953,6 +2219,21 @@ def _print_verification(result: VerificationResult) -> None:
         print("Historical checksum comparison skipped.")
     print()
     print(f"Result: {result.summary}")
+
+
+def _prompt_archive_path(prompt: str) -> Optional[Path]:
+    """Read an archive path from the user, trimming the double-quotes a
+    drag-and-dropped Windows path carries with it. Returns None (and
+    prints a message) for blank input, rather than silently turning it
+    into Path('.') and letting some downstream error surface instead —
+    a first-time non-technical user needs "you didn't enter anything"
+    up front, not a confusing failure two steps later.
+    """
+    raw = input(prompt).strip().strip('"')
+    if not raw:
+        print("No path entered.")
+        return None
+    return Path(raw)
 
 
 def _interactive_menu(app_dir: Path) -> int:
@@ -1972,20 +2253,22 @@ def _interactive_menu(app_dir: Path) -> int:
         print(result.message)
         return result.exit_code
     elif choice == "2":
-        archive_str = input("Path to backup archive:\n> ").strip().strip('"')
-        archive = Path(archive_str)
+        archive = _prompt_archive_path("Path to backup archive:\n> ")
+        if archive is None:
+            return 1
 
         def confirm(plan):
             print("The following configuration changes were detected:")
-            print(json.dumps(plan, indent=2))
+            print(format_config_change_plan(plan))
             return input("Continue? [y/N] ").strip().lower() == "y"
 
         result = manager.update_backup(archive, BACKUP_ITEMS, accept_config_changes=False, interactive_confirm=confirm)
         print(result.message)
         return result.exit_code
     elif choice == "3":
-        archive_str = input("Path to backup archive:\n> ").strip().strip('"')
-        archive = Path(archive_str)
+        archive = _prompt_archive_path("Path to backup archive:\n> ")
+        if archive is None:
+            return 1
         runner = SevenZipRunner()
         verifier = VerificationManager(runner, ManifestManager())
         history_dir = app_dir
@@ -2013,6 +2296,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     group.add_argument("--new", action="store_true", help="Create a new backup archive.")
     group.add_argument("--update", metavar="ARCHIVE", help="Update an existing backup archive.")
     group.add_argument("--verify", metavar="ARCHIVE", help="Verify a backup archive.")
+    group.add_argument("--check", action="store_true",
+                        help="Run an environment self-test (7-Zip detection, read/write, locking) and exit.")
     parser.add_argument("--accept-config-changes", action="store_true",
                          help="Acknowledge and apply detected configuration changes (--update only).")
     parser.add_argument("--dry-run", action="store_true",
@@ -2045,21 +2330,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.sevenzip:
         SEVEN_ZIP_PATH = args.sevenzip
 
+    if args.check:
+        result = run_self_check(app_dir)
+        print(result.message)
+        return result.exit_code
+
     try:
         validate_configuration(BACKUP_ITEMS)
     except ConfigError as exc:
         print(f"CONFIGURATION ERROR: {exc}", file=sys.stderr)
         return 2
 
+    history_dir = _resolve_history_dir(args.history, app_dir)
+
     try:
         if args.new:
-            manager = BackupManager(app_dir, compression_level=args.compression)
+            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir)
             result = manager.new_backup(BACKUP_ITEMS)
             print(result.message)
             return result.exit_code
 
         if args.update:
-            manager = BackupManager(app_dir, compression_level=args.compression)
+            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir)
             if args.dry_run:
                 result = manager.dry_run_update(Path(args.update), BACKUP_ITEMS)
                 print(result.message)
@@ -2077,7 +2369,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.verify:
             runner = SevenZipRunner()
             verifier = VerificationManager(runner, ManifestManager())
-            history_dir = Path(args.history).parent if args.history else app_dir
             history = HistoryManager(history_dir)
             result = verifier.verify(Path(args.verify), history)
             _print_verification(result)
@@ -2092,6 +2383,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ConfigError as exc:
         print(f"CONFIGURATION ERROR: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # Covers every input() call reachable from here: the menu choice,
+        # both archive-path prompts, and the config-change confirm
+        # callback nested inside update_backup(). A non-technical user
+        # hitting Ctrl+C should see one clean line, not a Python
+        # traceback (Roadmap Phase 3 — interactive-mode hardening).
+        print("\nCancelled.")
+        return 1
+    except EOFError:
+        # Ctrl+D / stdin closed mid-prompt (e.g. piped input running out
+        # unexpectedly) — same treatment as Ctrl+C, not a traceback.
+        print("\nInput ended unexpectedly. Cancelled.")
+        return 1
 
 
 if __name__ == "__main__":

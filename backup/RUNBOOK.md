@@ -8,6 +8,38 @@ about it by hand.
 
 ---
 
+## What this tool stores about your filesystem layout (by design)
+
+`manifest.json` (inside every archive) and `backup_history.txt` both
+store the **full absolute source path** of every configured
+`BackupItem` — e.g. `C:\Users\yourname\Documents` or
+`/home/yourname/Photos`. This is a deliberate design decision, not an
+oversight (Roadmap Phase 3 secrets/PII review):
+
+- The tool needs the exact source path to re-locate and re-sync each
+  logical item on every subsequent `--update`, and `--verify`'s history
+  comparison needs it too.
+- Nothing about this leaves your machine on its own — it's not
+  transmitted anywhere, only written to `manifest.json` (inside
+  `Backup.7z` itself) and `backup_history.txt` (a plain-text file beside
+  `app.py`).
+
+**What this means for you in practice:** if you ever share, upload, or
+back up `backup_history.txt` or the archive itself somewhere semi-public
+(a support forum, a bug report, a public git repo, cloud storage you
+don't fully control), your local folder structure — including your
+Windows username, if it appears in the path (`C:\Users\<name>\...`) —
+goes with it in plain text. This is normal and expected for a personal
+backup tool's own bookkeeping, but it's worth knowing before you paste
+`backup_history.txt` into a bug report or GitHub issue: redact the paths
+first if you'd rather not share your folder layout/username publicly.
+
+`backup.log` (Roadmap 1.1) can also contain source paths in its
+operational trace, depending on `--log-level` — the same consideration
+applies if you ever share a log file for troubleshooting.
+
+---
+
 ## "I found a `.Backup.7z.<hex>.new` file next to my archive"
 
 **What it is:** A leftover, abandoned transaction archive from a run that
@@ -120,6 +152,47 @@ delete `backup_history.txt.lock` — it's a lock file, not the history
 itself; deleting it just means the next writer creates a fresh one.
 Do **not** delete `backup_history.txt` (no `.lock` suffix) — that's the
 actual audit trail.
+
+---
+
+## "I got exit code 1: 'Another backup process appears to already be running...'"
+
+**What it is:** The non-blocking, per-archive lock introduced in Roadmap
+2.2 (`.Backup.7z.lock`, next to the archive — separate from
+`backup_history.txt.lock`). A second `--new`/`--update` invocation
+against the same archive found the lock already held and refused to
+proceed, rather than waiting or racing the first one.
+
+**Is my archive OK?** Yes. This check runs before any transaction
+archive is touched — the rejected run made zero modifications.
+
+**Is this actually a problem?** Usually not — it's the intended
+behavior for an overlapping schedule (e.g. a slow run plus a
+fixed-interval cron, or you started a manual run while a scheduled one
+was already going). Only investigate further if you keep seeing it well
+after the run that's supposedly "in progress" should have finished.
+
+**What to do:**
+1. Check whether a `backup.py` process is actually running right now
+   (`ps aux | grep backup.py` / Task Manager). If yes, that's the
+   expected cause — just wait for it (or the next scheduled run) to
+   finish; nothing to fix.
+2. If nothing is running and you're still getting this error, the lock
+   file is stale (most likely from a hard kill that didn't get a chance
+   to release it — the OS releases the underlying advisory lock
+   automatically when the holding process dies, but on some
+   platform/filesystem combinations that can be delayed). Delete
+   `.Backup.7z.lock` (or `.<your-archive-name>.lock` next to whichever
+   archive is affected) and retry. Deleting it is safe — it's a lock
+   file, not a transaction archive or the backup itself.
+3. If this happens repeatedly with no process actually running, that's
+   worth investigating as a standing problem (e.g. a scheduler
+   double-firing) rather than deleting the lock file every time.
+
+**`python backup.py --check`** (Roadmap 2.1) exercises this exact
+locking mechanism against a scratch file as part of its self-test, so
+it's a good first thing to run if you suspect a filesystem-level locking
+problem rather than a genuinely running process.
 
 ---
 
