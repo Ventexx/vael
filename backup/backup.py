@@ -223,14 +223,19 @@ def setup_logging(app_dir: Path, level: str = "INFO", log_file: Optional[Path] =
 
 
 def now_utc() -> _dt.datetime:
+    """Current time, timezone-aware UTC — used everywhere instead of a
+    naive datetime.now() so history timestamps are unambiguous."""
     return _dt.datetime.now(_dt.timezone.utc)
 
 
 def iso(ts: _dt.datetime) -> str:
+    """`ts` rendered in local time as an ISO-8601 string, second
+    precision — the timestamp format used throughout backup_history.txt."""
     return ts.astimezone().isoformat(timespec="seconds")
 
 
 def human_duration(seconds: float) -> str:
+    """`seconds` as HH:MM:SS, for history-entry and CLI display."""
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -238,6 +243,8 @@ def human_duration(seconds: float) -> str:
 
 
 def human_size(num_bytes: int) -> str:
+    """`num_bytes` as a binary-unit string (e.g. "1.50 GiB"), for
+    display in messages and logs."""
     size = float(num_bytes)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if size < 1024 or unit == "TiB":
@@ -264,6 +271,11 @@ class DependencyError(Exception):
 
 
 def validate_logical_name(name: str, all_names: list[str]) -> None:
+    """Raise ConfigError if `name` isn't safe to use as an archive-root
+    logical name: empty, '.'/'..', absolute, containing a drive letter
+    or '..' segment, colliding with the reserved manifest filename,
+    configured more than once in `all_names`, or overlapping another
+    configured name as a path prefix (e.g. "Data" and "Data/Sub")."""
     if not name:
         raise ConfigError("A configured logical name is empty.")
     if name in (".", ".."):
@@ -318,6 +330,12 @@ def _path_parts_relation(a: Path, b: Path) -> Optional[str]:
 
 
 def validate_configuration(items: list[BackupItem]) -> None:
+    """Raise ConfigError if `items` (BACKUP_ITEMS) isn't safe to run:
+    empty list, any invalid/colliding logical name (see
+    validate_logical_name), a non-absolute source path (Roadmap 1.5 —
+    relative paths are a footgun given add_or_update's reliance on cwd),
+    or two items whose physical source paths are the same or nested
+    (would silently double-count/double-compress the same content)."""
     if not items:
         raise ConfigError("BACKUP_ITEMS is empty; nothing configured to back up.")
     names = [i.name for i in items]
@@ -358,6 +376,11 @@ def validate_configuration(items: list[BackupItem]) -> None:
 
 @dataclass
 class SevenZipResult:
+    """Outcome of one 7-Zip subprocess invocation. 7-Zip's own exit-code
+    convention (0 = success, 1 = warning, 2+ = fatal error) is exposed
+    via the three properties below rather than requiring every caller
+    to remember the raw convention.
+    """
     args: list[str]
     returncode: int
     stdout: str
@@ -365,14 +388,20 @@ class SevenZipResult:
 
     @property
     def ok(self) -> bool:
+        """True if 7-Zip reported full success (exit code 0)."""
         return self.returncode == 0
 
     @property
     def warning(self) -> bool:
+        """True if 7-Zip completed but reported a warning (exit code 1) —
+        e.g. a file was skipped or locked. Treated as a hard failure by
+        this tool's callers; a backup is never promoted on a warning."""
         return self.returncode == 1
 
     @property
     def fatal(self) -> bool:
+        """True if 7-Zip reported an unrecoverable error (any exit code
+        other than 0 or 1)."""
         return self.returncode not in (0, 1)
 
 
@@ -384,10 +413,16 @@ class SevenZipRunner:
     """
 
     def __init__(self, exe: Optional[str] = None):
+        """`exe` overrides auto-detection (used by the CLI's --sevenzip
+        flag). Raises DependencyError immediately if no working 7-Zip
+        binary can be found — callers don't need to check separately."""
         self.exe = exe or self._detect()
 
     @staticmethod
     def _detect() -> str:
+        """Locate a 7-Zip executable: SEVEN_ZIP_PATH override first, then
+        7z/7za/7zr (POSIX) or 7z.exe (Windows) on PATH, in that order.
+        Raises DependencyError if none are found."""
         for candidate in (SEVEN_ZIP_PATH, "7z", "7za", "7zr", "7z.exe"):
             if not candidate:
                 continue
@@ -400,6 +435,8 @@ class SevenZipRunner:
         )
 
     def _run(self, args: list[str]) -> SevenZipResult:
+        """Run `self.exe` with `args` as a subprocess argument list (never
+        shell-interpolated) and capture stdout/stderr as text."""
         logger.debug("7z %s", " ".join(args))
         proc = subprocess.run(
             [self.exe, *args],
@@ -413,6 +450,9 @@ class SevenZipRunner:
         return SevenZipResult(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
 
     def version_check(self) -> str:
+        """Confirm the detected binary actually responds (used by
+        `--check`), and return its self-reported first line of output as
+        a human-readable version string."""
         result = self._run([])
         if result.fatal:
             raise DependencyError(f"7-Zip at {self.exe!r} did not respond as expected.")
@@ -534,6 +574,9 @@ class SevenZipRunner:
 
 @dataclass
 class InventoryEntry:
+    """One file or directory, as seen either on disk (a source scan) or
+    inside an archive (a technical listing) — the same shape is used for
+    both sides so compare_inventories() can diff them directly."""
     logical_path: str  # archive-relative, forward-slash normalized
     is_dir: bool
     size: int = 0
@@ -546,12 +589,18 @@ class InventoryEntry:
 
 @dataclass
 class SkippedEntry:
+    """A source path SourceInventoryManager.scan() couldn't read (e.g.
+    permission denied), recorded rather than silently dropped so it
+    surfaces as a logged warning instead of a quiet gap in the backup."""
     source_path: str
     reason: str
 
 
 @dataclass
 class SourceInventory:
+    """Result of scanning all configured BackupItems: every readable
+    file/directory found (entries), plus anything that had to be
+    skipped and why (skipped)."""
     entries: dict[str, InventoryEntry] = field(default_factory=dict)
     skipped: list[SkippedEntry] = field(default_factory=list)
 
@@ -574,12 +623,22 @@ class SourceInventoryManager:
     """Recursively scans configured sources (Section 5, 40.1, 48B)."""
 
     def scan(self, items: list[BackupItem]) -> SourceInventory:
+        """Scan every configured item's source directory into a single
+        combined SourceInventory. Raises BackupError if any item's root
+        itself is unavailable (Invariant 1) — a nested unreadable
+        subdirectory, by contrast, is recorded as a SkippedEntry rather
+        than failing the whole scan."""
         inventory = SourceInventory()
         for item in items:
             self._scan_root(item, inventory)
         return inventory
 
     def _scan_root(self, item: BackupItem, inventory: SourceInventory) -> None:
+        """Walk one BackupItem's source tree into `inventory`, in place.
+        Detects and skips symlinks/junctions and directory-identity loops
+        (a symlink cycle would otherwise recurse forever); a permission
+        error on a nested directory is a partial skip, but the same error
+        on `item.path` itself is treated as source-unavailable (raises)."""
         root = item.path
         if not root.is_dir():
             # Caller is expected to have already validated availability
@@ -670,6 +729,10 @@ class SourceInventoryManager:
 
     @staticmethod
     def _safe_mtime_ns(path: Path) -> int:
+        """stat().st_mtime_ns, or 0 if the path can't be stat'd (e.g. a
+        race where the entry disappeared between listing and stat) —
+        never raises, since a directory's own mtime is informational
+        only and shouldn't abort a scan."""
         try:
             return path.stat().st_mtime_ns
         except OSError:
@@ -754,6 +817,10 @@ def crc32_of_file(path: Path) -> Optional[str]:
 
 
 def _parse_7z_timestamp_to_ns(value: str) -> int:
+    """Parse a `7z l -slt` "Modified = ..." timestamp string (e.g.
+    "2026-09-02 11:46:12.1234567") into nanoseconds since the Unix
+    epoch, UTC. Returns 0 on any parse failure — a listing line with an
+    unparseable timestamp shouldn't abort the whole listing parse."""
     # Typical 7z -slt format: "2026-09-02 11:46:12.1234567"
     try:
         date_part, time_part = value.split(" ", 1)
@@ -777,6 +844,11 @@ def _parse_7z_timestamp_to_ns(value: str) -> int:
 
 @dataclass
 class ChangeStats:
+    """Classification of every archive-vs-source diff from
+    compare_inventories(): how many files were added/modified/deleted/
+    unchanged, how many directories were added/deleted, and the exact
+    archive-relative paths that need deleting (deleted_paths) — used
+    directly by SevenZipRunner.delete_paths()."""
     added: int = 0
     modified: int = 0
     modified_undetermined: int = 0
@@ -792,6 +864,13 @@ def compare_inventories(
     current_source: dict[str, InventoryEntry],
     tolerance_ns: int = TIMESTAMP_TOLERANCE_NS,
 ) -> ChangeStats:
+    """Diff an archive's previous technical listing against a fresh
+    source scan, classifying every path as added/modified/deleted/
+    unchanged. A size difference always means modified; an mtime
+    difference within `tolerance_ns` is ambiguous on its own (some
+    filesystems/transfer tools jitter sub-second mtimes) and is resolved
+    by re-reading the live file's CRC32 against the archive-side CRC
+    when available, falling back to modified_undetermined otherwise."""
     stats = ChangeStats()
     prev_keys = set(previous_archive)
     cur_keys = set(current_source)
@@ -858,6 +937,10 @@ def compare_inventories(
 
 @dataclass
 class Manifest:
+    """The metadata file (`manifest.json`) stored at every archive's
+    root — how this tool recognizes an archive as its own, tracks the
+    configured items backing it (name -> absolute source path), and
+    versions each update via `backup_version`."""
     format_version: int
     backup_uuid: str
     backup_version: int
@@ -866,10 +949,15 @@ class Manifest:
     items: list[dict]
 
     def to_json(self) -> str:
+        """Serialize to the indented JSON written into the archive."""
         return json.dumps(dataclasses.asdict(self), indent=4)
 
     @staticmethod
     def from_json(text: str) -> "Manifest":
+        """Parse `manifest.json`'s content back into a Manifest. Raises
+        BackupError (not a raw JSONDecodeError/KeyError) if required
+        fields are missing, so callers can treat "not a valid manifest"
+        as one predictable exception type."""
         data = json.loads(text)
         required = ["format_version", "backup_uuid", "backup_version", "created", "last_modified", "items"]
         missing = [k for k in required if k not in data]
@@ -888,6 +976,8 @@ class ManifestManager:
     """
 
     def create(self, items: list[BackupItem]) -> Manifest:
+        """Build a fresh Manifest for a brand-new archive: version 1, a
+        new backup_uuid, created == last_modified."""
         ts = iso(now_utc())
         return Manifest(
             format_version=1,
@@ -899,6 +989,9 @@ class ManifestManager:
         )
 
     def update(self, previous: Manifest, items: list[BackupItem]) -> Manifest:
+        """Derive the next Manifest for an --update run: preserves
+        backup_uuid/created, increments backup_version, refreshes
+        last_modified and the item list to the current configuration."""
         return Manifest(
             format_version=previous.format_version,
             backup_uuid=previous.backup_uuid,
@@ -909,6 +1002,10 @@ class ManifestManager:
         )
 
     def read_from_archive(self, runner: SevenZipRunner, archive: Path) -> Optional[Manifest]:
+        """Extract and parse `manifest.json` from inside `archive`.
+        Returns None (not an exception) if the member is missing or the
+        JSON is malformed — "not a valid manifest" is a normal, expected
+        outcome callers check for, not an error condition."""
         text = runner.extract_to_string(archive, MANIFEST_FILENAME)
         if text is None:
             return None
@@ -991,9 +1088,15 @@ class ArchiveTransactionManager:
     """
 
     def __init__(self, runner: SevenZipRunner):
+        """`runner` is used by cleanup() to confirm a transaction archive
+        is genuinely abandoned before removing it (see cleanup())."""
         self.runner = runner
 
     def new_transaction_path(self, destination: Path) -> Path:
+        """Generate a unique, hidden-dotfile transaction path beside
+        `destination` (e.g. `.Backup.7z.<hex>.new`) — never colliding
+        with a concurrent run's own transaction file, and immediately
+        recognizable as a leftover if abandoned (see RUNBOOK.md)."""
         unique = uuid.uuid4().hex[:12]
         return destination.parent / f".{destination.name}.{unique}.new"
 
@@ -1169,6 +1272,11 @@ class ArchiveTransactionManager:
         os.replace(str(new_archive), str(destination))
 
     def cleanup(self, path: Path) -> Optional[str]:
+        """Delete an abandoned/no-longer-needed transaction archive.
+        Returns None on success (or if it's already gone), or a
+        human-readable error string on failure — never raises, since
+        cleanup runs inside existing exception handlers that shouldn't
+        be masked by a secondary cleanup failure."""
         try:
             if path.exists():
                 path.unlink()
@@ -1181,6 +1289,8 @@ class ArchiveManager:
     """Synchronizes source content into the transaction archive (Section 48)."""
 
     def __init__(self, runner: SevenZipRunner):
+        """`runner` performs every actual 7-Zip subprocess call made
+        here."""
         self.runner = runner
 
     def synchronize_item(
@@ -1239,6 +1349,11 @@ class ArchiveManager:
         return result
 
     def write_manifest(self, archive: Path, manifest: Manifest, scratch_dir: Path) -> SevenZipResult:
+        """Write `manifest.json` into `archive`'s root, via a scratch
+        copy on disk (7-Zip adds files by path, not from an in-memory
+        string) — `scratch_dir` is created if needed and the manifest
+        file is written there first, then added at compression level 1
+        (metadata; not worth compressing harder)."""
         scratch_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = scratch_dir / MANIFEST_FILENAME
         manifest_path.write_text(manifest.to_json(), encoding="utf-8")
@@ -1273,11 +1388,16 @@ class _CrossPlatformLock:
     """
 
     def __init__(self, lock_path: Path, blocking: bool = True):
+        """`lock_path` is created (empty, if it doesn't exist) and used
+        purely as a lock handle — its content is never read or written."""
         self.lock_path = lock_path
         self.blocking = blocking
         self._fh = None
 
     def __enter__(self):
+        """Acquire the lock: waits if blocking=True, raises LockBusyError
+        immediately if blocking=False and it's already held. Uses
+        msvcrt.locking on Windows, fcntl.flock elsewhere."""
         self._fh = open(self.lock_path, "a+")
         try:
             if platform.system() == "Windows":
@@ -1306,6 +1426,9 @@ class _CrossPlatformLock:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        """Release the lock and close the handle, unconditionally — runs
+        even if the guarded block raised, so a crash inside a `with`
+        block never leaves the lock held."""
         try:
             if platform.system() == "Windows":
                 import msvcrt
@@ -1322,6 +1445,10 @@ class _CrossPlatformLock:
 
 @dataclass
 class HistoryEntry:
+    """One parsed record from `backup_history.txt`: the structured
+    fields extracted from an entry's `[BACKUP_META]` JSON line, plus the
+    original raw_text (used when re-writing entries verbatim, e.g.
+    during pending-record reconciliation)."""
     run_id: int
     status: str  # SUCCESS | FAILED
     operation: str  # NEW | UPDATE | VERIFY
@@ -1350,6 +1477,10 @@ class HistoryManager:
     """
 
     def __init__(self, history_dir: Path):
+        """`history_dir` is where `backup_history.txt` and its lock/
+        pending-record sidecar files live — normally beside app.py, but
+        overridable via BackupManager's history_dir param / the CLI's
+        --history flag (Roadmap 2.4)."""
         self.history_path = history_dir / HISTORY_FILENAME
         self.lock_path = history_dir / f"{HISTORY_FILENAME}.lock"
         self.history_dir = history_dir
@@ -1357,6 +1488,9 @@ class HistoryManager:
     # -- pending-record reconciliation (Section 18A.3/18A.4) -----------
 
     def _pending_paths(self) -> list[Path]:
+        """Every pending-record sidecar file currently sitting beside
+        `backup_history.txt`, oldest-name-first (both the current and a
+        legacy naming pattern are checked, for backward compatibility)."""
         return sorted(self.history_dir.glob(f".{HISTORY_FILENAME}.pending.*.json")) + \
                sorted(self.history_dir.glob(".backup_history.pending.*.json"))
 
@@ -1382,6 +1516,10 @@ class HistoryManager:
     # -- writing ---------------------------------------------------------
 
     def _prepend_raw(self, entry_text: str) -> None:
+        """Write `entry_text` + the existing file content to a temp file,
+        fsync it, then atomically os.replace() over `backup_history.txt`
+        — newest-first ordering, and never a half-written file even on a
+        crash mid-write. Caller must hold the lock before calling this."""
         old = self.history_path.read_text(encoding="utf-8") if self.history_path.exists() else ""
         tmp = self.history_path.with_name(f".{HISTORY_FILENAME}.{uuid.uuid4().hex[:8]}.tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -1420,6 +1558,9 @@ class HistoryManager:
         return False
 
     def next_run_id(self) -> int:
+        """One higher than the highest run_id seen in history so far, or
+        1 if there's no history yet — run IDs are monotonically
+        increasing, never reused."""
         entries = self.read_entries()
         return (max((e.run_id for e in entries), default=0)) + 1
 
@@ -1476,6 +1617,9 @@ class HistoryManager:
         return None
 
     def find_by_sha256(self, sha256: str) -> Optional[HistoryEntry]:
+        """The most recent SUCCESS entry whose recorded checksum matches
+        `sha256`, if any — used by `--verify` to confirm the current
+        archive corresponds to a known-good prior run."""
         for e in self.read_entries():
             if e.status == "SUCCESS" and e.sha256 == sha256:
                 return e
@@ -1488,6 +1632,9 @@ class HistoryManager:
 
 
 def sha256_of_file(path: Path) -> str:
+    """Hex SHA-256 digest of a file's full contents, streamed in 1 MiB
+    chunks — the checksum recorded in backup_history.txt and compared
+    by --verify."""
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -1513,6 +1660,12 @@ def format_history_entry(
     errors: Optional[list[str]] = None,
     history_pending: bool = False,
 ) -> str:
+    """Render one complete, human-readable backup_history.txt entry —
+    the decorative summary block plus the machine-parseable
+    `[BACKUP_META]` JSON line read back by read_entries(). All fields
+    beyond the first six are optional because a FAILED entry
+    (BackupManager's exception handlers) has much less to report than a
+    SUCCESS entry."""
     warnings = warnings or []
     errors = errors or []
     lines = []
@@ -1635,6 +1788,11 @@ def format_history_entry(
 
 @dataclass
 class VerificationResult:
+    """Full outcome of a `--verify` run, returned by
+    VerificationManager.verify(). `match`/`is_latest` are only
+    meaningful when `history_available` is True; `integrity_pass` is
+    None if the 7-Zip test itself couldn't be attempted (e.g. archive
+    doesn't exist)."""
     archive_exists: bool
     integrity_pass: Optional[bool]
     manifest_ok: bool
@@ -1655,6 +1813,8 @@ class VerificationManager:
     """
 
     def __init__(self, runner: SevenZipRunner, manifest_mgr: ManifestManager):
+        """`runner` performs the 7-Zip integrity test and manifest
+        extraction; `manifest_mgr` parses the extracted manifest."""
         self.runner = runner
         self.manifest_mgr = manifest_mgr
 
@@ -1719,6 +1879,10 @@ class VerificationManager:
 
 
 class ProcessResult:
+    """Uniform return type for BackupManager's public methods:
+    `ok`/`exit_code` are what a CLI caller maps directly to `sys.exit()`
+    (see EXIT_CODES.md), `message` is the human-readable summary printed
+    to the console."""
     def __init__(self, ok: bool, exit_code: int, message: str):
         self.ok = ok
         self.exit_code = exit_code
@@ -1761,12 +1925,20 @@ class BackupManager:
     # -- shared helpers ------------------------------------------------
 
     def _validate_sources(self, items: list[BackupItem]) -> None:
+        """Raise BackupError, before anything else runs, if any
+        configured item's source directory is currently unavailable
+        (Invariant 1) — this check runs ahead of any archive
+        modification, so a missing source always fails cleanly rather
+        than mid-transaction."""
         missing = [i for i in items if not i.path.is_dir()]
         if missing:
             details = "\n".join(f"  {i.name} -> {i.path}" for i in missing)
             raise BackupError(f"Required source(s) unavailable:\n{details}\nNo archive modifications were performed.")
 
     def _write_history(self, entry_text: str, meta: dict) -> bool:
+        """Thin wrapper around HistoryManager.record() — kept as its own
+        method so BackupManager's call sites read consistently
+        regardless of which HistoryManager instance backs `self.history`."""
         return self.history.record(entry_text, meta)
 
     def _leftover_transaction_warnings(self, archive: Path) -> list[str]:
@@ -1826,6 +1998,13 @@ class BackupManager:
         return self._with_archive_lock(archive, "NEW", lambda: self._new_backup_locked(items, archive))
 
     def _new_backup_locked(self, items: list[BackupItem], archive: Path) -> ProcessResult:
+        """The actual --new implementation, run only once new_backup()'s
+        archive-lock wrapper has acquired the per-archive lock. Full
+        lifecycle: validate config/sources, stage a fresh transaction
+        archive, synchronize every item into it, write the manifest,
+        validate the result against the expected source inventory, then
+        publish via atomic os.replace() and record history. Any failure
+        before publish leaves no trace on disk beyond the history entry."""
         start = now_utc()
         self.history.reconcile_pending()
         run_id = self.history.next_run_id()
@@ -1974,6 +2153,16 @@ class BackupManager:
     def _update_backup_locked(
         self, archive: Path, items: list[BackupItem], accept_config_changes: bool, interactive_confirm=None
     ) -> ProcessResult:
+        """The actual --update implementation, run only once
+        update_backup()'s archive-lock wrapper has acquired the
+        per-archive lock. Full lifecycle: validate config, confirm the
+        archive exists and has a valid manifest, detect and (if needed)
+        confirm configuration changes, stage a copy of the existing
+        archive, synchronize every item's changes into it, delete
+        content for removed items, write the updated manifest, validate
+        the result, then publish via atomic os.replace() and record
+        history. Any failure before publish leaves the existing archive
+        untouched."""
         start = now_utc()
         self.history.reconcile_pending()
         run_id = self.history.next_run_id()
@@ -2120,6 +2309,11 @@ class BackupManager:
 
     @staticmethod
     def _dir_size(path: Path) -> int:
+        """Total size in bytes of every file under `path`, walked
+        recursively. Per-entry stat() failures are silently skipped
+        (this feeds preflight_space's estimate, which is deliberately
+        conservative — an unreadable file it can't size is a smaller
+        concern than aborting the whole estimate over it)."""
         total = 0
         try:
             for root, dirs, files in os.walk(path):
@@ -2204,6 +2398,9 @@ def run_self_check(app_dir: Path) -> "ProcessResult":
 
 
 def _print_verification(result: VerificationResult) -> None:
+    """Render a VerificationResult to the console for --verify / the
+    interactive menu's "3" option — the CLI-facing counterpart to
+    VerificationManager.verify()'s data-only return value."""
     print("ARCHIVE VERIFICATION")
     print()
     if not result.archive_exists:
@@ -2237,6 +2434,11 @@ def _prompt_archive_path(prompt: str) -> Optional[Path]:
 
 
 def _interactive_menu(app_dir: Path) -> int:
+    """No-arguments entry point: prints the menu, reads one choice, and
+    dispatches to new/update/verify. Ctrl+C/Ctrl+D during any prompt
+    here (including the nested config-change confirm callback) is
+    caught at main()'s top level, not here — see main()'s
+    KeyboardInterrupt/EOFError handling."""
     setup_logging(app_dir)
     print("Backup Utility\n")
     print("What would you like to do?\n")
@@ -2291,6 +2493,9 @@ def _interactive_menu(app_dir: Path) -> int:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """CLI argument definitions. Every flag's --help text is written for
+    a first-time user (Roadmap Phase 3), and the epilog summarizes the
+    exit-code contract EXIT_CODES.md documents in full."""
     parser = argparse.ArgumentParser(description="Backup Utility (7-Zip based)")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--new", action="store_true", help="Create a new backup archive.")
@@ -2321,6 +2526,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entry point. Dispatches to --check, --new, --update, --verify,
+    or (no mode flag given) the interactive menu, and maps every outcome
+    to the exit-code contract documented in EXIT_CODES.md. `argv=None`
+    means "read from sys.argv", as usual for argparse-based entry points
+    — tests pass an explicit list instead."""
     global SEVEN_ZIP_PATH
     args = build_arg_parser().parse_args(argv)
     app_dir = Path(__file__).resolve().parent

@@ -1,116 +1,67 @@
-# Exit codes — automation contract
+# Exit codes
 
-This is the contract `backup.py` makes with whatever invokes it
-non-interactively (cron, Task Scheduler, systemd timer, CI job, a wrapper
-script). Every code below is returned from `--new`, `--update`, and
-`--verify`; treat anything not listed here as an unexpected crash (Python
-traceback on stderr) rather than a designed outcome.
+`backup.py` returns one of these codes from `--new`, `--update`, and `--verify`.
+Anything else is an unexpected crash, not a designed outcome.
 
-| Code | Meaning | What a wrapper should do |
+| Code | Meaning | What to do |
 |---|---|---|
-| **0** | Success. Backup created/updated, or verification passed and archive history is consistent. | Nothing. Log success and move on. |
-| **1** | `BackupError` — an expected, operational failure: missing source, 7-Zip reported a warning or error, post-sync validation failed, insufficient disk space, configuration-change confirmation needed and not given, interrupted mid-transaction, **another backup process already running against this archive** (Roadmap 2.2 — see below), etc. **The archive was not modified** — every `BackupError` path in the code is reached before `ArchiveTransactionManager.publish()`, or after it's already too late to matter (only in `--new`'s exception handler, which runs before any publish is possible). | Treat as a real failure. Alert. The primary archive is safe (see "The archive is always safe on failure" below), but the intended backup did **not** happen — do not treat "exit code 1, but I have an archive file" as success. |
-| **2** | `ConfigError` — the configuration itself is invalid (empty `BACKUP_ITEMS`, name collisions, non-absolute paths, overlapping physical paths, `--dry-run` used without `--update`). | Alert as a deployment/config bug, not a transient failure. Retrying without fixing the config will fail the same way every time. |
-| **3** | `DependencyError` — 7-Zip could not be located on `PATH` (or at the `--sevenzip` path given). | Alert as an environment problem. Check the 7-Zip install / `PATH` / `--sevenzip` argument on the machine running the job. |
-| **4** | Verification failed (`--verify` only) — `7z t` integrity check failed on the archive. | Treat as urgent/high-severity. This means the archive itself may be corrupt, not just that the run failed — investigate promptly, don't wait for the next scheduled run to "fix itself." |
-| **5** | **Partial success** — the backup archive itself was created/updated and published successfully, but the entry could not be written to `backup_history.txt` (see "Exit code 5 in detail" below). | **Do not treat as a hard failure**, but do not treat as silent success either. See below. |
+| 0 | Success. | Nothing. |
+| 1 | `BackupError` — missing source, 7-Zip error, post-sync validation failed, insufficient disk space, config change not confirmed, interrupted mid-transaction, or another backup process already running against this archive. Archive was not modified. | Investigate. Do not treat this as success. |
+| 2 | `ConfigError` — invalid configuration (empty `BACKUP_ITEMS`, name collisions, relative or overlapping paths, `--dry-run` used without `--update`). | Fix the config. Retrying without fixing it will fail the same way. |
+| 3 | `DependencyError` — 7-Zip not found on `PATH` or at `--sevenzip`. | Check the 7-Zip install / `PATH` / `--sevenzip` argument. |
+| 4 | Verification failed (`--verify` only) — `7z t` integrity check failed. | Investigate promptly. The archive itself may be corrupt. |
+| 5 | Partial success — archive created/updated and published, but the entry could not be written to `backup_history.txt`. | Not a hard failure. See "Exit code 5" below. |
 
-## Concurrent invocation (Roadmap 2.2)
+## Concurrent invocation
 
-Two `--new`/`--update` invocations targeting the *same* archive path are
-not supported and are actively rejected, not merely undefined. Each run
-takes a non-blocking, per-archive lock (`.<archive-name>.lock`, next to
-the archive itself — a different file from `backup_history.txt.lock`)
-for the full duration of its transaction. A second invocation that finds
-the lock already held fails immediately with exit code 1 and a message
-starting "Another backup process appears to already be running against
-...", rather than waiting — the two runs are meant to be mutually
-exclusive, not queued behind each other, so a wrapper doesn't need to
-worry about a scheduled job silently piling up if a previous run is
-still going. This is a normal, expected exit-code-1 outcome if you have
-an overlapping schedule (e.g. a slow run plus a fixed-interval cron); it
-is not a sign of a stuck lock unless it keeps happening well after the
-previous run should have finished — see `RUNBOOK.md`.
+Two `--new`/`--update` runs against the same archive are not supported. Each
+run takes a non-blocking, per-archive lock (`.<archive-name>.lock`, next to
+the archive) for the full duration of the run. A second invocation that finds
+the lock already held exits immediately with code 1
+("Another backup process appears to already be running against ..."), rather
+than waiting.
 
-**`--verify` is not affected** — it only reads the published archive
-(protected by the same atomic `os.replace()` that makes a `.new` file's
-promotion all-or-nothing), so it's safe to run concurrently with a
-`--new`/`--update` against the same archive, or with itself.
+`--verify` is not affected by this lock — it only reads the archive and can
+run at the same time as anything else.
 
-## `--check`: environment self-test (Roadmap 2.1)
+## `--check`
 
-`python backup.py --check` is a separate diagnostic mode — it doesn't
-touch `BACKUP_ITEMS`, doesn't run a backup, and isn't part of the
-exit-code contract above (it prints a `PASS`/`FAIL` self-check report
-and exits 0 on pass, 1 on fail). It confirms: a 7-Zip binary is
-reachable, `app.py`'s own directory is writable, and the locking
-mechanism above actually works on this filesystem — useful for a new
-deployment to run once before pointing it at real data, or as a health
-check separate from an actual backup run.
+`python backup.py --check` is a separate diagnostic mode. It does not touch
+`BACKUP_ITEMS` and does not run a backup. It checks if: a 7-Zip binary is
+reachable, the app directory is writable, and the locking mechanism works.
+Exits 0 on pass, 1 on fail.
 
 ## The archive is always safe on failure
 
-Every failure path in `new_backup` / `update_backup` runs *before*
-`ArchiveTransactionManager.publish()` (the only call that
-`os.replace()`s over the primary archive), or cleans up the transaction
-file (`txn_mgr.cleanup(txn_archive)`) before raising. A `BackupError`
-(exit 1) therefore means: **the previous known-good archive is untouched**.
-This is Invariant 4 from the spec, and it's exactly what the multi-item
-isolation and interrupted-process integration tests in `tests/` exist to
-keep true across future changes — see `tests/test_integration.py`.
+Every failure path in `new_backup`/`update_backup` runs before
+`ArchiveTransactionManager.publish()` (the only call that replaces the
+primary archive), or cleans up the transaction file before raising. Exit
+code 1 means the previous archive is untouched.
 
 ## Exit code 5 in detail
 
-Exit code 5 exists because the backup archive and the history log are
-two separate durability guarantees, and the code deliberately does not
-let a failure in the second one undo success in the first (rolling back
-a validated, published archive because a text-file write failed would be
-strictly worse for data safety). Concretely:
+1. The archive was tested, validated, and published successfully.
+2. Writing the entry to `backup_history.txt` failed after retries (lock
+   contention, disk full, permissions).
+3. A pending record is saved instead:
+   `.backup_history.pending.<run_id>.json`.
+4. The next run (`--new`, `--update`, `--verify`, or the interactive menu)
+   automatically merges the pending record into `backup_history.txt` and
+   deletes the sidecar file.
 
-1. The archive was tested (`7z t`), validated against the expected
-   source inventory, and published via atomic `os.replace()`.
-2. `HistoryManager.record()` then tried (with retries and backoff — see
-   `HISTORY_RETRY_ATTEMPTS` / `HISTORY_RETRY_BACKOFF_SECONDS`) to prepend
-   an entry to `backup_history.txt`, and every attempt failed (lock
-   contention, disk full on that filesystem, permissions, etc.).
-3. Rather than losing the record, a durable **pending record** is written
-   to a sidecar file: `.backup_history.pending.<run_id>.json` (or
-   `.backup_history.txt.pending.<run_id>.json`) next to where
-   `backup_history.txt` lives.
-4. The next time *any* operation runs (`--new`, `--update`, or the
-   interactive menu — anything that constructs a `HistoryManager` and
-   calls `reconcile_pending()`), that pending record is automatically
-   merged into `backup_history.txt` and the sidecar file is deleted.
-
-**What a wrapper should do on exit code 5:**
-- Log it distinctly from both 0 (full success) and 1 (real failure) —
-  e.g. "backup OK, history pending."
-- It is safe to keep running on the normal schedule; the next successful
-  run's `reconcile_pending()` call will fold the missed entry in
-  automatically, in the correct (newest-first) position.
-- If you see exit code 5 repeatedly across multiple runs, that's a
-  standing problem with the history file's filesystem/lock (not a
-  one-off blip) and is worth investigating directly — see
-  `RUNBOOK.md`'s section on stuck pending files.
-- Do not manually edit or delete the `.pending.*.json` file unless you've
-  read `RUNBOOK.md` — the run's outcome is only recorded once it's either
-  reconciled automatically or handled per that doc.
+What to do:
+- Log this separately from both 0 and 1.
+- Safe to keep running on the normal schedule — the next successful run
+  reconciles it automatically.
+- If exit code 5 keeps happening, investigate the history file's
+  filesystem/lock — see `RUNBOOK.md`.
+- Don't manually edit or delete the `.pending.*.json` file unless you've
+  read `RUNBOOK.md`.
 
 ## Logging vs. history vs. exit code
 
-These are three different signals, on purpose, and a wrapper script
-should not conflate them:
-
-- **Exit code** — the machine-readable outcome for the wrapper's own
-  branching logic. This document.
-- **`backup_history.txt`** — the human-readable + machine-parseable
-  audit trail of every backup attempt (see the `[BACKUP_META]` line in
-  each entry). This is the source of truth `--verify` and future updates
-  read from.
-- **`backup.log`** (Roadmap 1.1) — a timestamped, leveled operational log
-  for debugging *why* something happened, separate from the audit
-  record. `--log-level` controls verbosity (`DEBUG` for full 7-Zip
-  command tracing, default `INFO`), `--log-file` overrides its location.
-  This is what to `tail -f` while diagnosing a stuck job, and what to
-  grep for `ERROR`/`WARNING` in a periodic health check — it's not meant
-  to be parsed for backup outcomes; use `backup_history.txt` for that.
+- **Exit code** — machine-readable outcome for scripts/schedulers.
+- **`backup_history.txt`** — human-readable and machine-parseable audit
+  trail. Source of truth for `--verify`.
+- **`backup.log`** — timestamped operational log for debugging. `--log-level`
+  controls verbosity, `--log-file` sets its location.
