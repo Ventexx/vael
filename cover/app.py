@@ -83,23 +83,78 @@ DEFAULTS = {
 }
 
 
+# Set by load_config()/save_config() instead of failing silently -- see
+# MainWindow.__init__ (load) and MainWindow.persist_all (save) for where
+# these get surfaced to the user.
+_LAST_LOAD_WARNING = None
+_LAST_SAVE_ERROR = None
+
+
 def load_config():
+    """Load workflows_config.json, merged with DEFAULTS for any missing
+    keys. If the file exists but can't be parsed -- e.g. it was left
+    truncated by a crash, or partially written by another process/sync
+    tool -- the broken file is renamed aside as a timestamped backup
+    instead of being silently discarded, and _LAST_LOAD_WARNING is set so
+    the caller can tell the user what happened instead of quietly handing
+    them back an empty, default configuration."""
+    global _LAST_LOAD_WARNING
+    _LAST_LOAD_WARNING = None
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("config file does not contain a JSON object")
             merged = dict(DEFAULTS)
             merged.update(data)
             return merged
-        except Exception:
-            pass
+        except Exception as e:
+            backup_path = CONFIG_FILE.with_name(
+                CONFIG_FILE.stem + f".corrupted-{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}" + CONFIG_FILE.suffix
+            )
+            try:
+                CONFIG_FILE.replace(backup_path)
+            except Exception:
+                backup_path = None
+            _LAST_LOAD_WARNING = (
+                "workflows_config.json couldn't be read (" + str(e) + ") and "
+                "vael. cover has started fresh with default settings.\n\n"
+                + (
+                    "The unreadable file was kept, renamed to:\n" + str(backup_path)
+                    if backup_path is not None else
+                    "The unreadable file could not be renamed aside and was left in place; "
+                    "it will be overwritten the next time settings are saved."
+                )
+            )
     return dict(DEFAULTS)
 
 
 def save_config(config):
+    """Write workflows_config.json atomically: the new content is written
+    to a temp file next to it and then swapped into place with os.replace,
+    so a crash, forced quit, or a sync tool touching the file mid-write can
+    never leave a half-written/corrupted config behind (which load_config
+    would otherwise have to discard on the next launch).
+
+    Returns True on success. On failure the exception is recorded in
+    _LAST_SAVE_ERROR instead of being silently swallowed, so callers (see
+    MainWindow.persist_all) can actually tell the user their changes
+    aren't being saved, rather than failing invisibly forever."""
+    global _LAST_SAVE_ERROR
+    tmp_path = CONFIG_FILE.with_name(CONFIG_FILE.name + f".tmp-{os.getpid()}")
     try:
-        CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        tmp_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(tmp_path, CONFIG_FILE)
+        _LAST_SAVE_ERROR = None
+        return True
+    except Exception as e:
+        _LAST_SAVE_ERROR = str(e)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return False
 
 # ===========================================================================
 # api.py — ComfyUI HTTP API client
@@ -303,34 +358,23 @@ QMainWindow {
     border-top-right-radius: 8px;
     border-bottom-right-radius: 8px;
 }
-#edgeTab {
-    background-color: transparent;
-    border: none;
-}
 #edgeTabChevron {
     color: rgba(220,220,220,0.85);
     font-weight: 700;
     font-size: 11px;
 }
-/* Mirror image of #edgeTab, docked to the right edge for the Outputs /
-   Queue sidebar -- same look and behavior, just flipped border side. */
-#outputsEdgeTab {
-    background-color: transparent;
-    border: none;
-}
-/* Small pill-shaped handle centered on the edge tab -- this is the actual
-   visible "grab me to open/close" affordance (see reference design); the
-   14px edge-tab strip around it stays an invisible, full-height hit area
-   so clicking anywhere along the edge still toggles the sidebar. */
+/* Small pill-shaped open/close handle -- this widget's footprint IS the
+   handle (see _WorkflowEdgeTab / _OutputsEdgeTab), so nothing outside it
+   is clickable or painted. */
 #edgeTabPill {
     background-color: rgba(255,255,255,0.08);
     border: 1px solid rgba(255,255,255,0.30);
 }
-#edgeTab:hover #edgeTabPill, #outputsEdgeTab:hover #edgeTabPill {
+#edgeTabPill:hover {
     background-color: rgba(0,212,160,0.30);
     border-color: rgba(0,212,160,0.75);
 }
-#edgeTab:hover #edgeTabChevron, #outputsEdgeTab:hover #edgeTabChevron {
+#edgeTabPill:hover #edgeTabChevron {
     color: #ffffff;
 }
 QListWidget#workflowList::item {
@@ -506,22 +550,48 @@ QTabWidget#browserTabs QTabBar::tab:selected {
 QTabWidget#browserTabs QTabBar::tab:hover:!selected {
     color: rgba(220,220,220,0.85);
 }
-/* Settings button pinned to the left of the tab strip (corner widget) */
+/* Status bar housing the Settings (and restore-hidden) button. This row
+   is always present, even with zero folders configured, so Settings is
+   never unreachable on a fresh/empty setup. */
+QWidget#browserStatusBar {
+    background: transparent;
+}
 QToolButton#browserSettingsBtn {
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.16);
+    background: transparent;
+    border: none;
     border-radius: 5px;
-    font-size: 13px;
-    color: rgba(255,255,255,0.55);
-    margin: 2px 6px 4px 2px;
+    margin: 2px 2px 4px 0px;
 }
 QToolButton#browserSettingsBtn:hover {
     background: rgba(0,212,160,0.14);
-    border-color: rgba(0,212,160,0.45);
-    color: #00d4a0;
 }
 QToolButton#browserSettingsBtn:pressed {
-    background: rgba(255,255,255,0.03);
+    background: rgba(255,255,255,0.06);
+}
+
+/* ---- Bulk "Load Selected Folders" dimming overlay ---- */
+#bulkLoadPanel {
+    background-color: #161616;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 10px;
+}
+QProgressBar#bulkLoadProgress {
+    background-color: rgba(255,255,255,0.10);
+    border: none;
+    border-radius: 3px;
+}
+QProgressBar#bulkLoadProgress::chunk {
+    background-color: #00d4a0;
+    border-radius: 3px;
+}
+QLabel#bulkLoadCount {
+    color: #00d4a0;
+    font-size: 15px;
+    font-weight: 700;
+}
+QLabel#bulkLoadDetail {
+    color: rgba(230,230,230,0.85);
+    font-size: 12px;
 }
 /* ---- Folder section header (ported from vael. indexer's #sectionHeader:
    flat, text-only, no box at rest; depth conveyed by weight/color, not by
@@ -601,13 +671,13 @@ QLabel#headerCount[state="error"] {
     border-top: 1px solid rgba(255,255,255,0.16);
 }
 
-/* ---- Splitter handles (manual resizing) ---- */
-QSplitter::handle {
-    background-color: rgba(255,255,255,0.13);
-    width: 4px;
-}
-QSplitter::handle:hover {
-    background-color: #00d4a0;
+/* ---- Splitter handle (Image Browser / Input Roster) ----
+   No painted background here on purpose -- _CenterSplitterHandle draws
+   its own small three-line "grip" directly in paintEvent, so the handle
+   reads as a thin gap with a subtle drag affordance in the middle rather
+   than a thick colored bar. */
+QSplitter#centerSplitter::handle {
+    background-color: transparent;
 }
 
 /* ---- Sidebar (Outputs / Queue) ---- */
@@ -816,13 +886,14 @@ import sys
 import copy
 import time
 import uuid
+import math
 import queue
 import threading
 import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
-    Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QEvent, QPoint, QRect,
+    Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QEvent, QPoint, QPointF, QRect,
     QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool, QTimer,
 )
 from PySide6.QtGui import (
@@ -832,10 +903,10 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QTabBar, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLabel, QPushButton, QLineEdit, QFileDialog, QMessageBox, QSplitter,
+    QSplitterHandle,
     QScrollArea, QFrame, QListWidget, QListWidgetItem, QProgressBar, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
     QSizePolicy, QStackedWidget, QMenu, QSizeGrip, QCheckBox, QGridLayout, QComboBox,
-    QRubberBand,
 )
 
 
@@ -1152,6 +1223,7 @@ class WorkflowState(QObject):
         self.workflow_path = data.get("workflow_path")
         self.optional_identifier = data.get("optional_identifier", "")
         self.saved_slot_node_order = data.get("slot_node_order") or []
+        self.saved_param_values = data.get("param_values") or {}
         self.name = Path(self.workflow_path).stem if self.workflow_path else "Workflow"
 
         self.raw_workflow = None
@@ -1194,7 +1266,10 @@ class WorkflowState(QObject):
         self.optional_node_id = find_node(wf, self.optional_identifier) if self.optional_identifier else None
         self.param_values = {}
         for key, (value, _type_name) in self.editable_params().items():
-            self.param_values[key] = value
+            # Restore whatever the user last set for this key (saved in the
+            # config file), falling back to the workflow's own default the
+            # first time a key is seen.
+            self.param_values[key] = self.saved_param_values.get(key, value)
 
         self.slotsRebuilt.emit()
         self._set_status(f"Loaded. {len(self.slots)} image input(s) found.")
@@ -1226,6 +1301,7 @@ class WorkflowState(QObject):
             "workflow_path": self.workflow_path,
             "optional_identifier": self.optional_identifier,
             "slot_node_order": [s["node_id"] for s in self.slots],
+            "param_values": self.param_values,
         }
 
     # -- Running -------------------------------------------------------
@@ -1303,6 +1379,21 @@ class WorkflowState(QObject):
 IMAGE_FILE_EXTENSIONS = (
     ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
 )
+
+import re as _re
+_NATSORT_SPLIT_RE = _re.compile(r"(\d+)")
+
+
+def _natural_sort_key(path_str):
+    """Case-insensitive 'natural' sort key: splits the string on runs of
+    digits and compares numeric runs by value rather than character-by-
+    character, so 'img2.png' sorts before 'img10.png' the way a person
+    (and Explorer/Finder) expects, instead of plain lexicographic order
+    putting 'img10' before 'img2'. Applied to the full path, which is
+    equivalent to sorting by filename since every entry in one scan
+    shares the same parent directory prefix."""
+    name = str(path_str).lower()
+    return [int(part) if part.isdigit() else part for part in _NATSORT_SPLIT_RE.split(name)]
 
 # 2:3 portrait thumbnail, identical crop-to-fill sizing to vael. indexer.
 THUMB_W = 106
@@ -1450,8 +1541,8 @@ class _BulkScanWorker(QRunnable):
         except OSError as e:
             self.signals.error.emit(path, str(e))
             return
-        files.sort(key=str.lower)
-        subdirs.sort(key=str.lower)
+        files.sort(key=_natural_sort_key)
+        subdirs.sort(key=_natural_sort_key)
         self.signals.folder_ready.emit(path, files, subdirs)
         for sub_path in subdirs:
             self._walk(sub_path)
@@ -1498,7 +1589,7 @@ class BulkFolderLoadManager(QObject):
     supports folding a second selection into an already-running load
     instead of starting a competing one."""
 
-    statusChanged = Signal(str)
+    statusChanged = Signal(int, int, str)   # files_preloaded, files_queued, detail_text
     started = Signal()
     finished = Signal()
 
@@ -1547,8 +1638,9 @@ class BulkFolderLoadManager(QObject):
             self.active = False
             self.finished.emit()
             self.statusChanged.emit(
-                f"Load canceled \u2014 {self._folders_seen} folder(s), "
-                f"{self._files_seen} image(s) scanned so far are still cached."
+                self._files_preloaded, self._files_queued,
+                f"Load canceled \u2014 {self._folders_seen} folder(s) scanned,\n"
+                f"{self._files_seen} image(s) found are still cached."
             )
 
     def _start_branch(self, root_path):
@@ -1613,17 +1705,18 @@ class BulkFolderLoadManager(QObject):
         fully_done = scanning_done and self._files_preloaded >= self._files_queued
         if fully_done:
             self.statusChanged.emit(
-                f"Loaded {self._folders_seen} folder(s), {self._files_seen} image(s) "
+                self._files_preloaded, self._files_queued,
+                f"Loaded {self._folders_seen} folder(s), {self._files_seen} image(s)\n"
                 f"across {len(self._roots)} selected folder(s)."
             )
             return
         warn = ""
         if self._files_seen > BULK_IMAGE_COUNT_WARN:
-            warn = "  \u2014 large batch, thumbnails keep loading in the background"
+            warn = "\nLarge batch \u2014 thumbnails keep loading in the background."
         self.statusChanged.emit(
-            f"Loading selected folders\u2026 {self._folders_seen} folder(s) scanned, "
-            f"{self._files_seen} image(s) found, "
-            f"{self._files_preloaded}/{self._files_queued} thumbnails cached{warn}"
+            self._files_preloaded, self._files_queued,
+            f"Loading selected folders\u2026\n"
+            f"{self._folders_seen} folder(s) scanned, {self._files_seen} image(s) found{warn}"
         )
 
 
@@ -1689,8 +1782,8 @@ class _RoughScanWorker(QRunnable):
         except OSError as e:
             self.signals.failed.emit(self.section_path, f"error:{e}")
             return
-        files.sort(key=str.lower)
-        subdirs.sort(key=str.lower)
+        files.sort(key=_natural_sort_key)
+        subdirs.sort(key=_natural_sort_key)
         self.signals.done.emit(self.section_path, files, subdirs)
 
 
@@ -1813,9 +1906,24 @@ class ThumbnailCard(QWidget):
             self._img_lbl.setText("?")
 
     # -- click / drag (mirrors indexer's card interactions) ---------------
+    # NOTE: every one of these handlers explicitly accept()s left-button
+    # events instead of falling through to QWidget's default implementation.
+    # QWidget's base mouse handlers ignore() unhandled events so they can
+    # bubble up to the parent -- which is exactly right for e.g. middle-
+    # button autopan (see _AutopanScrollArea), but wrong here: this card
+    # lives inside a FolderSection body, which itself lives inside a
+    # _RubberBandArea (see ImageBrowser.reload_folders / FolderSection).
+    # If a left-click on a thumbnail were left unaccepted, Qt would hand it
+    # up to that ancestor's mousePressEvent, which grabs the mouse and
+    # starts an Explorer-style folder rubber-band selection -- silently
+    # stealing every subsequent move/release from this card and making it
+    # impossible to drag an image out. Accepting the event here keeps the
+    # whole press/move/release gesture on the card, where it belongs.
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_start_pos = event.position().toPoint()
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -1824,13 +1932,16 @@ class ThumbnailCard(QWidget):
             if dist >= QApplication.startDragDistance():
                 self._drag_start_pos = None
                 self._start_drag()
-                return
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
             self._drag_start_pos = None
             self.view_requested.emit(self)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def _start_drag(self):
@@ -1872,6 +1983,37 @@ class ThumbnailCard(QWidget):
             p.end()
 
 
+class _InertMouseArea(QWidget):
+    """A plain container that deliberately swallows left-button mouse
+    presses/moves/releases on its own blank space instead of letting them
+    bubble up to an ancestor _RubberBandArea. Used for the thumbnail card
+    grid of an *open* folder: without this, an unhandled click on the
+    gaps between thumbnails would propagate to the folder header's rubber
+    -band area and start a folder-selection drag, exactly the same failure
+    mode a plain ThumbnailCard press would otherwise hit (see
+    ThumbnailCard's mouse handlers). Right/middle clicks and anything that
+    isn't a plain left-button press still pass through untouched, so
+    middle-button autopan (see _AutopanScrollArea) keeps working."""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 # ---------------------------------------------------------------------------
 # One folder header, or (nested under it) one recursive sub-header — design
 # ported one-to-one from vael. indexer's FolderSection: a flat QToolButton
@@ -1893,13 +2035,18 @@ class _RubberBandArea(QWidget):
     exactly like clicking directly on a desktop icon doesn't start a
     rubber band in Explorer either. Used for every "background" area
     inside a browser tab that a drag might reasonably start from: the
-    header row's empty stretch, the card grid's empty cells, the space
-    below the last subfolder, and the top-level tab wrapper itself."""
+    header row's empty stretch, the space below the last subfolder, and
+    the top-level tab wrapper itself.
+
+    No visual selection rectangle is drawn — as the drag crosses a folder
+    header it's highlighted directly (via ImageBrowser.set_folder_selection
+    / FolderSection.set_selected), which reads clearer than a rectangle
+    that's mostly just passing over irrelevant blank space anyway."""
 
     def __init__(self, browser, parent=None):
         super().__init__(parent)
         self._browser = browser
-        self._rubber_band = None
+        self._dragging = False
         self._origin_global = None
 
     def mousePressEvent(self, event):
@@ -1907,31 +2054,24 @@ class _RubberBandArea(QWidget):
             self._origin_global = event.globalPosition().toPoint()
             additive = bool(event.modifiers() & Qt.ControlModifier)
             self._browser.begin_rubber_band_drag(additive)
-            self._rubber_band = QRubberBand(QRubberBand.Rectangle, self)
-            self._rubber_band.setGeometry(QRect(event.position().toPoint(), QSize()))
-            self._rubber_band.show()
+            self._dragging = True
             self.grabMouse()
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._rubber_band is not None:
+        if self._dragging:
             now_global = event.globalPosition().toPoint()
-            local_now = self.mapFromGlobal(now_global)
-            local_origin = self.mapFromGlobal(self._origin_global)
-            self._rubber_band.setGeometry(QRect(local_origin, local_now).normalized())
             self._browser.update_rubber_band_drag(QRect(self._origin_global, now_global).normalized())
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._rubber_band is not None:
+        if self._dragging:
             self.releaseMouse()
-            self._rubber_band.hide()
-            self._rubber_band.deleteLater()
-            self._rubber_band = None
+            self._dragging = False
             self._browser.end_rubber_band_drag()
             event.accept()
             return
@@ -2033,7 +2173,16 @@ class FolderSection(QWidget):
         body_lay.setContentsMargins(indent + 8, 4, 4, 6)
         body_lay.setSpacing(6)
 
-        self.card_widget = _RubberBandArea(browser)
+        # _InertMouseArea (not plain QWidget, not _RubberBandArea) — this
+        # holds the actual thumbnail cards of an *open* folder. When a
+        # folder is open the user's blank-space click-drag here is
+        # virtually always an attempt to grab an image and drag it down to
+        # the input roster, not to rubber-band-select folder headers, so
+        # this area deliberately doesn't participate in folder selection at
+        # all: presses on blank space here are swallowed and do nothing,
+        # rather than bubbling up to the header's rubber-band area, leaving
+        # ThumbnailCard's own drag handling untouched.
+        self.card_widget = _InertMouseArea()
         self.card_widget.setObjectName("cardGrid")
         self.card_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.card_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2459,6 +2608,89 @@ class ImgViewerOverlay(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Dimming overlay shown while a "Load Selected Folders" bulk scan is
+# running, replacing the old thin status row that used to sit above the
+# tabs. Darkens the whole browser, centers a determinate progress bar
+# above a bold "done / total" count, the descriptive status text below
+# it (with real line breaks), and a Cancel button underneath.
+# ---------------------------------------------------------------------------
+class _BulkLoadOverlay(QWidget):
+    def __init__(self, parent, on_cancel):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.hide()
+
+        self._panel = QWidget(self)
+        self._panel.setObjectName("bulkLoadPanel")
+        panel_lay = QVBoxLayout(self._panel)
+        panel_lay.setContentsMargins(30, 22, 30, 22)
+        panel_lay.setSpacing(10)
+
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bulkLoadProgress")
+        self.progress.setFixedWidth(280)
+        self.progress.setFixedHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)
+        panel_lay.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Bold/bright "[done / total]" readout — deliberately its own,
+        # more prominent label sitting at the very top of the text block.
+        self.count_lbl = QLabel("")
+        self.count_lbl.setObjectName("bulkLoadCount")
+        self.count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        panel_lay.addWidget(self.count_lbl)
+
+        self.detail_lbl = QLabel("")
+        self.detail_lbl.setObjectName("bulkLoadDetail")
+        self.detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_lbl.setWordWrap(True)
+        panel_lay.addWidget(self.detail_lbl)
+
+        self.cancel_btn = QToolButton()
+        self.cancel_btn.setObjectName("iconButton")
+        self.cancel_btn.setText("Cancel load")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(on_cancel)
+        panel_lay.addWidget(self.cancel_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+
+    def set_progress(self, done, total, detail_text):
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(done, total))
+            self.count_lbl.setText(f"{done} / {total}")
+            self.count_lbl.show()
+        else:
+            self.progress.setRange(0, 0)
+            self.count_lbl.hide()
+        self.detail_lbl.setText(detail_text)
+        self._place_panel()
+
+    def show_overlay(self):
+        self.resize(self.parent().size())
+        self._place_panel()
+        self.show()
+        self.raise_()
+
+    def hide_overlay(self):
+        self.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_panel()
+
+    def _place_panel(self):
+        self._panel.adjustSize()
+        pw, ph = self._panel.width(), self._panel.height()
+        self._panel.move((self.width() - pw) // 2, (self.height() - ph) // 2)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 140))
+        p.end()
+
+
+# ---------------------------------------------------------------------------
 # Center — Image Browser. A single, persistent, global instance shared by
 # every workflow: one tab per configured top-level folder (always fully
 # recursive), lazy scanning off the UI thread, and an in-memory-only
@@ -2499,56 +2731,45 @@ class ImageBrowser(QWidget):
         self.tabs.setDocumentMode(True)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        # Status bar: a permanent row that sits above the tab strip / empty
+        # hint and is NEVER hidden, even when there are zero folders
+        # configured (i.e. app started from a blank config). It used to be
+        # a corner widget on the QTabWidget itself, but that widget gets
+        # hidden along with the tabs when the folder list is empty --
+        # which silently took the Settings button with it. Settings must
+        # always be reachable, so it lives here instead, independent of
+        # whatever the tabs/empty-hint stack below is doing.
+        status_bar = QWidget()
+        status_bar.setObjectName("browserStatusBar")
+        status_lay = QHBoxLayout(status_bar)
+        status_lay.setContentsMargins(0, 0, 2, 0)
+        status_lay.setSpacing(2)
+        status_lay.addStretch(1)
+
         self.settings_btn = QToolButton()
         self.settings_btn.setObjectName("browserSettingsBtn")
-        self.settings_btn.setText("\u2699")
+        self.settings_btn.setIcon(_make_gear_icon())
+        self.settings_btn.setIconSize(QSize(14, 14))
         self.settings_btn.setToolTip("Settings")
         self.settings_btn.setCursor(Qt.PointingHandCursor)
-        self.settings_btn.setFixedSize(24, 24)
+        self.settings_btn.setFixedSize(22, 22)
         self.settings_btn.clicked.connect(self.main_window.open_settings)
-        self.tabs.setCornerWidget(self.settings_btn, Qt.Corner.TopLeftCorner)
+        status_lay.addWidget(self.settings_btn)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(6, 4, 6, 0)
-
-        # Non-blocking status readout for "Load Selected Folders" (bulk
-        # background scan + thumbnail preload) — hidden until one starts.
-        # Reuses the same indeterminate-QProgressBar "busy" look already
-        # used for the workflow run/queue state (RosterBar.progress) so the
-        # loading affordance is consistent across the app.
-        self.bulk_status_lbl = QLabel("")
-        self.bulk_status_lbl.setObjectName("hint")
-        self.bulk_status_lbl.hide()
-        top_row.addWidget(self.bulk_status_lbl)
-
-        self.bulk_progress = QProgressBar()
-        self.bulk_progress.setMaximumHeight(6)
-        self.bulk_progress.setMaximumWidth(90)
-        self.bulk_progress.setTextVisible(False)
-        self.bulk_progress.setRange(0, 0)
-        self.bulk_progress.hide()
-        top_row.addWidget(self.bulk_progress)
-
-        self.bulk_cancel_btn = QToolButton()
-        self.bulk_cancel_btn.setObjectName("iconButton")
-        self.bulk_cancel_btn.setText("Cancel load")
-        self.bulk_cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.bulk_cancel_btn.setToolTip("Stop scanning/loading the selected folders")
-        self.bulk_cancel_btn.clicked.connect(self.bulk_loader.cancel)
-        self.bulk_cancel_btn.hide()
-        top_row.addWidget(self.bulk_cancel_btn)
-
-        top_row.addStretch(1)
         self.restore_hidden_btn = QToolButton()
         self.restore_hidden_btn.setObjectName("iconButton")
         self.restore_hidden_btn.setText("\u21bb")
         self.restore_hidden_btn.setPopupMode(QToolButton.InstantPopup)
         self.restore_hidden_btn.setCursor(Qt.PointingHandCursor)
         self.restore_hidden_btn.hide()
-        top_row.addWidget(self.restore_hidden_btn)
-        layout.addLayout(top_row)
+        status_lay.addWidget(self.restore_hidden_btn)
 
+        layout.addWidget(status_bar, 0)
         layout.addWidget(self.tabs, 1)
+
+        # Dimming overlay for "Load Selected Folders" bulk scans, in place
+        # of the old thin status row above the tabs.
+        self.bulk_overlay = _BulkLoadOverlay(self, self.bulk_loader.cancel)
 
         self.empty_hint = QLabel(
             "No folders configured yet.\n"
@@ -2661,24 +2882,20 @@ class ImageBrowser(QWidget):
         self.bulk_loader.start(paths)
 
     def _on_bulk_load_started(self):
-        self.bulk_status_lbl.show()
-        self.bulk_progress.show()
-        self.bulk_cancel_btn.show()
+        self.bulk_overlay.show_overlay()
 
-    def _on_bulk_load_status(self, text):
-        self.bulk_status_lbl.setText(text)
-        self.bulk_status_lbl.show()
+    def _on_bulk_load_status(self, done, total, text):
+        self.bulk_overlay.set_progress(done, total, text)
 
     def _on_bulk_load_finished(self):
-        self.bulk_progress.hide()
-        self.bulk_cancel_btn.hide()
         # Leave the summary text ("Loaded N folders, M images...") up for a
-        # few seconds so the user actually sees it, then quietly clear it.
-        QTimer.singleShot(6000, self._hide_bulk_status_if_idle)
+        # few seconds so the user actually sees it, then quietly dismiss
+        # the overlay.
+        QTimer.singleShot(2500, self._hide_bulk_status_if_idle)
 
     def _hide_bulk_status_if_idle(self):
         if not self.bulk_loader.active:
-            self.bulk_status_lbl.hide()
+            self.bulk_overlay.hide_overlay()
 
     # -- (re)building tabs from Settings -----------------------------------
     def reload_folders(self):
@@ -2828,6 +3045,11 @@ class ImageBrowser(QWidget):
             "active_tab": self._current_tab_path(),
         }
         self.main_window.persist_all()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.bulk_overlay.isVisible():
+            self.bulk_overlay.resize(self.size())
 
 
 # ---------------------------------------------------------------------------
@@ -3030,6 +3252,7 @@ class RosterBar(QWidget):
     def _on_param_changed(self, key, value):
         if self.state is not None:
             self.state.param_values[key] = value
+            self.main_window.persist_all()
 
     # -- roster interactions -------------------------------------------
     def _on_arm_toggled(self, index):
@@ -3737,6 +3960,36 @@ class SettingsDialog(QDialog):
 # Window chrome — vael.'s shared frameless title bar (copied from vael.
 # indexer so every app in the vael. product line looks/behaves the same).
 # ---------------------------------------------------------------------------
+def _make_gear_icon(color: str = "#b4b4b4", size: int = 14) -> QIcon:
+    """Hand-draw a small, simple line-art gear/cog icon for the Settings
+    button, replacing the old emoji glyph so it matches the rest of the
+    app's minimal, monochrome icon style."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.3)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    cx = cy = size / 2
+    r_outer = size / 2 - 1.6
+    r_inner = size / 2 - 3.8
+    hole_r = size * 0.16
+    p.drawEllipse(QPointF(cx, cy), hole_r, hole_r)
+    p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
+    teeth = 6
+    for i in range(teeth):
+        angle = (2 * math.pi / teeth) * i
+        x1 = cx + r_inner * math.cos(angle)
+        y1 = cy + r_inner * math.sin(angle)
+        x2 = cx + r_outer * math.cos(angle)
+        y2 = cy + r_outer * math.sin(angle)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    p.end()
+    return QIcon(pm)
+
+
 def _make_win_icon(kind: str, color: str = "#b4b4b4", size: int = 10) -> QIcon:
     """Hand-draw a small crisp icon for the maximize/restore window button."""
     pm = QPixmap(size, size)
@@ -3842,6 +4095,68 @@ class _TitleBar(QWidget):
 # Notifies MainWindow when resized so both overlay sidebars (workflows on
 # the left, outputs/queue on the right) can be repositioned to match.
 # ---------------------------------------------------------------------------
+class _CenterSplitterHandle(QSplitterHandle):
+    """Replaces the old thick, fully-colored splitter bar between the
+    Image Browser and the Input Roster with a slim, mostly-invisible
+    strip that only shows three short horizontal "grip" lines in the
+    middle -- and only responds to a drag that actually starts on that
+    small grip area, so the rest of the handle's width doesn't
+    accidentally resize things."""
+
+    GRIP_W = 26
+    GRIP_HIT_W = 40
+    GRIP_HIT_H = 14
+
+    def _grip_rect(self):
+        r = self.rect()
+        return QRect(
+            r.center().x() - self.GRIP_HIT_W // 2,
+            r.center().y() - self.GRIP_HIT_H // 2,
+            self.GRIP_HIT_W, self.GRIP_HIT_H,
+        )
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        hovered = self._grip_rect().contains(self.mapFromGlobal(self.cursor().pos()))
+        color = QColor("#00d4a0") if hovered else QColor(255, 255, 255, 90)
+        pen = QPen(color)
+        pen.setWidth(1)
+        p.setPen(pen)
+        cx, cy = self.rect().center().x(), self.rect().center().y()
+        half = self.GRIP_W // 2
+        for dy in (-3, 0, 3):
+            p.drawLine(cx - half, cy + dy, cx + half, cy + dy)
+        p.end()
+
+    def mousePressEvent(self, event):
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self._grip_rect().contains(pos):
+            super().mousePressEvent(event)
+        else:
+            event.ignore()
+
+    def mouseMoveEvent(self, event):
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+
+class _CenterSplitter(QSplitter):
+    """Vertical splitter between the Image Browser and Input Roster, using
+    _CenterSplitterHandle instead of the default full-width drag bar."""
+
+    def createHandle(self):
+        return _CenterSplitterHandle(self.orientation(), self)
+
+
 class CenterContainer(QWidget):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -4108,35 +4423,32 @@ class WorkflowSidebar(QWidget):
 # collapsed (spec 2.1).
 # ---------------------------------------------------------------------------
 class _WorkflowEdgeTab(QWidget):
+    """The open/close pill for the left (Workflows) sidebar. This widget
+    *is* the pill -- fixed to its visible size -- rather than a full-
+    height strip with the pill floating inside it, so only the pill's own
+    footprint is clickable and the rest of the edge column is left
+    completely alone for whatever's underneath (the image browser) to
+    receive clicks normally instead of the sidebar toggle stealing them."""
+
+    WIDTH = 14
+    HEIGHT = 46
+
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
-        self.setObjectName("edgeTab")
-        self.setFixedWidth(14)
+        self.setObjectName("edgeTabPill")
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Workflows")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addStretch(1)
-        # The pill is the visible "grab me" affordance; the rest of this
-        # 14px strip stays transparent but still clickable (see
-        # mousePressEvent), so the full height of the edge remains a valid
-        # target while only the pill itself is drawn -- matching the
-        # reference design's rounded handle sticking out of the sidebar.
-        pill_wrap = QWidget()
-        pill_wrap.setFixedSize(14, 46)
-        pill_wrap.setObjectName("edgeTabPill")
-        pill_wrap.setStyleSheet(
+        self.setStyleSheet(
             "border-top-right-radius: 8px; border-bottom-right-radius: 8px; border-left: none;"
         )
-        pw_lay = QVBoxLayout(pill_wrap)
-        pw_lay.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         self._chevron = QLabel("\u203a")
         self._chevron.setObjectName("edgeTabChevron")
         self._chevron.setAlignment(Qt.AlignCenter)
-        pw_lay.addWidget(self._chevron)
-        layout.addWidget(pill_wrap, 0, Qt.AlignHCenter)
-        layout.addStretch(1)
+        layout.addWidget(self._chevron)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4154,30 +4466,29 @@ class _WorkflowEdgeTab(QWidget):
 # shows › (push right to close).
 # ---------------------------------------------------------------------------
 class _OutputsEdgeTab(QWidget):
+    """Mirror image of _WorkflowEdgeTab for the right (Outputs / Queue)
+    sidebar -- same "widget IS the pill, nothing more" sizing so it never
+    overlaps app content above/below the pill itself."""
+
+    WIDTH = EDGE_TAB_WIDTH
+    HEIGHT = 46
+
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
-        self.setObjectName("outputsEdgeTab")
-        self.setFixedWidth(EDGE_TAB_WIDTH)
+        self.setObjectName("edgeTabPill")
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Outputs / Queue")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addStretch(1)
-        pill_wrap = QWidget()
-        pill_wrap.setFixedSize(14, 46)
-        pill_wrap.setObjectName("edgeTabPill")
-        pill_wrap.setStyleSheet(
+        self.setStyleSheet(
             "border-top-left-radius: 8px; border-bottom-left-radius: 8px; border-right: none;"
         )
-        pw_lay = QVBoxLayout(pill_wrap)
-        pw_lay.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         self._chevron = QLabel("\u2039")
         self._chevron.setObjectName("edgeTabChevron")
         self._chevron.setAlignment(Qt.AlignCenter)
-        pw_lay.addWidget(self._chevron)
-        layout.addWidget(pill_wrap, 0, Qt.AlignHCenter)
-        layout.addStretch(1)
+        layout.addWidget(self._chevron)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -4213,6 +4524,16 @@ class MainWindow(QMainWindow):
         self.resize(1280, 840)
 
         self.config_data = load_config()
+        self._config_save_failing = False
+        if _LAST_LOAD_WARNING:
+            # Deferred so it pops up once the window is actually on screen,
+            # instead of appearing to block/delay startup before anything
+            # is visible.
+            _warning_text = _LAST_LOAD_WARNING
+            QTimer.singleShot(
+                0,
+                lambda: QMessageBox.warning(self, "Settings couldn't be read", _warning_text),
+            )
         self.server = self.config_data.get("server", DEFAULT_SERVER)
         self.output_dir = self.config_data.get("output_dir", DEFAULT_OUTPUT_DIR)
 
@@ -4236,6 +4557,16 @@ class MainWindow(QMainWindow):
         self.queue_manager = QueueManager(self)
         self.workflow_states = []
         self.active_workflow = None
+        # Guards persist_all() against running before the saved workflow
+        # tabs have actually been loaded into self.workflow_states (see
+        # end of __init__). Several child widgets constructed below --
+        # e.g. ImageBrowser restoring its last-active folder tab -- fire
+        # signals that call persist_all() as a side effect. Without this
+        # guard, that early call would serialize the still-empty
+        # self.workflow_states into config_data["tabs"] and write it to
+        # disk, permanently wiping out the saved tabs before the startup
+        # loop below ever gets a chance to restore them.
+        self._startup_complete = False
 
         # ── Outer shell: custom title bar on top, app content below ───────
         shell = QWidget()
@@ -4319,10 +4650,10 @@ class MainWindow(QMainWindow):
         # The space between the browser and the roster is manually
         # adjustable by dragging the splitter handle between them, and the
         # chosen split is remembered across launches.
-        self.center_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.center_splitter = _CenterSplitter(Qt.Orientation.Vertical)
         self.center_splitter.setObjectName("centerSplitter")
         self.center_splitter.setChildrenCollapsible(False)
-        self.center_splitter.setHandleWidth(6)
+        self.center_splitter.setHandleWidth(10)
         center_lay.addWidget(self.center_splitter, 1)
 
         self.image_browser = ImageBrowser(self)
@@ -4367,6 +4698,10 @@ class MainWindow(QMainWindow):
             self._add_workflow(workflow_data, select=False)
         if self.workflow_states:
             self.workflow_sidebar.list.setCurrentRow(0)
+
+        # Saved tabs are now restored into self.workflow_states -- it's
+        # finally safe to let persist_all() write config_data to disk.
+        self._startup_complete = True
 
         self._setup_hotkeys()
         self._position_sidebar()
@@ -4415,7 +4750,11 @@ class MainWindow(QMainWindow):
         sidebar.setGeometry(x, 0, w, container.height())
         edge = getattr(self, "outputs_edge_tab", None)
         if edge is not None:
-            edge.setGeometry(container.width() - EDGE_TAB_WIDTH, 0, EDGE_TAB_WIDTH, container.height())
+            edge.setGeometry(
+                container.width() - EDGE_TAB_WIDTH,
+                (container.height() - edge.HEIGHT) // 2,
+                edge.WIDTH, edge.HEIGHT,
+            )
             edge.raise_()
 
     def _position_workflow_sidebar(self):
@@ -4433,7 +4772,10 @@ class MainWindow(QMainWindow):
         sidebar.setGeometry(x, 0, w, container.height())
         edge = getattr(self, "workflow_edge_tab", None)
         if edge is not None:
-            edge.setGeometry(0, 0, EDGE_TAB_WIDTH, container.height())
+            edge.setGeometry(
+                0, (container.height() - edge.HEIGHT) // 2,
+                edge.WIDTH, edge.HEIGHT,
+            )
             edge.raise_()
 
     # -- workflow bookkeeping -------------------------------------------
@@ -4574,10 +4916,38 @@ class MainWindow(QMainWindow):
 
     # -- persistence -------------------------------------------------------
     def persist_all(self):
+        if not self._startup_complete:
+            # Something fired during widget construction, before saved
+            # tabs were restored into self.workflow_states -- writing now
+            # would serialize an empty/partial state and clobber the real
+            # data still sitting in config_data["tabs"] from disk. Once
+            # startup finishes it flips this flag and calls persist_all()
+            # itself if anything needs flushing.
+            return
         self.config_data["tabs"] = [s.to_dict() for s in self.workflow_states]
         self.config_data["server"] = self.server
         self.config_data["output_dir"] = self.output_dir
-        save_config(self.config_data)
+        ok = save_config(self.config_data)
+        if not ok:
+            # Only pop the warning on the *transition* into a failing state
+            # (not on every single save attempt, which would otherwise mean
+            # a message box on every click while e.g. a sync tool is
+            # temporarily locking the file) -- but never fail silently.
+            if not self._config_save_failing:
+                self._config_save_failing = True
+                QMessageBox.warning(
+                    self,
+                    "Couldn't save settings",
+                    "vael. cover couldn't write workflows_config.json, so your "
+                    "workflows and other settings are NOT being saved right now.\n\n"
+                    f"Reason: {_LAST_SAVE_ERROR}\n\n"
+                    "This is usually a permissions problem, a read-only location, "
+                    "or a sync tool (e.g. OneDrive) locking the file. Once that's "
+                    "resolved, saving will resume automatically -- this warning "
+                    "won't be shown again until it fails once more.",
+                )
+        elif self._config_save_failing:
+            self._config_save_failing = False
 
     # -- frameless window chrome (copied from vael. indexer) ───────────────
     def nativeEvent(self, eventType, message):
