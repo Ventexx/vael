@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame, QListWidget, QListWidgetItem, QListView, QStyledItemDelegate,
     QStyle, QProgressBar, QToolButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
-    QSizePolicy, QStackedWidget, QMenu, QCheckBox
+    QSizePolicy, QStackedWidget, QMenu, QCheckBox,
+    QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem,
 )
 
 # ===========================================================================
@@ -72,10 +73,6 @@ DEFAULTS = {
     # skipped during scanning entirely (not shown, not recursed into).
     # [{"pattern": str, "mode": "starts_with" | "contains"}, ...]
     "ignore_folder_patterns": [],
-    "image_browser_state": {
-        "expanded_headers": [],          # folder paths (any depth) expanded last session
-        "active_tab": None,              # top-level folder path of the last active tab
-    },
     # Height (in px) of the bottom Input Roster pane within the center
     # splitter; the Image Browser gets the rest. None until the user drags
     # the handle for the first time, at which point it's remembered.
@@ -514,14 +511,33 @@ QLabel#rosterIconCanvas {
     font-size: 16px;
     font-weight: 300;
 }
+/* Status text along the bottom strip of free space in the roster's
+   viewport (see RosterBar._position_status_label) -- plain single-line
+   text, no button/pill treatment. */
+QLabel#rosterStatusLabel {
+    background: transparent;
+    border: none;
+    color: rgba(200,200,200,0.45);
+    font-size: 11px;
+}
+QLabel#rosterStatusLabel[error="true"] {
+    color: rgba(224,110,100,0.85);
+}
+/* The run indicator itself (see _RunIndicator) is entirely custom-painted,
+   not stylesheet-driven -- no QSS rule needed here. */
 
 /* ---- Center — Image Browser ---- */
 #imageBrowserPanel {
     background-color: #0d0d0d;
 }
 QTabWidget#browserTabs::pane {
+    /* No border here on purpose -- the tab strip itself (below) already
+       has its own bordered pill box. A border-top on the pane used to
+       draw a second, unrelated straight line spanning the *entire* width
+       of the panel (running clean through/above the settings icon too),
+       independent of the tab strip's own rounded box, which read as a
+       stray bar sitting above everything. */
     border: none;
-    border-top: 1px solid rgba(255,255,255,0.14);
     top: -1px;
 }
 /* Slim bordered pill for the tab strip itself — mirrors the indexer
@@ -569,11 +585,13 @@ QToolButton#browserSettingsBtn:pressed {
     background: rgba(255,255,255,0.06);
 }
 
-/* ---- Bulk "Load Selected Folders" dimming overlay ---- */
+/* ---- Bulk "Load Selected Folders" overlay ----
+   No panel box on purpose -- the blurred/dimmed backdrop itself (painted
+   in _BulkLoadOverlay.paintEvent) already carries the "held up" meaning,
+   so only the bare text/progress/button float in the middle. */
 #bulkLoadPanel {
-    background-color: #161616;
-    border: 1px solid rgba(255,255,255,0.16);
-    border-radius: 10px;
+    background: transparent;
+    border: none;
 }
 QProgressBar#bulkLoadProgress {
     background-color: rgba(255,255,255,0.10);
@@ -665,10 +683,15 @@ QLabel#headerCount[state="error"] {
     border-radius: 7px;
 }
 
-/* ---- Bottom bar — Input Roster ---- */
+/* ---- Bottom bar — Input Roster ----
+   The actual depth cue is a real cast shadow (QGraphicsDropShadowEffect,
+   see RosterBar.__init__) bleeding up from this widget onto the browser
+   above it. Here we just add a crisp, slightly brighter top edge -- a
+   thin "lip" highlight where the raised slab would catch light -- rather
+   than stacking another gradient on top of the shadow. */
 #rosterBar {
     background-color: #101010;
-    border-top: 1px solid rgba(255,255,255,0.16);
+    border-top: 1px solid rgba(255,255,255,0.28);
 }
 
 /* ---- Splitter handle (Image Browser / Input Roster) ----
@@ -894,7 +917,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QEvent, QPoint, QPointF, QRect,
-    QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool, QTimer,
+    QRectF, QPropertyAnimation, QEasingCurve, QRunnable, QThreadPool, QTimer,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
@@ -935,6 +958,9 @@ HOTKEYS = [
 # ---------------------------------------------------------------------------
 # Workflow execution (runs on a background thread)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Workflow execution (runs on a background thread)
+# ---------------------------------------------------------------------------
 def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, param_values):
     api = ComfyAPI(server)
     wf = copy.deepcopy(raw_workflow)
@@ -964,21 +990,20 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
         if status.get("status_str") == "error":
             raise RuntimeError(f"ComfyUI reported an error: {status}")
         if status.get("completed"):
+            # The app doesn't download or save the result itself -- the
+            # workflow's own Save Image node is what persists the file (see
+            # the note on MainWindow.output_dir). All that matters here is
+            # confirming the run actually produced an image, so a failed
+            # or misconfigured workflow doesn't silently report "Done".
             outputs = entry.get("outputs", {})
-            image_info = None
-            for node_out in outputs.values():
-                if node_out.get("images"):
-                    image_info = node_out["images"][0]
-                    break
-            if image_info is None:
+            has_image = any(node_out.get("images") for node_out in outputs.values())
+            if not has_image:
                 raise RuntimeError("Workflow finished but produced no image output.")
-            return api.get_image_bytes(
-                image_info["filename"], image_info.get("subfolder", ""), image_info.get("type", "output")
-            )
+            return
 
 
 class RunWorker(QObject):
-    finished = Signal(bytes)
+    finished = Signal()
     error = Signal(str)
 
     def __init__(self, server, raw_workflow, image_map, optional_node_id, param_values):
@@ -991,11 +1016,11 @@ class RunWorker(QObject):
 
     def run(self):
         try:
-            data = execute_workflow_sync(
+            execute_workflow_sync(
                 self.server, self.raw_workflow, self.image_map,
                 self.optional_node_id, self.param_values,
             )
-            self.finished.emit(data)
+            self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1337,11 +1362,11 @@ class WorkflowState(QObject):
         self._worker.error.connect(self._thread.quit)
         self._thread.start()
 
-    def _on_run_finished(self, data):
+    def _on_run_finished(self):
         self.running = False
         self.runStateChanged.emit(False)
         self._set_status("Done.")
-        self.main_window.save_output(self.name, data)
+        self.main_window.outputs_tab.refresh()
 
     def _on_run_error(self, message):
         self.running = False
@@ -1855,7 +1880,6 @@ class ThumbnailCard(QWidget):
         self.filepath = filepath
         self.setFixedSize(self.CARD_W, self.CARD_H)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip(Path(filepath).name)
         self._hovered = False
         self._drag_start_pos = None
         self._image_loaded = False
@@ -2608,16 +2632,20 @@ class ImgViewerOverlay(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Dimming overlay shown while a "Load Selected Folders" bulk scan is
-# running, replacing the old thin status row that used to sit above the
-# tabs. Darkens the whole browser, centers a determinate progress bar
-# above a bold "done / total" count, the descriptive status text below
-# it (with real line breaks), and a Cancel button underneath.
+# Blur overlay shown while a "Load Selected Folders" bulk scan is running.
+# Rather than a boxed panel sitting on a dimmed backdrop, this blurs a
+# snapshot of the *entire app* (sidebars, roster, everything -- it's
+# parented to the app's content root, not just the image browser) to read
+# as "the whole UI is held up right now", and floats only bare text, a
+# progress bar, and a Cancel button in the middle -- no panel chrome.
 # ---------------------------------------------------------------------------
 class _BulkLoadOverlay(QWidget):
+    BLUR_RADIUS = 22
+
     def __init__(self, parent, on_cancel):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._blurred_bg = None
         self.hide()
 
         self._panel = QWidget(self)
@@ -2668,12 +2696,14 @@ class _BulkLoadOverlay(QWidget):
 
     def show_overlay(self):
         self.resize(self.parent().size())
+        self._capture_blurred_background()
         self._place_panel()
         self.show()
         self.raise_()
 
     def hide_overlay(self):
         self.hide()
+        self._blurred_bg = None
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2684,9 +2714,34 @@ class _BulkLoadOverlay(QWidget):
         pw, ph = self._panel.width(), self._panel.height()
         self._panel.move((self.width() - pw) // 2, (self.height() - ph) // 2)
 
+    def _capture_blurred_background(self):
+        """Grab whatever's currently behind this overlay (the whole app
+        content) and blur it, so the backdrop itself reads as held-up
+        rather than needing a separate panel to carry that meaning."""
+        self.hide()
+        snapshot = self.parent().grab()
+        self.show()
+        if snapshot.isNull():
+            self._blurred_bg = None
+            return
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(snapshot)
+        blur = QGraphicsBlurEffect()
+        blur.setBlurRadius(self.BLUR_RADIUS)
+        item.setGraphicsEffect(blur)
+        scene.addItem(item)
+        result = QPixmap(snapshot.size())
+        result.fill(Qt.transparent)
+        p = QPainter(result)
+        scene.render(p)
+        p.end()
+        self._blurred_bg = result
+
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 140))
+        if self._blurred_bg is not None:
+            p.drawPixmap(0, 0, self._blurred_bg)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 110))
         p.end()
 
 
@@ -2707,9 +2762,14 @@ class ImageBrowser(QWidget):
         self.thread_pool = QThreadPool.globalInstance()
         self._closed_this_session = set()   # paths ×'d away — in-memory only, cleared on relaunch
 
-        state = main_window.config_data.get("image_browser_state") or {}
-        self.saved_expanded_paths = set(state.get("expanded_headers") or [])
-        self._saved_active_tab = state.get("active_tab")
+        # Deliberately never loaded from (or saved to) config_data: the
+        # explorer always starts on the first tab with nothing expanded,
+        # regardless of whatever state it was left in last session. These
+        # still track expand/tab state during the current run (e.g. so
+        # reload_folders() can keep the same tab open after an in-session
+        # Settings change), they just don't persist across restarts.
+        self.saved_expanded_paths = set()
+        self._saved_active_tab = None
         self._top_sections = []   # top-level FolderSection per tab index, in tab order
 
         # -- multi-select folders (ctrl+click / rubber-band drag) + bulk
@@ -2729,33 +2789,35 @@ class ImageBrowser(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("browserTabs")
         self.tabs.setDocumentMode(True)
+        # Qt's Fusion style draws its own native "tab bar base" line under
+        # the tab bar regardless of any ::pane border in the stylesheet --
+        # that's the stray straight line that used to run the full width
+        # of the panel above the tab strip (and the settings icon), with
+        # hard corners that didn't match the tab strip's own rounded pill.
+        # Turning it off leaves only our own styled pill border.
+        self.tabs.tabBar().setDrawBase(False)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
-        # Status bar: a permanent row that sits above the tab strip / empty
-        # hint and is NEVER hidden, even when there are zero folders
-        # configured (i.e. app started from a blank config). It used to be
-        # a corner widget on the QTabWidget itself, but that widget gets
-        # hidden along with the tabs when the folder list is empty --
-        # which silently took the Settings button with it. Settings must
-        # always be reachable, so it lives here instead, independent of
-        # whatever the tabs/empty-hint stack below is doing.
-        status_bar = QWidget()
+        # Settings row: floats *over* the top-right corner of the tab strip
+        # instead of occupying its own full-width row above it -- that used
+        # to leave a whole empty bar sitting on top of the tabs. It's a
+        # free-floating child of the ImageBrowser itself (positioned/raised
+        # in resizeEvent / showEvent below) so it stays reachable even when
+        # the tabs/empty-hint stack underneath has zero folders configured
+        # and hides itself.
+        status_bar = QWidget(self)
         status_bar.setObjectName("browserStatusBar")
         status_lay = QHBoxLayout(status_bar)
-        status_lay.setContentsMargins(0, 0, 2, 0)
+        # A small, deliberate gap from the true right edge -- enough that
+        # the icon doesn't feel glued to the corner, without stranding it
+        # out in empty space (that was the overcorrection last time: a
+        # full icon-width gap read as too much on its own).
+        status_lay.setContentsMargins(0, 0, 8, 0)
         status_lay.setSpacing(2)
-        status_lay.addStretch(1)
 
-        self.settings_btn = QToolButton()
-        self.settings_btn.setObjectName("browserSettingsBtn")
-        self.settings_btn.setIcon(_make_gear_icon())
-        self.settings_btn.setIconSize(QSize(14, 14))
-        self.settings_btn.setToolTip("Settings")
-        self.settings_btn.setCursor(Qt.PointingHandCursor)
-        self.settings_btn.setFixedSize(22, 22)
-        self.settings_btn.clicked.connect(self.main_window.open_settings)
-        status_lay.addWidget(self.settings_btn)
-
+        # The Settings button used to live here; it now lives at the
+        # bottom-left of the workflow sidebar instead (see WorkflowSidebar),
+        # so this row only houses the restore-hidden-folders button now.
         self.restore_hidden_btn = QToolButton()
         self.restore_hidden_btn.setObjectName("iconButton")
         self.restore_hidden_btn.setText("\u21bb")
@@ -2764,22 +2826,29 @@ class ImageBrowser(QWidget):
         self.restore_hidden_btn.hide()
         status_lay.addWidget(self.restore_hidden_btn)
 
-        layout.addWidget(status_bar, 0)
+        self._status_bar = status_bar
+        status_bar.adjustSize()
+        status_bar.raise_()
+
         layout.addWidget(self.tabs, 1)
 
-        # Dimming overlay for "Load Selected Folders" bulk scans, in place
-        # of the old thin status row above the tabs.
-        self.bulk_overlay = _BulkLoadOverlay(self, self.bulk_loader.cancel)
+        # Dimming/blur overlay for "Load Selected Folders" bulk scans.
+        # Parented to the app's content root (not just this panel) so the
+        # blur covers the whole app -- sidebars, roster, everything --
+        # rather than just the image browser's own rectangle.
+        self.bulk_overlay = _BulkLoadOverlay(main_window._content_root, self.bulk_loader.cancel)
 
         self.empty_hint = QLabel(
             "No folders configured yet.\n"
-            "Open Settings \u2192 Image Selection to add one."
+            "Open the \u2699 Settings button (bottom-left of the workflow "
+            "sidebar) \u2192 Image Selection to add one."
         )
         self.empty_hint.setObjectName("hint")
         self.empty_hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.empty_hint, 1)
 
         self.reload_folders()
+        self._position_status_bar()
 
     def ignore_folder_patterns(self):
         return self.main_window.config_data.get("ignore_folder_patterns", []) or []
@@ -2962,7 +3031,8 @@ class ImageBrowser(QWidget):
             else:
                 self.empty_hint.setText(
                     "No folders configured yet.\n"
-                    "Open Settings \u2192 Image Selection to add one."
+                    "Open the \u2699 Settings button (bottom-left of the "
+                    "workflow sidebar) \u2192 Image Selection to add one."
                 )
 
     def _refresh_restore_hidden_button(self):
@@ -3006,7 +3076,6 @@ class ImageBrowser(QWidget):
                 section.deleteLater()
                 break
         self._update_empty_state()
-        self._persist_state()
         self._refresh_restore_hidden_button()
 
     def _purge_section_registry(self, root_path):
@@ -3026,7 +3095,6 @@ class ImageBrowser(QWidget):
             self.saved_expanded_paths.add(path)
         else:
             self.saved_expanded_paths.discard(path)
-        self._persist_state()
 
     def _current_tab_path(self):
         idx = self.tabs.currentIndex()
@@ -3037,19 +3105,20 @@ class ImageBrowser(QWidget):
 
     def _on_tab_changed(self, index):
         self._trigger_rough_pass_for_tab(index)
-        self._persist_state()
-
-    def _persist_state(self):
-        self.main_window.config_data["image_browser_state"] = {
-            "expanded_headers": sorted(self.saved_expanded_paths),
-            "active_tab": self._current_tab_path(),
-        }
-        self.main_window.persist_all()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.bulk_overlay.isVisible():
-            self.bulk_overlay.resize(self.size())
+        self._position_status_bar()
+
+    def _position_status_bar(self):
+        """Float the settings row over the top-right corner of the tab
+        strip instead of it occupying a separate row of its own."""
+        bar = getattr(self, "_status_bar", None)
+        if bar is None:
+            return
+        bar.adjustSize()
+        bar.move(max(0, self.width() - bar.width()), 0)
+        bar.raise_()
 
 
 # ---------------------------------------------------------------------------
@@ -3069,6 +3138,61 @@ class _ResizingScrollArea(QScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.resized.emit()
+
+
+# ---------------------------------------------------------------------------
+# Small "workflow is running" indicator for RosterBar. Deliberately not a
+# native QProgressBar in indeterminate mode -- that animates far too fast
+# and looks like a blocky, jittery marquee at this small a size. Instead a
+# single soft pill glides smoothly back and forth along a slim track, at a
+# slow, sine-eased pace, driven by a plain QTimer rather than
+# QPropertyAnimation so there's no extra Property boilerplate for one
+# self-contained decorative widget.
+# ---------------------------------------------------------------------------
+class _RunIndicator(QWidget):
+    PERIOD_MS = 1600   # one full there-and-back glide
+    FRAME_MS = 33      # ~30fps -- plenty smooth for a widget this small
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(28, 8)
+        self._elapsed_ms = 0.0
+        self._phase = 0.0  # 0..1, eased position of the pill along the track
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.FRAME_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        self._elapsed_ms = 0.0
+        self._phase = 0.0
+        self._timer.start()
+        self.update()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _tick(self):
+        self._elapsed_ms = (self._elapsed_ms + self.FRAME_MS) % self.PERIOD_MS
+        frac = self._elapsed_ms / self.PERIOD_MS
+        # Smooth sinusoidal ping-pong: 0 at the start, 1 at the midpoint,
+        # back to 0 at the end -- no snap, no sudden reversal.
+        self._phase = (1 - math.cos(2 * math.pi * frac)) / 2
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = self.rect()
+        radius = r.height() / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 22))
+        p.drawRoundedRect(r, radius, radius)
+
+        pill_w = max(6.0, r.width() * 0.4)
+        travel = r.width() - pill_w
+        x = travel * self._phase
+        p.setBrush(QColor(0, 212, 160))
+        p.drawRoundedRect(QRectF(x, 0, pill_w, r.height()), radius, radius)
 
 
 class RosterBar(QWidget):
@@ -3092,9 +3216,9 @@ class RosterBar(QWidget):
         outer.setSpacing(6)
 
         toolbar = QHBoxLayout()
-        self.status_label = QLabel("No workflow selected.")
-        self.status_label.setObjectName("hint")
-        toolbar.addWidget(self.status_label)
+        roster_label = QLabel("INPUT ROSTER")
+        roster_label.setObjectName("hint")
+        toolbar.addWidget(roster_label)
         toolbar.addStretch(1)
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setObjectName("dangerButton")
@@ -3109,22 +3233,11 @@ class RosterBar(QWidget):
         toolbar.addWidget(self.run_btn)
         outer.addLayout(toolbar)
 
-        self.progress = QProgressBar()
-        self.progress.setMaximumHeight(6)
-        self.progress.setTextVisible(False)
-        self.progress.setRange(0, 0)
-        self.progress.hide()
-        outer.addWidget(self.progress)
-
         self.param_form_widget = QWidget()
         self.param_form = QFormLayout(self.param_form_widget)
         self.param_form.setContentsMargins(0, 4, 0, 4)
         outer.addWidget(self.param_form_widget)
         self.param_form_widget.hide()
-
-        roster_label = QLabel("INPUT ROSTER")
-        roster_label.setObjectName("hint")
-        outer.addWidget(roster_label)
 
         scroll = _ResizingScrollArea()
         scroll.setWidgetResizable(True)
@@ -3136,6 +3249,7 @@ class RosterBar(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.resized.connect(self._sync_icon_size)
+        scroll.resized.connect(self._position_status_label)
         self._roster_scroll = scroll
         self.roster_row_widget = QWidget()
         self.roster_row = QHBoxLayout(self.roster_row_widget)
@@ -3145,7 +3259,31 @@ class RosterBar(QWidget):
         scroll.setWidget(self.roster_row_widget)
         outer.addWidget(scroll, 1)
 
+        # Status text used to sit above the "INPUT ROSTER" header in its
+        # own row; it now spans the free strip of space left below the
+        # image-input icons instead (they cap out at MAX_ICON_SIZE long
+        # before they'd fill a tall bar), right-aligned within it, rather
+        # than costing the bar any extra height of its own.
+        self.status_label = QLabel("No workflow selected.", scroll.viewport())
+        self.status_label.setObjectName("rosterStatusLabel")
+        self.status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.status_label.setWordWrap(False)
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.status_label.adjustSize()
+
+        # A small "running" indicator that only appears while the active
+        # workflow is executing, sitting right after the status text (which
+        # shifts left to make just enough room for it -- see
+        # _position_status_label). Deliberately narrow: just wide enough to
+        # read as motion/activity, not a full-width progress bar of its own.
+        # Custom-painted (see _RunIndicator) rather than a native
+        # indeterminate QProgressBar, which animates too fast/jittery at
+        # this size.
+        self.run_indicator = _RunIndicator(scroll.viewport())
+        self.run_indicator.hide()
+
         self.set_workflow(None)
+        self._position_status_label()
 
     # -- dynamic icon sizing (spec: resizing the bottom bar grows/shrinks
     # the image inputs with it) ------------------------------------------
@@ -3157,6 +3295,38 @@ class RosterBar(QWidget):
         self.icon_size = new_size
         for icon in self.icons:
             icon.set_icon_size(new_size)
+
+    def _position_status_label(self):
+        """Keeps the status text pinned along the bottom strip of free
+        space left below the image-input icons (they cap out at
+        MAX_ICON_SIZE long before filling a tall bar), spanning the full
+        width of the roster's viewport with the text right-aligned within
+        it -- a plain single line, not a floating button/pill.
+
+        While a run is in progress, the run indicator claims a small slice
+        of that same strip on the far right, and the status text's own
+        width is shrunk by just enough to make room for it (plus a small
+        gap) -- reading as the text sliding left to hand off a bit of
+        space, rather than the indicator overlapping it."""
+        if not hasattr(self, "status_label"):
+            return
+        vp = self._roster_scroll.viewport()
+        margin = 8
+        gap = 6
+        height = self.status_label.sizeHint().height()
+        y = vp.height() - height - margin
+        indicator = getattr(self, "run_indicator", None)
+        reserved = (indicator.width() + gap) if (indicator is not None and indicator.isVisible()) else 0
+        self.status_label.setGeometry(
+            margin, y, max(0, vp.width() - 2 * margin - reserved), height
+        )
+        self.status_label.raise_()
+        if indicator is not None:
+            indicator.move(
+                vp.width() - margin - indicator.width(),
+                y + (height - indicator.height()) // 2,
+            )
+            indicator.raise_()
 
     # -- switching the active workflow --------------------------------------
     def set_workflow(self, state):
@@ -3184,12 +3354,14 @@ class RosterBar(QWidget):
         if state is None:
             self.run_btn.setEnabled(False)
             self.status_label.setText("No workflow selected. Add one from the workflows sidebar.")
-            self.status_label.setStyleSheet("")
-            self.progress.hide()
+            self.status_label.setProperty("error", False)
+            self.status_label.style().unpolish(self.status_label)
+            self.status_label.style().polish(self.status_label)
+            self._set_running(False)
         else:
             self.run_btn.setEnabled(not state.running)
             self._on_status_changed(state.status_text, state.status_error)
-            self.progress.setVisible(state.running)
+            self._set_running(state.running)
 
     def _on_slots_rebuilt(self):
         self._rebuild_icons()
@@ -3328,11 +3500,24 @@ class RosterBar(QWidget):
 
     def _on_status_changed(self, text, error):
         self.status_label.setText(text)
-        self.status_label.setStyleSheet("color: rgba(220,140,140,0.9);" if error else "")
+        self.status_label.setProperty("error", bool(error))
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+        self._position_status_label()
 
     def _on_run_state_changed(self, running):
         self.run_btn.setEnabled(not running)
-        self.progress.setVisible(running)
+        self._set_running(running)
+
+    def _set_running(self, running):
+        """Shows/hides the small run indicator next to the status text
+        (see _position_status_label) and immediately repositions both."""
+        self.run_indicator.setVisible(running)
+        if running:
+            self.run_indicator.start()
+        else:
+            self.run_indicator.stop()
+        self._position_status_label()
 
 
 # ---------------------------------------------------------------------------
@@ -3494,9 +3679,8 @@ class QueueManager(QObject):
         self._thread = thread
         self._worker = worker
 
-        def on_finished(data, item=item):
+        def on_finished(item=item):
             item["status"] = "Done"
-            self.main_window.save_output(item["tab_name"], data)
             self.itemFinished.emit(item["id"], True, "Done")
             self.items.remove(item)
             self.queueChanged.emit()
@@ -3724,6 +3908,16 @@ class SettingsDialog(QDialog):
         out_wrap.setLayout(out_row)
         form.addRow("Output folder:", out_wrap)
         layout.addLayout(form)
+
+        out_hint = QLabel(
+            "The app doesn't save images itself -- your workflow's own "
+            "Save Image node is what writes the file to disk. Point this "
+            "at that same folder so the app can list and preview them here "
+            "in the Outputs sidebar."
+        )
+        out_hint.setObjectName("hint")
+        out_hint.setWordWrap(True)
+        layout.addWidget(out_hint)
 
         # -- Image Selection (spec section 4) --------------------------
         img_title = QLabel("Image Selection")
@@ -4107,6 +4301,18 @@ class _CenterSplitterHandle(QSplitterHandle):
     GRIP_HIT_W = 40
     GRIP_HIT_H = 14
 
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        # The cast shadow that used to sit on the roster bar itself now
+        # lives on the drag handle instead, blurring down into the
+        # roster below -- it marks the actual boundary the user drags to
+        # resize, rather than reading as a stray bar of its own.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 200))
+        self.setGraphicsEffect(shadow)
+
     def _grip_rect(self):
         r = self.rect()
         return QRect(
@@ -4240,6 +4446,14 @@ class OutputsSidebar(QWidget):
         content_layout.addWidget(self.outputs_panel)
         layout.addWidget(content, 1)
 
+        # See matching comment in WorkflowSidebar.__init__ -- this one
+        # floats over the content too, mirrored to its left edge.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36)
+        shadow.setOffset(-6, 0)
+        shadow.setColor(QColor(0, 0, 0, 170))
+        self.setGraphicsEffect(shadow)
+
         self.resize(self._width, self.height())
         self.hide()
 
@@ -4273,8 +4487,13 @@ class OutputsSidebar(QWidget):
         if open_:
             self.show()
             self.raise_()
+            # Runs flush to the right edge -- no reserved gap for the edge
+            # tab pill, which stays on top via raise_() below instead of
+            # needing empty space carved out for it. A reserved gap there
+            # let whatever sits behind the sidebar (the tab strip) show
+            # through at that edge even while the sidebar was "open".
             end_rect = QRect(
-                max(0, container.width() - self._width - EDGE_TAB_WIDTH), 0,
+                max(0, container.width() - self._width), 0,
                 self._width, container.height(),
             )
         else:
@@ -4354,9 +4573,34 @@ class WorkflowSidebar(QWidget):
         self.empty_hint.setWordWrap(True)
         content_layout.addWidget(self.empty_hint)
 
+        # Settings lives here now, bottom-left, in the free space under the
+        # workflow list -- same flat icon-button design/height as the "+"
+        # add-workflow button above, just with the gear glyph instead.
+        bottom_row = QHBoxLayout()
+        self.settings_btn = QToolButton()
+        self.settings_btn.setObjectName("iconButton")
+        self.settings_btn.setIcon(_make_gear_icon())
+        self.settings_btn.setIconSize(QSize(14, 14))
+        self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.clicked.connect(main_window._open_settings_from_workflow_sidebar)
+        bottom_row.addWidget(self.settings_btn)
+        bottom_row.addStretch(1)
+        content_layout.addLayout(bottom_row)
+
         layout.addWidget(content, 1)
         self.handle = _SidebarHandle(self, sign=1)
         layout.addWidget(self.handle)
+
+        # This sidebar floats *over* the app content rather than living in
+        # its layout, so a real drop shadow reads correctly here (nothing
+        # else needs to make room for it) -- it's the cue that this panel
+        # is above the rest of the UI, not flush with it.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36)
+        shadow.setOffset(6, 0)
+        shadow.setColor(QColor(0, 0, 0, 170))
+        self.setGraphicsEffect(shadow)
 
         self.resize(self._width, self.height())
         self.hide()
@@ -4398,7 +4642,10 @@ class WorkflowSidebar(QWidget):
         if open_:
             self.show()
             self.raise_()
-            end_rect = QRect(EDGE_TAB_WIDTH, 0, self._width, container.height())
+            # Runs flush to the left edge (x=0) -- see matching comment in
+            # OutputsSidebar.set_open for why no gap is reserved for the
+            # edge tab pill here.
+            end_rect = QRect(0, 0, self._width, container.height())
         else:
             end_rect = QRect(-self._width, 0, self._width, container.height())
 
@@ -4524,6 +4771,10 @@ class MainWindow(QMainWindow):
         self.resize(1280, 840)
 
         self.config_data = load_config()
+        # No longer a supported key (the explorer never remembers its last
+        # tab/expanded folders across restarts -- see ImageBrowser.__init__);
+        # drop it so it doesn't linger forever in an old config file.
+        self.config_data.pop("image_browser_state", None)
         self._config_save_failing = False
         if _LAST_LOAD_WARNING:
             # Deferred so it pops up once the window is actually on screen,
@@ -4738,15 +4989,15 @@ class MainWindow(QMainWindow):
 
     def _position_sidebar(self):
         """Keep the outputs sidebar (and its always-visible edge tab)
-        anchored to the right of the center content. The sidebar's open
-        position leaves room for EDGE_TAB_WIDTH so the tab's arrow is never
-        covered by the sidebar sliding over it."""
+        anchored to the right of the center content. The sidebar now runs
+        flush to the edge when open (no gap reserved for the edge tab
+        pill) -- the pill stays visible on top via raise_() instead."""
         sidebar = getattr(self, "outputs_sidebar", None)
         if sidebar is None:
             return
         container = self.center_container
         w = sidebar._width
-        x = max(0, container.width() - w - EDGE_TAB_WIDTH) if sidebar.is_open() else container.width()
+        x = max(0, container.width() - w) if sidebar.is_open() else container.width()
         sidebar.setGeometry(x, 0, w, container.height())
         edge = getattr(self, "outputs_edge_tab", None)
         if edge is not None:
@@ -4759,16 +5010,15 @@ class MainWindow(QMainWindow):
 
     def _position_workflow_sidebar(self):
         """Same idea, mirrored: keeps the workflow sidebar (and its always-
-        visible edge tab) anchored to the left of the center content. The
-        sidebar's open position starts after EDGE_TAB_WIDTH so the tab's
-        arrow always stays visible on top, instead of the sidebar sliding
-        out over it and hiding it."""
+        visible edge tab) anchored to the left of the center content. Runs
+        flush to x=0 when open -- no gap reserved for the edge tab pill,
+        which stays visible on top via raise_() instead."""
         sidebar = getattr(self, "workflow_sidebar", None)
         if sidebar is None:
             return
         container = self.center_container
         w = sidebar._width
-        x = EDGE_TAB_WIDTH if sidebar.is_open() else -w
+        x = 0 if sidebar.is_open() else -w
         sidebar.setGeometry(x, 0, w, container.height())
         edge = getattr(self, "workflow_edge_tab", None)
         if edge is not None:
@@ -4794,6 +5044,8 @@ class MainWindow(QMainWindow):
             return
         self.active_workflow = self.workflow_states[row]
         self.roster_bar.set_workflow(self.active_workflow)
+        if self.workflow_sidebar.is_open():
+            self.workflow_sidebar.set_open(False)
 
     def _edit_workflow_by_item(self, item):
         row = self.workflow_sidebar.list.row(item)
@@ -4835,6 +5087,14 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dlg = SettingsDialog(self)
         dlg.exec()
+
+    def _open_settings_from_workflow_sidebar(self):
+        """Settings button lives at the bottom of the workflow sidebar;
+        opening it auto-closes that sidebar (and only that one -- the
+        outputs/queue sidebar is never touched by this)."""
+        if self.workflow_sidebar.is_open():
+            self.workflow_sidebar.set_open(False)
+        self.open_settings()
 
     def _on_workflow_rows_moved(self, parent, start, end, dest_parent, dest_row):
         # Drag-reordering in the sidebar list already moved the visual rows;
@@ -4894,6 +5154,7 @@ class MainWindow(QMainWindow):
             self.roster_bar.status_label.setText(
                 "Arm a roster slot below first, then click a thumbnail to assign it."
             )
+            self.roster_bar._position_status_label()
             return
         self.roster_bar.assign_armed(filepath)
 
@@ -4904,15 +5165,12 @@ class MainWindow(QMainWindow):
             self._img_viewer.open_viewer(card, cards)
 
     # -- outputs ---------------------------------------------------------
-    def save_output(self, workflow_name, data):
-        out_dir = Path(self.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in workflow_name)
-        path = out_dir / f"{safe_name}_{stamp}.png"
-        with open(path, "wb") as f:
-            f.write(data)
-        self.outputs_tab.refresh()
+    # The app no longer writes generated images itself. The workflow's own
+    # Save Image node is what persists the file to disk; the output folder
+    # configured in Settings is purely where the app *looks* to list and
+    # preview those images in the Outputs sidebar (see OutputsPanel.refresh
+    # and the Settings dialog hint) -- point it at wherever your workflows
+    # actually save to.
 
     # -- persistence -------------------------------------------------------
     def persist_all(self):
@@ -5073,6 +5331,9 @@ class MainWindow(QMainWindow):
             self._size_grip.raise_()
         if self._img_viewer is not None:
             self._img_viewer.resize(self._content_root.size())
+        bulk_overlay = getattr(getattr(self, "image_browser", None), "bulk_overlay", None)
+        if bulk_overlay is not None and bulk_overlay.isVisible():
+            bulk_overlay.resize(self._content_root.size())
         self._update_window_mask()
 
     def _toggle_maximize(self, force_normal: bool = False) -> None:
