@@ -52,7 +52,11 @@ and never fall back to permanent deletion.
 parameter values, and layout. Queue items, prompt IDs, and assigned input images
 are session-only. They are not restored after restarting Cover.
 
-## Regression checks
+## Local regression checks
+
+The development checks in `cover/tests/` are kept locally and excluded from Git.
+They are not included in a fresh checkout. If that local test directory is present,
+run the checks as follows.
 
 From the repository root:
 

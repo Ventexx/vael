@@ -24,6 +24,10 @@ builder-effective-config.yaml
 *.pyo
 *.egg-info/
 .metadata_cache.json
+**/.pytest_cache/
+
+# Local Cover regression checks
+cover/tests/
 
 # app-generated logs
 **/logs/
