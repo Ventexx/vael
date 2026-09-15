@@ -2811,6 +2811,42 @@ class ResultsPanel(QScrollArea):
             if self._db
             else []
         )
+        self._show_and_populate(assets, restore_keys=restore_keys, restore_scroll=restore_scroll)
+
+    def refresh_multi(
+        self,
+        segments: list[dict],
+        restore_keys: Optional[set[str]] = None,
+        restore_scroll: int = 0,
+    ) -> None:
+        """Run several independent searches (see _split_search_query /
+        _parse_search_segment) and display the combined, de-duplicated
+        results as one result set -- this is what powers the 'text1;text2;...'
+        multi-search syntax in the main search bar."""
+        assets: list[dict] = []
+        if self._db:
+            seen: set[str] = set()
+            for seg in segments:
+                for asset in self._db.search(
+                    seg.get("text", ""),
+                    folder_only=seg.get("folder_only", False),
+                    json_only=seg.get("json_only", False),
+                    id_only=seg.get("id_only", False),
+                ):
+                    key = asset.get("image_path", "")
+                    if key and key in seen:
+                        continue  # already matched by an earlier segment
+                    if key:
+                        seen.add(key)
+                    assets.append(asset)
+        self._show_and_populate(assets, restore_keys=restore_keys, restore_scroll=restore_scroll)
+
+    def _show_and_populate(
+        self,
+        assets: list[dict],
+        restore_keys: Optional[set[str]] = None,
+        restore_scroll: int = 0,
+    ) -> None:
         if assets:
             # Show a message BEFORE the UI freezes while rendering all thumbnails.
             # processEvents() flushes it to screen before the heavy _populate() call.
@@ -4830,6 +4866,81 @@ class _TitleBar(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+# ── Multi-search parsing ─────────────────────────────────────────────────────
+#
+# The main search bar supports combining several independent searches into
+# one query by separating them with ';', e.g.:
+#
+#   text1;text2;text3           -> three plain name searches, results merged
+#   text1;text2 f;id-text3      -> name search + folder search + id search
+#
+# Each segment supports all the same per-segment modifiers that a single
+# search always has: a trailing ' f' for folder-only, a leading 'id-' for
+# identifier-only, and a leading ';' for JSON-contents-only. That last one is
+# what makes a leading ';' ambiguous with the ';' separator itself, so
+# _split_search_query() below treats an *empty* piece produced by the split
+# (i.e. two ';' with nothing but whitespace between/before them) as "the next
+# piece is JSON-only" rather than as an empty search term. This keeps the
+# original single-query "search cleared" behaviour unbroken.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _split_search_query(text: str) -> list[str]:
+    """Split a raw search-bar string on ';' into individual search segments.
+
+    An empty piece (from a leading ';' or a doubled ';;') is folded into the
+    following piece as a JSON-only marker instead of becoming a blank search
+    term, so ';short hair' still behaves exactly like the old single-query
+    JSON-contents search. Purely blank/whitespace pieces elsewhere (e.g. a
+    trailing ';') are dropped.
+    """
+    parts = text.split(";")
+    segments: list[str] = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if part.strip() == "":
+            if i + 1 < len(parts):
+                # Leading/embedded ';' with more query after it -> JSON marker
+                segments.append(";" + parts[i + 1])
+                i += 2
+            else:
+                i += 1  # trailing ';' (or a lone blank) -> nothing to search
+        else:
+            segments.append(part)
+            i += 1
+    return segments
+
+
+def _parse_search_segment(segment: str) -> dict:
+    """Apply the single-search modifier rules to one segment of a query.
+
+    Mirrors the logic that used to live inline in MainWindow._do_search():
+    a leading ';' means JSON-contents-only, a leading 'id-' means
+    identifier-only, and a trailing ' f' means folder-only.
+    """
+    text = segment.strip()
+    json_only = False
+    folder_only = False
+    id_only = False
+    effective_text = text
+    if text.startswith(";"):
+        json_only = True
+        effective_text = text[1:].strip()
+    elif text.lower().startswith("id-"):
+        id_only = True
+        effective_text = text[3:].strip()
+    elif text.lower().endswith(" f"):
+        folder_only = True
+        effective_text = text[:-2].strip()
+    return {
+        "text": effective_text,
+        "json_only": json_only,
+        "folder_only": folder_only,
+        "id_only": id_only,
+    }
+
+
 class MainWindow(QMainWindow):
     def __init__(self, db_manager: DatabaseManager):
         super().__init__()
@@ -5017,6 +5128,17 @@ class MainWindow(QMainWindow):
         self._search.setObjectName("mainSearch")
         self._search.setPlaceholderText("Press / to search...")
         self._search.setFixedHeight(26)
+        self._search.setToolTip(
+            "<div style='white-space:pre;'>"
+            "<b>Search syntax</b><br>"
+            "&bull; <b>text</b> &nbsp;— search by name<br>"
+            "&bull; <b>text f</b> &nbsp;— search folder names only<br>"
+            "&bull; <b>id-text</b> &nbsp;— search the Identifier field only<br>"
+            "&bull; <b>;text</b> &nbsp;— search the raw JSON contents<br>"
+            "&bull; <b>a;b;c</b> &nbsp;— run several searches at once, results combined<br>"
+            "&nbsp;&nbsp;&nbsp;e.g. <i>cat;dog f;id-adult</i>"
+            "</div>"
+        )
         self._search.textChanged.connect(self._on_search_text_changed)
         self._search.returnPressed.connect(self._on_search_return_pressed)
 
@@ -5287,51 +5409,39 @@ class MainWindow(QMainWindow):
         self._search_timer.stop()
         text = self._search.text().strip()
 
-        # ── JSON-contents mode: query starting with ';' ────────────────────────
-        # e.g. ";short hair" → search the raw JSON data for "short hair"
-        # anywhere it appears (keys or values), instead of just the asset name.
-        # Takes precedence over folder-only mode below.
-        json_only = False
-        folder_only = False
-        id_only = False
-        effective_text = text
-        if text.startswith(";"):
-            json_only = True
-            effective_text = text[1:].strip()  # strip the leading ';'
-        # ── Identifier-field mode: query starting with 'id-' ──────────────────
-        # e.g. "id-adult" → case-insensitive substring match against the
-        # "Identifier" field's value only (not any other field or the name).
-        elif text.lower().startswith("id-"):
-            id_only = True
-            effective_text = text[3:].strip()  # strip the leading 'id-'
-        # ── Folder-only mode: query ending with ' f' ──────────────────────────
-        # e.g. "pokemon f" → search only folder names for "pokemon"
-        elif text.lower().endswith(" f"):
-            folder_only = True
-            effective_text = text[:-2].strip()  # strip the trailing ' f'
+        # ── Multi-search: 'text1;text2;text3' ───────────────────────────────
+        # The query is split on ';' into independent search segments; each
+        # segment gets the usual per-search modifiers (leading ';' for
+        # JSON-contents, leading 'id-' for identifier-only, trailing ' f' for
+        # folder-only), and the results of every segment are combined and
+        # de-duplicated. A single term with no ';' behaves exactly as before.
+        # See _split_search_query() / _parse_search_segment() for details.
+        segments = [_parse_search_segment(seg) for seg in _split_search_query(text)]
 
-        if (
-            not effective_text
-            and not folder_only
-            and not json_only
-            and not id_only
-            and self._pre_search_expanded is not None
-        ):
-            # Search cleared → restore exactly where the user was
+        if not segments:
+            if self._pre_search_expanded is not None:
+                # Search cleared → restore exactly where the user was
+                self._results.refresh(
+                    "",
+                    restore_keys=self._pre_search_expanded,
+                    restore_scroll=self._pre_search_scroll,
+                )
+                self._pre_search_expanded = None
+                self._pre_search_scroll = 0
+            else:
+                # Nothing typed (or only stray ';' with no content) → show
+                # everything, same as a plain empty search.
+                self._results.refresh("")
+        elif len(segments) == 1:
+            seg = segments[0]
             self._results.refresh(
-                "",
-                restore_keys=self._pre_search_expanded,
-                restore_scroll=self._pre_search_scroll,
+                seg["text"],
+                folder_only=seg["folder_only"],
+                json_only=seg["json_only"],
+                id_only=seg["id_only"],
             )
-            self._pre_search_expanded = None
-            self._pre_search_scroll = 0
         else:
-            self._results.refresh(
-                effective_text,
-                folder_only=folder_only,
-                json_only=json_only,
-                id_only=id_only,
-            )
+            self._results.refresh_multi(segments)
 
     def _set_status(self, msg: str) -> None:
         self._status_lbl.setText(msg)
