@@ -13,8 +13,15 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QFontDatabase
 
 QT_APP = QApplication.instance() or QApplication([])
+# Windows' offscreen Qt platform may not discover system fonts by itself.
+if os.name == "nt":
+    for font in ("consola.ttf", "segoeui.ttf"):
+        font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / font
+        if font_path.exists():
+            QFontDatabase.addApplicationFont(str(font_path))
 spec = importlib.util.spec_from_file_location("vael_cover", Path(__file__).parents[1] / "app.py")
 cover = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cover)
@@ -137,6 +144,95 @@ class OutputTrashTests(unittest.TestCase):
             self.assertEqual(trash.call_count, 2)
             self.assertIn("a.png: locked", warning.call_args.args[2])
             panel.refresh.assert_called_once()
+
+
+class OutputRefreshTests(unittest.TestCase):
+    def test_background_thumbnail_is_bounded_and_refresh_preserves_unchanged_items(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output.png"
+            image = cover.QImage(1800, 1200, cover.QImage.Format_RGB32)
+            image.fill(cover.QColor("red"))
+            self.assertTrue(image.save(str(path)))
+            main = SimpleNamespace(output_dir=directory, queue_manager=cover.QueueManager(None))
+            panel = cover.OutputsTab(main)
+            panel.resize(360, 700)
+            panel.show()
+            try:
+                drain_until(lambda: str(path) in panel._thumbnail_cache)
+                item = panel._output_items[str(path)]
+                icon_key = item.icon().cacheKey()
+                item.setSelected(True)
+                panel.refresh()
+                drain_until(lambda: not panel._scan_busy)
+                self.assertIs(panel._output_items[str(path)], item)
+                self.assertEqual(item.icon().cacheKey(), icon_key)
+                self.assertTrue(item.isSelected())
+                self.assertTrue(all(s.width() <= 280 and s.height() <= 280 for s in item.icon().availableSizes()))
+
+                # Same filename, new content must replace the old preview.
+                image.fill(cover.QColor("blue"))
+                self.assertTrue(image.save(str(path)))
+                stat = path.stat()
+                os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+                panel.refresh()
+                drain_until(lambda: not panel._scan_busy and not item.icon().isNull()
+                            and item.icon().cacheKey() != icon_key)
+                # Adding an image must not recreate existing list items.
+                second = Path(directory) / "second.png"
+                self.assertTrue(image.save(str(second)))
+                panel.refresh()
+                drain_until(lambda: not panel._scan_busy)
+                self.assertEqual(panel.outputs_list.count(), 2)
+                self.assertIs(panel._output_items[str(path)], item)
+            finally:
+                panel.stop_loading()
+                panel._output_pool.waitForDone()
+                panel.close()
+
+    def test_unreadable_directory_reports_error_without_clearing_existing_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            main = SimpleNamespace(output_dir=directory, queue_manager=cover.QueueManager(None))
+            panel = cover.OutputsTab(main)
+            try:
+                drain_until(lambda: not panel._scan_busy)
+                item = cover.QListWidgetItem("retained.png")
+                panel.outputs_list.addItem(item)
+                with patch.object(cover.os, "scandir", side_effect=PermissionError("Access denied")):
+                    panel.refresh()
+                    drain_until(lambda: not panel._scan_busy)
+                self.assertIn("Access denied", panel.output_status.text())
+                self.assertEqual(panel.outputs_list.count(), 1)
+            finally:
+                panel.stop_loading()
+                panel._output_pool.waitForDone()
+                panel.close()
+
+
+class WindowSmokeTests(unittest.TestCase):
+    def test_main_window_loads_and_closes_without_touching_user_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = dict(cover.DEFAULTS, output_dir=directory, tabs=[])
+            with patch.object(cover, "load_config", return_value=config), \
+                    patch.object(cover, "save_config", return_value=True):
+                cover.apply_style(QT_APP)
+                window = cover.MainWindow()
+                window.show()
+                try:
+                    drain_until(lambda: not window.outputs_tab._scan_busy)
+                    window.outputs_sidebar.set_open(True)
+                    drain_until(lambda: window.outputs_sidebar._anim.state() == cover.QPropertyAnimation.State.Stopped)
+                    window.outputs_tab._set_mode(1)
+                    QT_APP.processEvents()
+                    preview = os.environ.get("COVER_TEST_PREVIEW")
+                    if preview:
+                        self.assertTrue(window.grab().save(str(Path(preview).with_stem("cover-queue-preview"))))
+                    window.outputs_tab._set_mode(0)
+                    QT_APP.processEvents()
+                    if preview:
+                        self.assertTrue(window.grab().save(preview))
+                finally:
+                    window.close()
+                    drain_until(lambda: not window.isVisible())
 
 
 class WorkflowTests(unittest.TestCase):

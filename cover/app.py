@@ -18,6 +18,7 @@ import json
 import queue
 import datetime
 import threading
+from collections import OrderedDict
 import requests
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
-    QColor, QPen, QPainter, QPainterPath,
+    QColor, QPen, QPainter, QPainterPath, QImageReader,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QTabBar, QVBoxLayout, QHBoxLayout,
@@ -4050,10 +4051,80 @@ def trash_output(path, output_dir):
         raise OSError("Could not move the file to the trash. It may be in use or this location may not support trash.")
 
 
+class _OutputScanSignals(QObject):
+    finished = Signal(int, object, str)
+
+
+class _OutputScanWorker(QRunnable):
+    def __init__(self, root, token, stop):
+        super().__init__()
+        self.root, self.token, self.stop = root, token, stop
+        self.signals = _OutputScanSignals()
+
+    def run(self):
+        records, errors = [], []
+        try:
+            Path(self.root).mkdir(parents=True, exist_ok=True)
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    if self.stop.is_set():
+                        return
+                    if Path(entry.name).suffix.lower() != ".png":
+                        continue
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            stat = entry.stat()
+                            records.append((entry.path, entry.name, stat.st_mtime_ns, stat.st_size))
+                    except OSError as exc:
+                        errors.append(f"{entry.name}: {exc}")
+            records.sort(key=lambda record: (-record[2], record[1].casefold()))
+            self.signals.finished.emit(self.token, records, "\n".join(errors))
+        except OSError as exc:
+            self.signals.finished.emit(self.token, None, str(exc))
+
+
+class _OutputThumbnailSignals(QObject):
+    finished = Signal(str, object, QImage, str)
+
+
+class _OutputThumbnailWorker(QRunnable):
+    def __init__(self, path, signature, stop):
+        super().__init__()
+        self.path, self.signature, self.stop = path, signature, stop
+        self.signals = _OutputThumbnailSignals()
+
+    def run(self):
+        if self.stop.is_set():
+            return
+        reader = QImageReader(self.path)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid():
+            reader.setScaledSize(size.scaled(QSize(280, 280), Qt.KeepAspectRatio))
+        image = reader.read()
+        if not image.isNull():
+            image = image.scaled(280, 280, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.signals.finished.emit(self.path, self.signature, image, reader.errorString() if image.isNull() else "")
+
+
 class OutputsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self._output_pool = QThreadPool(self)
+        self._output_pool.setMaxThreadCount(2)
+        self._output_stop = threading.Event()
+        self._scan_busy = False
+        self._refresh_again = False
+        self._scan_token = 0
+        self._output_items = {}
+        self._output_signatures = {}
+        self._thumbnail_jobs = set()
+        self._thumbnail_cache = OrderedDict()
+        self._thumbnail_errors = {}
+        self._visible_timer = QTimer(self)
+        self._visible_timer.setSingleShot(True)
+        self._visible_timer.timeout.connect(self._load_visible_thumbnails)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -4085,6 +4156,9 @@ class OutputsTab(QWidget):
         header.addWidget(self.queue_badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
         layout.addLayout(header)
+        self.output_status = QLabel()
+        self.output_status.setWordWrap(True)
+        layout.addWidget(self.output_status)
 
         # -- stacked content --------------------------------------------
         self.stack = QStackedWidget()
@@ -4097,6 +4171,11 @@ class OutputsTab(QWidget):
         self.outputs_list.setMovement(QListWidget.Static)
         self.outputs_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.outputs_list.setSpacing(10)
+        self.outputs_list.setGridSize(QSize(160, 180))
+        self.outputs_list.setUniformItemSizes(True)
+        self.outputs_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.outputs_list.viewport().installEventFilter(self)
+        self.outputs_list.verticalScrollBar().valueChanged.connect(self._schedule_thumbnails)
         self.outputs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.outputs_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.outputs_list.itemDoubleClicked.connect(self._open_item)
@@ -4114,6 +4193,7 @@ class OutputsTab(QWidget):
         # width danger row; Queue-mode gets a full-width Run + a Clear. ---
         footer = QWidget()
         footer.setObjectName("outputsFooter")
+        footer.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         footer_lay = QVBoxLayout(footer)
         footer_lay.setContentsMargins(0, 8, 0, 0)
         footer_lay.setSpacing(6)
@@ -4178,8 +4258,11 @@ class OutputsTab(QWidget):
         self._outputs_row_wrap.setVisible(mode == 0)
         self.clear_outputs_btn.setVisible(mode == 0)
         self.trash_selected_btn.setVisible(mode == 0)
+        self.output_status.setVisible(mode == 0)
         for w in (self.run_queue_btn, self.retry_queue_btn, self.check_queue_btn, self.clear_queue_btn):
             w.setVisible(mode == 1)
+        if mode == 0:
+            self._schedule_thumbnails()
 
     # -- outputs -----------------------------------------------------------
     def _output_dir(self):
@@ -4188,14 +4271,139 @@ class OutputsTab(QWidget):
         return d
 
     def refresh(self):
-        self.outputs_list.clear()
-        d = self._output_dir()
-        files = sorted(d.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in files:
-            pix = QPixmap(str(f))
-            item = QListWidgetItem(QIcon(pix), f.name)
-            item.setData(Qt.UserRole, str(f))
-            self.outputs_list.addItem(item)
+        if self._output_stop.is_set():
+            return
+        if self._scan_busy:
+            self._refresh_again = True
+            return
+        self._scan_busy = True
+        self._scan_token += 1
+        self._scan_root = str(Path(self.main_window.output_dir).absolute())
+        self.output_status.setText("Checking outputs...")
+        worker = _OutputScanWorker(self._scan_root, self._scan_token, self._output_stop)
+        worker.signals.finished.connect(self._on_output_scan)
+        self._output_pool.start(worker)
+
+    def _on_output_scan(self, token, records, error):
+        if self._output_stop.is_set() or token != self._scan_token:
+            return
+        if self._scan_root != str(Path(self.main_window.output_dir).absolute()):
+            self._refresh_again = True
+            self._finish_refresh()
+            return
+        if records is None:
+            self.output_status.setText(f"Could not read outputs: {error}")
+            self._finish_refresh()
+            return
+        paths = {record[0] for record in records}
+        for path in list(self._output_items):
+            if path not in paths:
+                item = self._output_items.pop(path)
+                self.outputs_list.takeItem(self.outputs_list.row(item))
+                self._output_signatures.pop(path, None)
+                self._thumbnail_cache.pop(path, None)
+                self._thumbnail_errors.pop(path, None)
+        self._apply_output_batch(records, 0, error)
+
+    def _apply_output_batch(self, records, offset, error):
+        if self._output_stop.is_set():
+            return
+        # Yield between batches so a large directory never monopolizes the GUI.
+        end = min(offset + 80, len(records))
+        for index in range(offset, end):
+            path, name, mtime, size = records[index]
+            signature = (mtime, size)
+            item = self._output_items.get(path)
+            if item is None:
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, path)
+                self._output_items[path] = item
+                self.outputs_list.insertItem(index, item)
+            elif self.outputs_list.row(item) != index:
+                selected = item.isSelected()
+                self.outputs_list.takeItem(self.outputs_list.row(item))
+                self.outputs_list.insertItem(index, item)
+                item.setSelected(selected)
+            if self._output_signatures.get(path) != signature:
+                self._thumbnail_cache.pop(path, None)
+                self._thumbnail_errors.pop(path, None)
+                item.setIcon(QIcon())
+                item.setToolTip(path)
+            self._output_signatures[path] = signature
+        if end < len(records):
+            QTimer.singleShot(0, lambda: self._apply_output_batch(records, end, error))
+        else:
+            self.output_status.setText(f"{len(records)} output image(s)" + (f" — {error}" if error else ""))
+            self._finish_refresh()
+            self._schedule_thumbnails()
+
+    def _finish_refresh(self):
+        self._scan_busy = False
+        if self._refresh_again:
+            self._refresh_again = False
+            self.refresh()
+
+    def eventFilter(self, obj, event):
+        if obj is self.outputs_list.viewport() and event.type() in (QEvent.Resize, QEvent.Show):
+            self._schedule_thumbnails()
+        return super().eventFilter(obj, event)
+
+    def _schedule_thumbnails(self, *args):
+        if not self._output_stop.is_set():
+            self._visible_timer.start(30)
+
+    def _load_visible_thumbnails(self):
+        if self._output_stop.is_set() or self.stack.currentIndex() != 0 or not self.outputs_list.isVisible():
+            return
+        visible = self.outputs_list.viewport().rect().adjusted(0, -180, 0, 180)
+        for row in range(self.outputs_list.count()):
+            item = self.outputs_list.item(row)
+            rect = self.outputs_list.visualItemRect(item)
+            if rect.top() > visible.bottom():
+                break
+            if not rect.intersects(visible):
+                continue
+            path = item.data(Qt.UserRole)
+            if path in self._thumbnail_cache:
+                self._thumbnail_cache.move_to_end(path)
+                continue
+            signature = self._output_signatures[path]
+            key = (path, signature)
+            if key in self._thumbnail_jobs or self._thumbnail_errors.get(path) == signature:
+                continue
+            # Do not queue the whole folder when scrolling quickly.
+            if len(self._thumbnail_jobs) >= 8:
+                break
+            self._thumbnail_jobs.add(key)
+            worker = _OutputThumbnailWorker(path, signature, self._output_stop)
+            worker.signals.finished.connect(self._on_output_thumbnail)
+            self._output_pool.start(worker)
+
+    def _on_output_thumbnail(self, path, signature, image, error):
+        self._thumbnail_jobs.discard((path, signature))
+        if self._output_stop.is_set():
+            return
+        item = self._output_items.get(path)
+        if item is not None and self._output_signatures.get(path) == signature:
+            if error:
+                self._thumbnail_errors[path] = signature
+                item.setToolTip(f"{path}\nPreview unavailable: {error}")
+            else:
+                icon = QIcon(QPixmap.fromImage(image))
+                item.setIcon(icon)
+                self._thumbnail_cache[path] = icon
+                self._thumbnail_cache.move_to_end(path)
+                while len(self._thumbnail_cache) > 128:
+                    old_path, _ = self._thumbnail_cache.popitem(last=False)
+                    if old_path in self._output_items:
+                        self._output_items[old_path].setIcon(QIcon())
+        self._schedule_thumbnails()
+
+    def stop_loading(self):
+        self._output_stop.set()
+        self._visible_timer.stop()
+        self._output_pool.clear()
+        return self._output_pool.waitForDone(0)
 
     def _open_item(self, item):
         path = item.data(Qt.UserRole)
@@ -5895,6 +6103,10 @@ class MainWindow(QMainWindow):
             self.setEnabled(False)
             for owner in owners:
                 owner.request_stop()
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        if not self.outputs_tab.stop_loading():
             event.ignore()
             QTimer.singleShot(100, self.close)
             return
