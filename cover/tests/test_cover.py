@@ -44,7 +44,7 @@ class QueueTests(unittest.TestCase):
         manager.add_item(job("good"))
         calls = []
 
-        def execute(server, workflow, *args):
+        def execute(server, workflow, *args, **kwargs):
             calls.append(workflow["name"])
             if workflow["name"] == "bad":
                 raise RuntimeError("Invalid workflow")
@@ -60,6 +60,65 @@ class QueueTests(unittest.TestCase):
             manager.retry_failed()
             drain_until(lambda: not manager.running)
             self.assertEqual(calls, ["bad", "good", "bad"])
+
+    def test_pending_job_resumes_with_the_same_state(self):
+        manager = cover.QueueManager(None)
+        manager.add_item(job("slow"))
+        states = []
+
+        def execute(*args, run_state):
+            states.append(run_state)
+            if not run_state:
+                run_state["prompt_id"] = "existing-prompt"
+                raise cover.PendingRunError("Still generating")
+
+        with patch.object(cover, "execute_workflow_sync", side_effect=execute):
+            manager.run_queue()
+            drain_until(lambda: not manager.running)
+            self.assertEqual(manager.items[0]["status"], "Check status")
+            manager.retry_failed()
+            self.assertEqual(len(states), 1)
+            manager.check_pending()
+            drain_until(lambda: not manager.running)
+        self.assertEqual(manager.items, [])
+        self.assertIs(states[0], states[1])
+
+
+class ExecutionTests(unittest.TestCase):
+    def test_timeout_reconnects_without_uploading_or_submitting_again(self):
+        run_state = {}
+        with patch.object(cover, "ComfyAPI") as api_class, patch.object(cover, "POLL_INTERVAL", 0), \
+                patch.object(cover, "POLL_TIMEOUT", 0):
+            api = api_class.return_value
+            api.queue_prompt.return_value = "prompt-1"
+            with self.assertRaises(cover.PendingRunError):
+                cover.execute_workflow_sync("server", {}, {}, None, {}, run_state)
+            self.assertEqual(run_state["prompt_id"], "prompt-1")
+            api.get_history.return_value = {
+                "prompt-1": {"status": {"completed": True}, "outputs": {"1": {"images": [{}]}}}}
+            with patch.object(cover, "POLL_TIMEOUT", 10):
+                cover.execute_workflow_sync("server", {}, {}, None, {}, run_state)
+            api.queue_prompt.assert_called_once()
+            api.upload_image.assert_not_called()
+
+    def test_temporary_disconnect_keeps_polling_the_existing_prompt(self):
+        with patch.object(cover, "ComfyAPI") as api_class, patch.object(cover, "POLL_INTERVAL", 0):
+            api = api_class.return_value
+            api.get_history.side_effect = [cover.requests.ConnectionError("offline"), {
+                "p": {"status": {"completed": True}, "outputs": {"1": {"images": [{}]}}}}]
+            cover.execute_workflow_sync("server", {}, {}, None, {}, {"prompt_id": "p"})
+            self.assertEqual(api.get_history.call_count, 2)
+            api.queue_prompt.assert_not_called()
+
+    def test_lost_submission_response_is_not_retried(self):
+        run_state = {}
+        with patch.object(cover, "ComfyAPI") as api_class:
+            api = api_class.return_value
+            api.queue_prompt.side_effect = cover.requests.Timeout("response lost")
+            for _ in range(2):
+                with self.assertRaises(cover.PendingRunError):
+                    cover.execute_workflow_sync("server", {}, {}, None, {}, run_state)
+            api.queue_prompt.assert_called_once()
 
 
 if __name__ == "__main__":

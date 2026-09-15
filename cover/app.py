@@ -986,28 +986,57 @@ HOTKEYS = [
 # ---------------------------------------------------------------------------
 # Workflow execution (runs on a background thread)
 # ---------------------------------------------------------------------------
-def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, param_values):
+class PendingRunError(RuntimeError):
+    """The server may still be running this job; never submit it again implicitly."""
+
+
+def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, param_values,
+                          run_state=None):
+    run_state = run_state if run_state is not None else {}
     api = ComfyAPI(server)
-    wf = copy.deepcopy(raw_workflow)
+    if run_state.get("submission_uncertain"):
+        raise PendingRunError("Submission response was lost. Check ComfyUI before creating another run.")
+    prompt_id = run_state.get("prompt_id")
+    if not prompt_id:
+        wf = copy.deepcopy(raw_workflow)
+        for node_id, path in image_map.items():
+            if not path:
+                raise RuntimeError(f"Missing image for node #{node_id}")
+            name, subfolder, ftype = api.upload_image(path)
+            wf[node_id]["inputs"]["image"] = name
 
-    for node_id, path in image_map.items():
-        if not path:
-            raise RuntimeError(f"Missing image for node #{node_id}")
-        name, subfolder, ftype = api.upload_image(path)
-        wf[node_id]["inputs"]["image"] = name
+        if optional_node_id and optional_node_id in wf:
+            for key, val in (param_values or {}).items():
+                if key in wf[optional_node_id].get("inputs", {}):
+                    wf[optional_node_id]["inputs"][key] = val
 
-    if optional_node_id and optional_node_id in wf:
-        for key, val in (param_values or {}).items():
-            if key in wf[optional_node_id].get("inputs", {}):
-                wf[optional_node_id]["inputs"][key] = val
+        # A lost POST response does not mean that ComfyUI rejected the job.
+        run_state["submission_uncertain"] = True
+        try:
+            prompt_id = api.queue_prompt(wf)
+            if not prompt_id:
+                raise ValueError("Missing prompt ID")
+        except RuntimeError:
+            run_state.pop("submission_uncertain", None)  # explicit server rejection
+            raise
+        except Exception as exc:
+            raise PendingRunError("Submission response was lost. Check ComfyUI before creating another run.") from exc
+        run_state.pop("submission_uncertain", None)
+        run_state["prompt_id"] = prompt_id
 
-    prompt_id = api.queue_prompt(wf)
-    start = time.time()
+    start = time.monotonic()
+    last_error = None
     while True:
         time.sleep(POLL_INTERVAL)
-        if time.time() - start > POLL_TIMEOUT:
-            raise TimeoutError("Timed out waiting for the workflow to finish.")
-        hist = api.get_history(prompt_id)
+        if time.monotonic() - start > POLL_TIMEOUT:
+            detail = "Connection unavailable." if last_error else "The job may still be queued or generating."
+            raise PendingRunError(f"{detail} Check status to reconnect to prompt {prompt_id}; it will not be submitted again.")
+        try:
+            hist = api.get_history(prompt_id)
+            last_error = None
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            continue
         entry = hist.get(prompt_id)
         if not entry:
             continue
@@ -1030,22 +1059,26 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
 class RunWorker(QObject):
     finished = Signal()
     error = Signal(str)
+    pending = Signal(str)
 
-    def __init__(self, server, raw_workflow, image_map, optional_node_id, param_values):
+    def __init__(self, server, raw_workflow, image_map, optional_node_id, param_values, run_state=None):
         super().__init__()
         self.server = server
         self.raw_workflow = raw_workflow
         self.image_map = image_map
         self.optional_node_id = optional_node_id
         self.param_values = param_values
+        self.run_state = run_state if run_state is not None else {}
 
     def run(self):
         try:
             execute_workflow_sync(
                 self.server, self.raw_workflow, self.image_map,
-                self.optional_node_id, self.param_values,
+                self.optional_node_id, self.param_values, run_state=self.run_state,
             )
             self.finished.emit()
+        except PendingRunError as e:
+            self.pending.emit(str(e))
         except Exception as e:
             self.error.emit(str(e))
 
@@ -1285,6 +1318,7 @@ class WorkflowState(QObject):
         self.running = False
         self._thread = None
         self._worker = None
+        self._run_request = None
 
         if self.workflow_path and os.path.exists(self.workflow_path):
             try:
@@ -1369,35 +1403,55 @@ class WorkflowState(QObject):
         return True
 
     def run_now(self):
-        if not self._validate():
+        if self._run_request and self._run_request["run_state"].get("submission_uncertain"):
+            if QMessageBox.question(
+                self.main_window, "Submission not confirmed",
+                "ComfyUI may already have this job. Have you checked it and want to submit a new run?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
+            self._run_request = None
+        if self._run_request is None and not self._validate():
             return
+        if self._run_request is None:
+            self._run_request = dict(
+                server=self.main_window.server, raw_workflow=copy.deepcopy(self.raw_workflow),
+                image_map=self._gather_image_map(), optional_node_id=self.optional_node_id,
+                param_values=dict(self.param_values), run_state={},
+            )
         self.running = True
         self.runStateChanged.emit(True)
-        self._set_status("Running...")
+        self._set_status("Checking status..." if self._run_request["run_state"].get("prompt_id") else "Running...")
         self._thread = QThread()
-        self._worker = RunWorker(
-            self.main_window.server, copy.deepcopy(self.raw_workflow),
-            self._gather_image_map(), self.optional_node_id, dict(self.param_values),
-        )
+        self._worker = RunWorker(**self._run_request)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_run_finished)
         self._worker.error.connect(self._on_run_error)
+        self._worker.pending.connect(self._on_run_pending)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._worker.pending.connect(self._thread.quit)
         self._thread.start()
 
     def _on_run_finished(self):
+        self._run_request = None
         self.running = False
         self.runStateChanged.emit(False)
         self._set_status("Done.")
         self.main_window.outputs_tab.refresh()
 
     def _on_run_error(self, message):
+        self._run_request = None
         self.running = False
         self.runStateChanged.emit(False)
         self._set_status(f"Error: {message}", error=True)
         QMessageBox.critical(self.main_window, "Run failed", message)
+
+    def _on_run_pending(self, message):
+        self.running = False
+        self.runStateChanged.emit(False)
+        self._set_status(message + " Press Run to check again.", error=True)
 
     def add_to_queue(self):
         if not self._validate():
@@ -3859,6 +3913,16 @@ class QueueManager(QObject):
             if item["status"] == "Error":
                 item["status"] = "Waiting"
                 item.pop("error", None)
+                item.pop("run_state", None)
+        self.queueChanged.emit()
+        self.run_queue()
+
+    def check_pending(self):
+        if self.running:
+            return
+        for item in self.items:
+            if item["status"] == "Check status":
+                item["status"] = "Waiting"
         self.queueChanged.emit()
         self.run_queue()
 
@@ -3876,7 +3940,7 @@ class QueueManager(QObject):
         thread = QThread()
         worker = RunWorker(
             item["server"], item["raw_workflow"], item["image_map"],
-            item["optional_node_id"], item["param_values"],
+            item["optional_node_id"], item["param_values"], item.setdefault("run_state", {}),
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3897,6 +3961,11 @@ class QueueManager(QObject):
             self.itemFinished.emit(item["id"], False, message)
             self.queueChanged.emit()
 
+        def on_pending(message, item=item):
+            item["status"] = "Check status" if item["run_state"].get("prompt_id") else "Submission unknown"
+            item["error"] = message
+            self.queueChanged.emit()
+
         def on_thread_finished():
             # Runs only once the worker thread has fully stopped, so it's
             # safe to drop our references and start the next queue item.
@@ -3909,8 +3978,10 @@ class QueueManager(QObject):
 
         worker.finished.connect(on_finished)
         worker.error.connect(on_error)
+        worker.pending.connect(on_pending)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
+        worker.pending.connect(thread.quit)
         thread.finished.connect(on_thread_finished)
         thread.start()
 
@@ -4011,6 +4082,9 @@ class OutputsTab(QWidget):
         self.retry_queue_btn = QPushButton("Retry Failed")
         self.retry_queue_btn.clicked.connect(main_window.queue_manager.retry_failed)
         footer_lay.addWidget(self.retry_queue_btn)
+        self.check_queue_btn = QPushButton("Check Pending")
+        self.check_queue_btn.clicked.connect(main_window.queue_manager.check_pending)
+        footer_lay.addWidget(self.check_queue_btn)
         self.clear_queue_btn = QPushButton("Clear")
         self.clear_queue_btn.setObjectName("dangerButton")
         self.clear_queue_btn.clicked.connect(main_window.queue_manager.clear)
@@ -4033,7 +4107,7 @@ class OutputsTab(QWidget):
         self.stack.setCurrentIndex(mode)
         self._outputs_row_wrap.setVisible(mode == 0)
         self.clear_outputs_btn.setVisible(mode == 0)
-        for w in (self.run_queue_btn, self.retry_queue_btn, self.clear_queue_btn):
+        for w in (self.run_queue_btn, self.retry_queue_btn, self.check_queue_btn, self.clear_queue_btn):
             w.setVisible(mode == 1)
 
     # -- outputs -----------------------------------------------------------
@@ -4087,6 +4161,7 @@ class OutputsTab(QWidget):
         manager = self.main_window.queue_manager
         self.run_queue_btn.setEnabled(not manager.running and any(i["status"] == "Waiting" for i in manager.items))
         self.retry_queue_btn.setEnabled(not manager.running and any(i["status"] == "Error" for i in manager.items))
+        self.check_queue_btn.setEnabled(not manager.running and any(i["status"] == "Check status" for i in manager.items))
         self.clear_queue_btn.setEnabled(not manager.running and bool(manager.items))
 
     def _update_badge(self):
