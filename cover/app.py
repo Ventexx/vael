@@ -3852,8 +3852,18 @@ class QueueManager(QObject):
         self.running = True
         self._run_next()
 
+    def retry_failed(self):
+        if self.running:
+            return
+        for item in self.items:
+            if item["status"] == "Error":
+                item["status"] = "Waiting"
+                item.pop("error", None)
+        self.queueChanged.emit()
+        self.run_queue()
+
     def _run_next(self):
-        pending = [i for i in self.items if i["status"] in ("Waiting", "Error")]
+        pending = [i for i in self.items if i["status"] == "Waiting"]
         if not pending:
             self.running = False
             self.queueChanged.emit()
@@ -3883,6 +3893,7 @@ class QueueManager(QObject):
 
         def on_error(message, item=item):
             item["status"] = "Error"
+            item["error"] = message
             self.itemFinished.emit(item["id"], False, message)
             self.queueChanged.emit()
 
@@ -3997,6 +4008,9 @@ class OutputsTab(QWidget):
         self.run_queue_btn.setObjectName("accentButton")
         self.run_queue_btn.clicked.connect(main_window.queue_manager.run_queue)
         footer_lay.addWidget(self.run_queue_btn)
+        self.retry_queue_btn = QPushButton("Retry Failed")
+        self.retry_queue_btn.clicked.connect(main_window.queue_manager.retry_failed)
+        footer_lay.addWidget(self.retry_queue_btn)
         self.clear_queue_btn = QPushButton("Clear")
         self.clear_queue_btn.setObjectName("dangerButton")
         self.clear_queue_btn.clicked.connect(main_window.queue_manager.clear)
@@ -4019,7 +4033,7 @@ class OutputsTab(QWidget):
         self.stack.setCurrentIndex(mode)
         self._outputs_row_wrap.setVisible(mode == 0)
         self.clear_outputs_btn.setVisible(mode == 0)
-        for w in (self.run_queue_btn, self.clear_queue_btn):
+        for w in (self.run_queue_btn, self.retry_queue_btn, self.clear_queue_btn):
             w.setVisible(mode == 1)
 
     # -- outputs -----------------------------------------------------------
@@ -4067,7 +4081,13 @@ class OutputsTab(QWidget):
         self.queue_list.clear()
         for item in self.main_window.queue_manager.items:
             text = f"[{item['status']}]  {item['tab_name']}"
-            self.queue_list.addItem(QListWidgetItem(text))
+            row = QListWidgetItem(text)
+            row.setToolTip(item.get("error", ""))
+            self.queue_list.addItem(row)
+        manager = self.main_window.queue_manager
+        self.run_queue_btn.setEnabled(not manager.running and any(i["status"] == "Waiting" for i in manager.items))
+        self.retry_queue_btn.setEnabled(not manager.running and any(i["status"] == "Error" for i in manager.items))
+        self.clear_queue_btn.setEnabled(not manager.running and bool(manager.items))
 
     def _update_badge(self):
         self.queue_badge.set_count(len(self.main_window.queue_manager.items))
