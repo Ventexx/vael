@@ -66,7 +66,7 @@ class QueueTests(unittest.TestCase):
         manager.add_item(job("slow"))
         states = []
 
-        def execute(*args, run_state):
+        def execute(*args, run_state, **kwargs):
             states.append(run_state)
             if not run_state:
                 run_state["prompt_id"] = "existing-prompt"
@@ -83,8 +83,37 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(manager.items, [])
         self.assertIs(states[0], states[1])
 
+    def test_shutdown_stops_monitoring_and_does_not_start_next_job(self):
+        manager = cover.QueueManager(None)
+        manager.add_item(job("active"))
+        manager.add_item(job("waiting"))
+        started = cover.threading.Event()
+        calls = []
+
+        def execute(*args, stop_event, **kwargs):
+            calls.append(args[1]["name"])
+            started.set()
+            if stop_event.wait(2):
+                raise cover.RunStoppedError()
+
+        with patch.object(cover, "execute_workflow_sync", side_effect=execute):
+            manager.run_queue()
+            drain_until(started.is_set)
+            manager.request_stop()
+            drain_until(lambda: manager._thread is None)
+        self.assertEqual(calls, ["active"])
+        self.assertFalse(manager.running)
+
 
 class ExecutionTests(unittest.TestCase):
+    def test_stop_before_submission_makes_no_server_calls(self):
+        stop = cover.threading.Event()
+        stop.set()
+        with patch.object(cover, "ComfyAPI") as api_class:
+            with self.assertRaises(cover.RunStoppedError):
+                cover.execute_workflow_sync("server", {}, {}, None, {}, stop_event=stop)
+            api_class.assert_not_called()
+
     def test_timeout_reconnects_without_uploading_or_submitting_again(self):
         run_state = {}
         with patch.object(cover, "ComfyAPI") as api_class, patch.object(cover, "POLL_INTERVAL", 0), \

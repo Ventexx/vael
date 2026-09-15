@@ -17,6 +17,7 @@ import uuid
 import json
 import queue
 import datetime
+import threading
 import requests
 from pathlib import Path
 
@@ -990,9 +991,20 @@ class PendingRunError(RuntimeError):
     """The server may still be running this job; never submit it again implicitly."""
 
 
+class RunStoppedError(RuntimeError):
+    """Local monitoring stopped; this does not interrupt the ComfyUI server."""
+
+
 def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, param_values,
-                          run_state=None):
+                          run_state=None, stop_event=None):
     run_state = run_state if run_state is not None else {}
+    stop_event = stop_event if stop_event is not None else threading.Event()
+
+    def check_stopped():
+        if stop_event.is_set():
+            raise RunStoppedError("Stopped checking locally. Submitted jobs may continue in ComfyUI.")
+
+    check_stopped()
     api = ComfyAPI(server)
     if run_state.get("submission_uncertain"):
         raise PendingRunError("Submission response was lost. Check ComfyUI before creating another run.")
@@ -1000,6 +1012,7 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
     if not prompt_id:
         wf = copy.deepcopy(raw_workflow)
         for node_id, path in image_map.items():
+            check_stopped()
             if not path:
                 raise RuntimeError(f"Missing image for node #{node_id}")
             name, subfolder, ftype = api.upload_image(path)
@@ -1011,6 +1024,7 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
                     wf[optional_node_id]["inputs"][key] = val
 
         # A lost POST response does not mean that ComfyUI rejected the job.
+        check_stopped()
         run_state["submission_uncertain"] = True
         try:
             prompt_id = api.queue_prompt(wf)
@@ -1027,7 +1041,8 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
     start = time.monotonic()
     last_error = None
     while True:
-        time.sleep(POLL_INTERVAL)
+        stop_event.wait(POLL_INTERVAL)
+        check_stopped()
         if time.monotonic() - start > POLL_TIMEOUT:
             detail = "Connection unavailable." if last_error else "The job may still be queued or generating."
             raise PendingRunError(f"{detail} Check status to reconnect to prompt {prompt_id}; it will not be submitted again.")
@@ -1060,6 +1075,8 @@ class RunWorker(QObject):
     finished = Signal()
     error = Signal(str)
     pending = Signal(str)
+    stopped = Signal()
+    done = Signal()
 
     def __init__(self, server, raw_workflow, image_map, optional_node_id, param_values, run_state=None):
         super().__init__()
@@ -1069,18 +1086,28 @@ class RunWorker(QObject):
         self.optional_node_id = optional_node_id
         self.param_values = param_values
         self.run_state = run_state if run_state is not None else {}
+        self.stop_event = threading.Event()
+
+    def request_stop(self):
+        # Called directly from the GUI: an Event is safe across threads,
+        # unlike a queued slot blocked behind the worker's polling loop.
+        self.stop_event.set()
 
     def run(self):
         try:
             execute_workflow_sync(
                 self.server, self.raw_workflow, self.image_map,
-                self.optional_node_id, self.param_values, run_state=self.run_state,
+                self.optional_node_id, self.param_values, run_state=self.run_state, stop_event=self.stop_event,
             )
             self.finished.emit()
+        except RunStoppedError:
+            self.stopped.emit()
         except PendingRunError as e:
             self.pending.emit(str(e))
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            self.done.emit()
 
 
 # ---------------------------------------------------------------------------
@@ -1429,28 +1456,38 @@ class WorkflowState(QObject):
         self._worker.finished.connect(self._on_run_finished)
         self._worker.error.connect(self._on_run_error)
         self._worker.pending.connect(self._on_run_pending)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.error.connect(self._thread.quit)
-        self._worker.pending.connect(self._thread.quit)
+        self._worker.stopped.connect(self._on_run_stopped)
+        self._worker.done.connect(self._thread.quit)
+        self._worker.done.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._on_thread_finished)
         self._thread.start()
+
+    def _on_thread_finished(self):
+        self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+        self.running = False
+        self.runStateChanged.emit(False)
+
+    def request_stop(self):
+        if self._worker is not None:
+            self._worker.request_stop()
+
+    def _on_run_stopped(self):
+        self._set_status("Stopped checking locally; submitted jobs may continue in ComfyUI.")
 
     def _on_run_finished(self):
         self._run_request = None
-        self.running = False
-        self.runStateChanged.emit(False)
         self._set_status("Done.")
         self.main_window.outputs_tab.refresh()
 
     def _on_run_error(self, message):
         self._run_request = None
-        self.running = False
-        self.runStateChanged.emit(False)
         self._set_status(f"Error: {message}", error=True)
-        QMessageBox.critical(self.main_window, "Run failed", message)
+        if not getattr(self.main_window, "_closing", False):
+            QMessageBox.critical(self.main_window, "Run failed", message)
 
     def _on_run_pending(self, message):
-        self.running = False
-        self.runStateChanged.emit(False)
         self._set_status(message + " Press Run to check again.", error=True)
 
     def add_to_queue(self):
@@ -3883,6 +3920,7 @@ class QueueManager(QObject):
         self.running = False
         self._thread = None
         self._worker = None
+        self._stopping = False
 
     def add_item(self, item):
         item["status"] = "Waiting"
@@ -3901,10 +3939,15 @@ class QueueManager(QObject):
         self.queueChanged.emit()
 
     def run_queue(self):
-        if self.running or not self.items:
+        if self._stopping or self.running or not self.items:
             return
         self.running = True
         self._run_next()
+
+    def request_stop(self):
+        self._stopping = True
+        if self._worker is not None:
+            self._worker.request_stop()
 
     def retry_failed(self):
         if self.running:
@@ -3927,6 +3970,10 @@ class QueueManager(QObject):
         self.run_queue()
 
     def _run_next(self):
+        if self._stopping:
+            self.running = False
+            self.queueChanged.emit()
+            return
         pending = [i for i in self.items if i["status"] == "Waiting"]
         if not pending:
             self.running = False
@@ -3969,7 +4016,6 @@ class QueueManager(QObject):
         def on_thread_finished():
             # Runs only once the worker thread has fully stopped, so it's
             # safe to drop our references and start the next queue item.
-            worker.deleteLater()
             thread.deleteLater()
             if self._thread is thread:
                 self._thread = None
@@ -3979,9 +4025,8 @@ class QueueManager(QObject):
         worker.finished.connect(on_finished)
         worker.error.connect(on_error)
         worker.pending.connect(on_pending)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        worker.pending.connect(thread.quit)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
         thread.finished.connect(on_thread_finished)
         thread.start()
 
@@ -5463,6 +5508,9 @@ class MainWindow(QMainWindow):
             self._delete_workflow(state)
 
     def _delete_workflow(self, state):
+        if state.running:
+            QMessageBox.information(self, "Workflow running", "Wait for this run to finish before deleting its workflow.")
+            return
         if QMessageBox.question(
             self, "Delete workflow", f"Delete workflow '{state.name}'? This cannot be undone."
         ) != QMessageBox.Yes:
@@ -5521,6 +5569,9 @@ class MainWindow(QMainWindow):
             )
 
     def _edit_workflow(self, state):
+        if state.running:
+            QMessageBox.information(self, "Workflow running", "Wait for this run to finish before editing its workflow.")
+            return
         dlg = WorkflowConfigDialog(self, mode="edit", tab=state)
         dlg.exec()
         if dlg.result == "delete":
@@ -5786,6 +5837,25 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event):
+        owners = [self.queue_manager, *self.workflow_states]
+        active = [owner for owner in owners if owner._thread is not None]
+        if active and not getattr(self, "_closing", False):
+            if QMessageBox.question(
+                self, "Runs in progress",
+                "Close Cover? Submitted jobs may continue in ComfyUI. Waiting queue items will be discarded. "
+                "Cover will finish its current network request before closing.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                event.ignore()
+                return
+        self._closing = True
+        if active:
+            self.setEnabled(False)
+            for owner in owners:
+                owner.request_stop()
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
         if not self._is_windows:
             QApplication.instance().removeEventFilter(self)
         self.config_data["window_geometry"] = {
