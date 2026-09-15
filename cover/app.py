@@ -23,7 +23,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     Qt, QObject, QThread, Signal, QMimeData, QUrl, QSize, QRunnable, QThreadPool,
-    QAbstractListModel, QModelIndex, QRect, QTimer, QPoint, QEvent,
+    QAbstractListModel, QModelIndex, QRect, QTimer, QPoint, QEvent, QFile,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QDrag, QDesktopServices, QShortcut, QKeySequence, QIcon, QAction,
@@ -4038,6 +4038,18 @@ class QueueManager(QObject):
 # ---------------------------------------------------------------------------
 # Outputs / Queue tab — one panel, two switchable modes (no separate window)
 # ---------------------------------------------------------------------------
+def trash_output(path, output_dir):
+    """Trash one direct output file. Never fall back to permanent deletion."""
+    path = Path(path)
+    if path.is_symlink() or path.parent.resolve() != Path(output_dir).resolve():
+        raise ValueError("The file is outside the output folder or is a symbolic link.")
+    if path.suffix.lower() != ".png" or not path.is_file():
+        raise ValueError("The output PNG no longer exists.")
+    success, _ = QFile.moveToTrash(str(path))
+    if not success:
+        raise OSError("Could not move the file to the trash. It may be in use or this location may not support trash.")
+
+
 class OutputsTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -4083,6 +4095,7 @@ class OutputsTab(QWidget):
         self.outputs_list.setIconSize(QSize(140, 140))
         self.outputs_list.setResizeMode(QListWidget.Adjust)
         self.outputs_list.setMovement(QListWidget.Static)
+        self.outputs_list.setSelectionMode(QListWidget.ExtendedSelection)
         self.outputs_list.setSpacing(10)
         self.outputs_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.outputs_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -4118,7 +4131,15 @@ class OutputsTab(QWidget):
         self._outputs_row_wrap.setLayout(outputs_row)
         footer_lay.addWidget(self._outputs_row_wrap)
 
-        self.clear_outputs_btn = QPushButton("Clear All")
+        self.trash_selected_btn = QPushButton("Trash Selected")
+        self.trash_selected_btn.setObjectName("dangerButton")
+        self.trash_selected_btn.setEnabled(False)
+        self.trash_selected_btn.clicked.connect(self._trash_selected)
+        self.outputs_list.itemSelectionChanged.connect(
+            lambda: self.trash_selected_btn.setEnabled(bool(self.outputs_list.selectedItems()))
+        )
+        footer_lay.addWidget(self.trash_selected_btn)
+        self.clear_outputs_btn = QPushButton("Trash All PNGs")
         self.clear_outputs_btn.setObjectName("dangerButton")
         self.clear_outputs_btn.clicked.connect(self._clear_all)
         footer_lay.addWidget(self.clear_outputs_btn)
@@ -4156,6 +4177,7 @@ class OutputsTab(QWidget):
         self.stack.setCurrentIndex(mode)
         self._outputs_row_wrap.setVisible(mode == 0)
         self.clear_outputs_btn.setVisible(mode == 0)
+        self.trash_selected_btn.setVisible(mode == 0)
         for w in (self.run_queue_btn, self.retry_queue_btn, self.check_queue_btn, self.clear_queue_btn):
             w.setVisible(mode == 1)
 
@@ -4184,20 +4206,36 @@ class OutputsTab(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._output_dir())))
 
     def _clear_all(self):
-        d = self._output_dir()
-        files = list(d.glob("*.png"))
+        try:
+            d = self._output_dir()
+            files = list(d.glob("*.png"))
+        except OSError as exc:
+            QMessageBox.warning(self, "Cannot read outputs", str(exc))
+            return
+        self._trash_outputs(files)
+
+    def _trash_selected(self):
+        self._trash_outputs([Path(item.data(Qt.UserRole)) for item in self.outputs_list.selectedItems()])
+
+    def _trash_outputs(self, files):
         if not files:
             return
         if QMessageBox.question(
-            self, "Clear all outputs", f"Delete all {len(files)} saved output image(s)? This cannot be undone."
+            self, "Trash outputs",
+            f"Move {len(files)} PNG image(s) to the trash from:\n{self.main_window.output_dir}\n\n"
+            "This includes the chosen files regardless of which app created them.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) != QMessageBox.Yes:
             return
+        failures = []
         for f in files:
             try:
-                f.unlink()
-            except Exception:
-                pass
+                trash_output(f, self.main_window.output_dir)
+            except (OSError, ValueError) as exc:
+                failures.append(f"{f.name}: {exc}")
         self.refresh()
+        if failures:
+            QMessageBox.warning(self, "Some outputs could not be trashed", "\n".join(failures))
 
     # -- queue ---------------------------------------------------------
     def _refresh_queue(self):

@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 import time
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -104,6 +105,38 @@ class QueueTests(unittest.TestCase):
             drain_until(lambda: manager._thread is None)
         self.assertEqual(calls, ["active"])
         self.assertFalse(manager.running)
+
+
+class OutputTrashTests(unittest.TestCase):
+    def test_trash_failure_never_permanently_deletes_the_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "output.png"
+            path.write_bytes(b"example")
+            with patch.object(cover.QFile, "moveToTrash", return_value=(False, "")):
+                with self.assertRaises(OSError):
+                    cover.trash_output(path, directory)
+            self.assertEqual(path.read_bytes(), b"example")
+
+    def test_files_outside_the_output_folder_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "outputs"
+            root.mkdir()
+            outside = Path(directory) / "other.png"
+            outside.write_bytes(b"example")
+            with patch.object(cover.QFile, "moveToTrash") as trash:
+                with self.assertRaises(ValueError):
+                    cover.trash_output(outside, root)
+                trash.assert_not_called()
+
+    def test_partial_failure_reports_the_file_and_continues(self):
+        panel = SimpleNamespace(main_window=SimpleNamespace(output_dir="outputs"), refresh=Mock())
+        with patch.object(cover.QMessageBox, "question", return_value=cover.QMessageBox.Yes), \
+                patch.object(cover.QMessageBox, "warning") as warning, \
+                patch.object(cover, "trash_output", side_effect=[OSError("locked"), None]) as trash:
+            cover.OutputsTab._trash_outputs(panel, [Path("a.png"), Path("b.png")])
+            self.assertEqual(trash.call_count, 2)
+            self.assertIn("a.png: locked", warning.call_args.args[2])
+            panel.refresh.assert_called_once()
 
 
 class WorkflowTests(unittest.TestCase):
