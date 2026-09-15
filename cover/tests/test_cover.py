@@ -7,7 +7,8 @@ import os
 from pathlib import Path
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
@@ -103,6 +104,42 @@ class QueueTests(unittest.TestCase):
             drain_until(lambda: manager._thread is None)
         self.assertEqual(calls, ["active"])
         self.assertFalse(manager.running)
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_repeated_run_does_not_replace_the_active_worker(self):
+        main = SimpleNamespace(server="server", outputs_tab=Mock())
+        state = cover.WorkflowState(main)
+        state.raw_workflow = {"1": {"class_type": "SaveImage", "inputs": {}}}
+        started = cover.threading.Event()
+        release = cover.threading.Event()
+        calls = []
+
+        def execute(*args, **kwargs):
+            calls.append(1)
+            started.set()
+            release.wait(2)
+
+        with patch.object(cover, "execute_workflow_sync", side_effect=execute):
+            state.run_now()
+            original_thread = state._thread
+            try:
+                drain_until(started.is_set)
+                state.run_now()
+                self.assertIs(state._thread, original_thread)
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+                drain_until(lambda: state._thread is None)
+            state.run_now()
+            drain_until(lambda: state._thread is None)
+            self.assertEqual(len(calls), 2)
+
+    def test_run_is_ignored_during_shutdown(self):
+        state = cover.WorkflowState(SimpleNamespace(_closing=True))
+        with patch.object(cover, "RunWorker") as worker:
+            state.run_now()
+            worker.assert_not_called()
 
 
 class ExecutionTests(unittest.TestCase):

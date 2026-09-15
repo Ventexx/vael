@@ -1430,6 +1430,10 @@ class WorkflowState(QObject):
         return True
 
     def run_now(self):
+        # Guard every caller, including shortcuts. Keep the guard until
+        # thread.finished clears the reference, not just until the result arrives.
+        if self.running or self._thread is not None or getattr(self.main_window, "_closing", False):
+            return
         if self._run_request and self._run_request["run_state"].get("submission_uncertain"):
             if QMessageBox.question(
                 self.main_window, "Submission not confirmed",
