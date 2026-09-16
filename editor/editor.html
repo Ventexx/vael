@@ -544,6 +544,10 @@
           <svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>
           <span class="tool-tooltip">Save (Ctrl+S)</span>
         </button>
+        <button class="qa-btn" onclick="$('overlay-export').classList.add('open')" aria-label="Save options">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg>
+          <span class="tool-tooltip">Save options</span>
+        </button>
       </div>
     </div>
     <div id="topbar-filmstrip-cell">
@@ -734,6 +738,16 @@
 </div>
 
 <!-- CONFIRM OVERLAY -->
+<div class="overlay" id="overlay-export">
+  <div class="overlay-box">
+    <div class="meta-title">Save options</div>
+    <p>Format follows the filename: PNG, JPEG, or WebP.</p>
+    <p style="margin-top:12px"><label>JPEG / WebP quality (%) <input id="export-quality" type="number" min="1" max="100" value="92" style="width:65px"></label></p>
+    <p style="margin-top:12px"><label>JPEG background <input id="export-background" type="color" value="#ffffff"></label></p>
+    <p style="margin-top:12px">PNG and WebP retain transparency. JPEG fills transparent areas with this color.</p>
+    <button class="overlay-close" onclick="$('overlay-export').classList.remove('open')">close</button>
+  </div>
+</div>
 <div class="overlay" id="overlay-confirm">
   <div class="overlay-box">
     <div class="confirm-msg" id="confirm-msg"></div>
@@ -1727,6 +1741,7 @@ function restoreHistoryState(img, idx) {
   }
 }
 function undo() {
+  if (state.saveBusy) return;
   const img = state.images[state.activeIdx];
   if (!img || img.historyIndex <= 0) { setStatus('Nothing to undo', false); return; }
   const undoneLabel = img.history[img.historyIndex].label;
@@ -1737,6 +1752,7 @@ function undo() {
   setStatus(`Undid: ${undoneLabel}`, true);
 }
 function redo() {
+  if (state.saveBusy) return;
   const img = state.images[state.activeIdx];
   if (!img || img.historyIndex >= img.history.length - 1) { setStatus('Nothing to redo', false); return; }
   img.historyIndex++;
@@ -1746,6 +1762,7 @@ function redo() {
   setStatus(`Redid: ${img.history[img.historyIndex].label}`, true);
 }
 function jumpToHistory(idx) {
+  if (state.saveBusy) return;
   const img = state.images[state.activeIdx];
   if (!img || idx === img.historyIndex || idx < 0 || idx >= img.history.length) return;
   img.historyIndex = idx;
@@ -1987,7 +2004,7 @@ function setFiltersBusy(busy) {
 const BLUR_COOLDOWN_MS = 500;
 let _lastBlurAt = 0;
 async function runFilter(type, value) {
-  if (state.filterBusy) return; // a blur job is already running; ignore re-clicks
+  if (state.filterBusy || state.saveBusy) return;
   if (value === undefined) value = getFilterValue(type);
   const isBlur = type !== 'pixelate';
   if (isBlur) {
@@ -2786,25 +2803,7 @@ function getVisibleImageIndices() {
   return all.filter(i => state.images[i].categoryId === null || state.images[i].categoryId === undefined);
 }
 async function saveAllInCategory(categoryId) {
-  const indices = state.images.map((_, i) => i).filter(i => state.images[i].categoryId === categoryId);
-  const unsaved = indices.filter(i => state.images[i].unsaved);
-  if (!unsaved.length) { setStatus('Nothing to save in this category', true); return; }
-  let ok = 0, fail = 0;
-  for (const i of unsaved) {
-    const img = state.images[i];
-    try {
-      await ensureFullSrc(img);
-      const revision = img._encodedRevision;
-      if (img.path) { await window.electronAPI.save(img.path, img.src); markSaved(img, revision); ok++; }
-      else {
-        const path = await window.electronAPI.saveAs(img.src, img.name);
-        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); markSaved(img, revision); ok++; }
-        else fail++;
-      }
-    } catch (e) { fail++; }
-  }
-  renderGallery(); updateStatusBar();
-  setStatus(fail ? `Saved ${ok}, ${fail} skipped` : `Saved ${ok} image${ok === 1 ? '' : 's'} in category`, fail === 0);
+  return saveImageSet(state.images.filter(img => img.categoryId === categoryId && img.unsaved));
 }
 // Drag a filmstrip thumbnail onto a category pill to file it there — the
 // pill itself carries no thumbnails, so this drop target is the whole button.
@@ -3184,70 +3183,96 @@ function renderHotkeyGuide() {
     });
   });
 }
+function exportMime(filePath) {
+  const ext = filePath.split('.').pop().toLowerCase();
+  const mime = {png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp'}[ext];
+  if (!mime) throw new Error('Choose a PNG, JPEG, or WebP filename.');
+  return mime;
+}
+function defaultExportName(name) {
+  return /\.(png|jpe?g|webp)$/i.test(name) ? name : name.replace(/\.[^.]+$/, '') + '.png';
+}
+async function encodeExport(img, filePath) {
+  const mime = exportMime(filePath);
+  let canvas = img.canvas;
+  if (mime === 'image/jpeg') {
+    canvas = document.createElement('canvas');
+    canvas.width = img.w; canvas.height = img.h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = $('export-background').value;
+    ctx.fillRect(0, 0, img.w, img.h);
+    ctx.drawImage(img.canvas, 0, 0);
+  }
+  const quality = Math.min(100, Math.max(1, Number($('export-quality').value) || 92)) / 100;
+  return new Promise((resolve, reject) => canvas.toBlob(blob => {
+    if (!blob || blob.type !== mime) { reject(new Error('This image format could not be encoded.')); return; }
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not encode the image.'));
+    reader.readAsDataURL(blob);
+  }, mime, quality));
+}
+async function persistImage(img, saveAs = false) {
+  if (state.filterBusy || state.saveBusy) throw new Error('Wait for the current image operation to finish.');
+  state.saveBusy = true;
+  try {
+    let destination = img.path;
+    if (saveAs || !destination || !/\.(png|jpe?g|webp)$/i.test(destination)) {
+      destination = window.electronAPI?.chooseSavePath
+        ? await window.electronAPI.chooseSavePath(defaultExportName(img.name))
+        : defaultExportName(img.name);
+      if (!destination) return false;
+    }
+    await hydrateImage(img);
+    const revision = currentRevision(img);
+    const src = await encodeExport(img, destination);
+    if (window.electronAPI?.save) {
+      await window.electronAPI.save(destination, src);
+      img.path = destination;
+    } else {
+      const link = document.createElement('a');
+      link.href = src; link.download = destination; link.click();
+    }
+    img.name = destination.split(/[\\/]/).pop();
+    markSaved(img, revision);
+    return true;
+  } finally {
+    state.saveBusy = false;
+  }
+}
 async function saveImage() {
   const img = state.images[state.activeIdx];
   if (!img) { setStatus('No image to save', false); return; }
-  const savedIdx = state.activeIdx;
-  if (!img.path) { saveImageAs(); return; }
   try {
-    await ensureFullSrc(img);
-    const revision = img._encodedRevision;
-    await window.electronAPI?.save?.(img.path, img.src);
-    markSaved(img, revision); renderGallery(); updateStatusBar();
+    if (!await persistImage(img)) { setStatus('Save cancelled', false); return; }
+    renderGallery(); updateStatusBar();
     setStatus(`Saved ${img.name}`, true);
-    advanceToNextImage(savedIdx);
-  } catch (e) {
-    setStatus(`Failed to save ${img.name}`, false);
-  }
+    const idx = state.images.indexOf(img);
+    if (idx === state.activeIdx) advanceToNextImage(idx);
+  } catch (e) { setStatus(`Save failed: ${e.message}`, false); }
 }
 async function saveImageAs() {
-  const img = state.images[state.activeIdx]; if (!img) return;
-  const savedIdx = state.activeIdx;
+  const img = state.images[state.activeIdx];
+  if (!img) return;
   try {
-    await ensureFullSrc(img);
-    const revision = img._encodedRevision;
-    const action = window.electronAPI?.saveAs
-      ? window.electronAPI.saveAs(img.src, img.name)
-      : Promise.resolve(downloadFallback(img));
-    const path = await action;
-    if (path) {
-      img.path = path;
-      img.name = path.split(/[\\/]/).pop();
-      markSaved(img, revision); renderGallery(); updateStatusBar();
-      setStatus(`Saved ${img.name}`, true);
-      advanceToNextImage(savedIdx);
-    } else {
-      setStatus('Save cancelled', false);
-    }
-  } catch (e) {
-    setStatus('Save failed', false);
-  }
+    if (!await persistImage(img, true)) { setStatus('Save cancelled', false); return; }
+    renderGallery(); updateStatusBar();
+    setStatus(`Saved ${img.name}`, true);
+    const idx = state.images.indexOf(img);
+    if (idx === state.activeIdx) advanceToNextImage(idx);
+  } catch (e) { setStatus(`Save failed: ${e.message}`, false); }
 }
-function downloadFallback(img) {
-  const a = document.createElement('a'); a.href = img.src; a.download = img.name; a.click();
-  return img.name;
-}
-async function saveAllChanges() {
-  const unsaved = state.images.filter(i => i.unsaved);
-  if (!unsaved.length) { setStatus('Nothing to save', true); return; }
+async function saveImageSet(images) {
+  if (!images.length) { setStatus('Nothing to save', true); return; }
   let ok = 0, fail = 0;
-  for (const img of unsaved) {
-    try {
-      await ensureFullSrc(img);
-      const revision = img._encodedRevision;
-      if (img.path) {
-        await window.electronAPI.save(img.path, img.src);
-        markSaved(img, revision); ok++;
-      } else {
-        const path = await window.electronAPI.saveAs(img.src, img.name);
-        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); markSaved(img, revision); ok++; }
-        else fail++;
-      }
-    } catch (e) { fail++; }
+  for (const img of images) {
+    try { if (await persistImage(img)) ok++; else fail++; }
+    catch (e) { fail++; console.error(img.name, e); }
   }
   renderGallery(); updateStatusBar();
   setStatus(fail ? `Saved ${ok}, ${fail} skipped` : `Saved all changes (${ok})`, fail === 0);
 }
+async function saveAllChanges() { return saveImageSet(state.images.filter(img => img.unsaved)); }
 
 // ════════════════════════════════════════════════════════════════════
 // METADATA OVERLAY

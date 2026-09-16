@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { outputFormat, decodeExport } = require('./image-files');
 
 let win;
 
@@ -201,22 +202,25 @@ ipcMain.handle('read-image-full', async (_, filePath) => {
   return `data:image/${mime};base64,${buf.toString('base64')}`;
 });
 
-// Save-as via native dialog
-ipcMain.handle('save-as', async (_, src, defaultName) => {
+// Choose the destination before the renderer encodes its canvas.
+ipcMain.handle('choose-save-path', async (_, defaultName) => {
   const { filePath } = await dialog.showSaveDialog(win, {
     defaultPath: defaultName,
-    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    filters: [
+      { name: 'Supported images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+      { name: 'PNG', extensions: ['png'] }, { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
+      { name: 'WebP', extensions: ['webp'] },
+    ],
   });
   if (!filePath) return null;
-  const base64 = src.replace(/^data:image\/\w+;base64,/, '');
-  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-  return filePath;
+  const destination = path.extname(filePath) ? filePath : filePath + '.png';
+  outputFormat(destination);
+  return destination;
 });
 
 // Save to known path
 ipcMain.handle('save', async (_, filePath, src) => {
-  const base64 = src.replace(/^data:image\/\w+;base64,/, '');
-  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+  await fs.promises.writeFile(filePath, decodeExport(filePath, src));
   return true;
 });
 
