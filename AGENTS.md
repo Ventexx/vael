@@ -1,6 +1,6 @@
 # Vael: project context and improvement backlog
 
-Last updated: 2026-09-15.
+Last updated: 2026-09-16.
 
 ## Read this first
 
@@ -68,6 +68,35 @@ and collapsible panels. Preserve the established style when adding controls.
 - Cover queue items, prompt IDs, and assigned input images remain session-only.
   Closing Cover stops local monitoring, not server jobs. The output panel still
   browses PNGs directly inside a configured local folder.
+- Editor reliability fixes E1-E7 were implemented and pushed individually:
+  - E1 / `a36d4ad`: batch blur no longer rejects its own cooldown; callers await
+    completion, and Template + Save saves only after successful filtering.
+  - E2 / `2a998c5`: saved state follows unique pixel revisions, so branching after
+    undo, selection-only steps, and history trimming report unsaved changes correctly.
+  - E3 / `2c2cbfa`: PNG/JPEG/WebP bytes match the selected extension; Save As chooses
+    the destination before encoding. Save options control quality and JPEG background.
+  - E4 / `b0816f7`: private session files retain pixels, masks, and undo/redo when
+    images leave memory; simultaneous hydration requests share one load.
+  - E5 / `1162a11`: a 256 MiB retained-data budget counts dimensions and shared
+    history buffers; older buffers spill to disk, closed images release their cache,
+    and oversized filter allocations are rejected before starting.
+  - E6 / `68a8bd0`: write and flush a sibling temporary file before publication;
+    check source/destination content versions and serialize same-path saves.
+    Conflicts retain unsaved edits and explain Save As/reopen options.
+  - E7 / `f09eb91`: explicitly remove source metadata by default, or retain PNG
+    text chunks for PNG-to-PNG saves. Original metadata remains inspectable after
+    editing/eviction. EXIF and preview chunks are not copied. Usage notes updated.
+- Editor checks passed in actual offscreen Electron on Windows: output encoding,
+  cancellation, eviction/undo/redo, forced memory pressure, file-version conflicts,
+  PNG metadata retention/removal, and Save options layout. Separate Node checks
+  covered history branching, batch dispatch, damaged metadata, and simulated
+  write/publication failures. Regression scripts are local, outside the repository.
+- Editor remains a desktop Electron app. Its cache is session-only, keeps at most
+  40 history steps per image, and is removed on normal exit; crashes may leave OS
+  temporary files. The memory budget is not a total-process RAM limit. PNG-text
+  retention is not general metadata preservation. Final file-version checks are
+  not a cross-application lock. Linux, production-scale peak RAM, and power-loss
+  durability were not verified. See `editor/editor.md` for the detailed limits.
 
 ## All remaining optional improvements from the review
 
@@ -187,7 +216,8 @@ resolve paths relative to the launcher, and stop clearly when setup fails.
 
 Test the outcomes the owner relies on:
 
-- Editor: branching from saved history, batch filters, output encoding, and eviction.
+- Editor: branching from saved history, batch filters, output encoding, eviction,
+  save conflicts, and metadata policy. Local checks now cover these; see above.
 - Cover: queue failure, timeout/reconnection, duplicate submission, shutdown, and
   output refresh/trash behavior. Existing local checks cover these with mocks.
 - Indexer: incremental metadata refresh and failed or stale writes.
@@ -201,7 +231,8 @@ establishes real-server or OS integration behavior.
 ### 4. Accurate documentation
 
 Bring documentation into agreement with code: indexer's renamed data directory,
-identifier and search behavior, editor's batch operations, and reviewer's flags.
+identifier and search behavior, and reviewer's flags. Editor's batch/save/cache
+behavior is now documented in `editor/editor.md`; keep it current.
 Cover now has `cover/cover.md`; keep it current. Review backup recovery instructions
 against the actual recovery implementation. Correct outdated names and file paths.
 
@@ -223,18 +254,18 @@ specific sequence of clicks and clearly show which files/jobs are being handed o
 
 ## Remaining correctness findings: quick orientation
 
-These were identified in the review and are not resolved by the Cover work. Verify
+These were identified in the review and remain after the Cover and Editor work. Verify
 them against the current implementation before fixing them.
 
 | App | Findings |
 | --- | --- |
-| editor | E1 batch-blur cooldown rejects the batch; E2 history-index reuse incorrectly marks new edits saved; E3 PNG bytes under other extensions; E4 eviction removes undo history; E5 memory limits ignore dimensions/history size; E6 direct overwrites and stale-source edits; E7 metadata policy |
 | indexer | I1 folder metadata skipped by incremental reload; I2 malformed JSON replaced during tag edits; I3 stale/non-atomic metadata writes; I4 silent settings/notes failures; I5 indexing errors leave loading state; I6 main-thread filesystem/search/render work; I7 silent 2,000-result cap; I8 script execution/error/cancellation handling; I12 cache freshness and bounds |
 | reviewer | R1 full-memory rescan; R2 unbounded full-resolution cache; R3 blocking scans/reads; R4 failed trash marks cleared; R5 stale replaced-file previews; R6 global shortcuts; R7 overlapping-root duplicates |
 | checklist | L1 unnamed draft loss; L2 unvalidated import; L3 undo intercepts text editing; L4 storage failures; L5 delayed-clear timing race; L6 profile deletion has no recovery; L11 cross-tab overwrites; L12 external fonts |
 | backup | B1 pending recovery writes its JSON wrapper; B2 recovery test misses that bug; B3 shared-history run-ID race; B4 latest comparison not scoped by backup family; B5 verification races archive replacement; B6 failures after publication need accurate outcome reporting |
 
-The strongest next candidates are editor E1-E3 and backup B1-B2.
+Editor E1-E7 are complete. E8-E12 remain optional and unapproved.
+The strongest next candidates are backup B1-B2 and indexer I1-I3.
 
 ## New feature candidates for owner review
 
