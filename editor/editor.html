@@ -1988,7 +1988,7 @@ async function runFilter(type, value) {
     if (now - _lastBlurAt < BLUR_COOLDOWN_MS) return; // swallow the accidental double-press
     _lastBlurAt = now;
   }
-  if (state.multiSelected.size >= 2) { runFilterBatch(type, value); return; }
+  if (state.multiSelected.size >= 2) return runFilterBatch(type, value);
   const img = state.images[state.activeIdx];
   if (!img) { setStatus('No image open', false); return; }
   // Normally already hydrated by the time it's selected, but guard against
@@ -2013,6 +2013,7 @@ async function runFilter(type, value) {
     renderGallery();
     updateStatusBar();
     setStatus(`${type === 'pixelate' ? 'Pixelated' : 'Bokeh blurred'} ${hadSelection ? 'selection' : 'entire image'} at ${value}px`, true);
+    return true;
   } catch (err) {
     console.error(err);
     setStatus(`Failed to apply ${type}`, false);
@@ -2027,11 +2028,7 @@ async function runFilterBatch(type, value) {
   // mode treats each selected image as fully selected.
   if (state.filterBusy) return;
   const isBlur = type !== 'pixelate';
-  if (isBlur) {
-    const now = Date.now();
-    if (now - _lastBlurAt < BLUR_COOLDOWN_MS) return;
-    _lastBlurAt = now;
-  }
+  // The public runFilter entry point already applied the cooldown.
   setFiltersBusy(true);
   if (isBlur) setStatus('Bokeh blurring…', true);
   const indices = [...state.multiSelected];
@@ -2072,6 +2069,7 @@ async function runFilterBatch(type, value) {
   renderGallery();
   updateStatusBar();
   setStatus(ok ? `${type === 'pixelate' ? 'Pixelated' : 'Bokeh blurred'} ${ok} image${ok > 1 ? 's' : ''} (${value}px)` : `Failed to apply ${type}`, ok > 0);
+  return ok === indices.length && ok > 0;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -3676,7 +3674,7 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const target = getTemplateSaveTarget();
     if (!target) { setStatus('Template + Save: no template selected', false); return; }
-    Promise.resolve(runFilter(target.type, target.value)).then(() => saveImage());
+    Promise.resolve(runFilter(target.type, target.value)).then(applied => { if (applied) return saveImage(); });
     return;
   }
 
