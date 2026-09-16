@@ -445,6 +445,11 @@
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .overlay.open { display: flex; }
   .overlay-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; padding: 16px; width: 280px; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+  #overlay-export .overlay-box { width: 380px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow-y: auto; font-size: 11px; font-weight: 400; line-height: 1.5; }
+  #overlay-export input, #overlay-export select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 3px; padding: 4px; font: inherit; }
+  #overlay-export select { width: 100%; }
+  #overlay-export input[type=color] { padding: 2px; height: 25px; vertical-align: middle; }
+  #overlay-export input:focus, #overlay-export select:focus { outline: 1px solid var(--accent-dim); }
   .meta-title { font-size: 12px; color: var(--text-bright); margin-bottom: 10px; font-weight: 600; word-break: break-all; }
   .meta-row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 11px; }
   .meta-key { color: var(--text-dim); flex-shrink: 0; }
@@ -729,7 +734,7 @@
     <div class="meta-title" id="meta-filename">—</div>
     <div id="meta-body"></div>
     <button class="meta-full-toggle" id="meta-full-toggle" onclick="toggleFullMeta()">
-      <span id="meta-full-toggle-label">show full metadata</span>
+      <span id="meta-full-toggle-label">show original metadata</span>
       <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
     </button>
     <div id="meta-full-body"></div>
@@ -745,6 +750,12 @@
     <p style="margin-top:12px"><label>JPEG / WebP quality (%) <input id="export-quality" type="number" min="1" max="100" value="92" style="width:65px"></label></p>
     <p style="margin-top:12px"><label>JPEG background <input id="export-background" type="color" value="#ffffff"></label></p>
     <p style="margin-top:12px">PNG and WebP retain transparency. JPEG fills transparent areas with this color.</p>
+    <p style="margin-top:12px"><label>Source metadata
+      <select id="export-metadata" style="display:block;margin-top:6px;max-width:100%">
+        <option value="strip">Remove source metadata (default)</option>
+        <option value="png-text">Keep PNG text (PNG only)</option>
+      </select></label></p>
+    <p style="margin-top:8px">Keep PNG text copies prompts, workflows, and comments unchanged from a PNG source to a PNG output. EXIF (including GPS tags) and preview chunks are not copied. JPEG and WebP require the remove option.</p>
     <button class="overlay-close" onclick="$('overlay-export').classList.remove('open')">close</button>
   </div>
 </div>
@@ -2154,6 +2165,7 @@ function residentImageBytes() {
     add(img.canvas, (img.canvas?.width || 0) * (img.canvas?.height || 0) * 4);
     add(img._thumbCanvas, (img._thumbCanvas?.width || 0) * (img._thumbCanvas?.height || 0) * 4);
     add(img.src, (img.src?.length || 0) * 2);
+    add(img._originalSrc, (img._originalSrc?.length || 0) * 2);
     add(img.mask?.buffer, img.mask?.byteLength || 0);
     for (const st of img.history || []) {
       add(st.imageData?.data.buffer, st.imageData?.data.byteLength || 0);
@@ -2168,7 +2180,7 @@ function scheduleMemoryCheck() {
 }
 async function pruneImageCache(img) {
   if (img._evicting || img._hydrating) return;
-  const needed = new Set([img._sessionKey]);
+  const needed = new Set([img._sessionKey, img._originalKey]);
   for (const st of img.history || []) { needed.add(st.pixelsKey); needed.add(st.maskKey); }
   for (const key of img._cacheKeys || []) {
     if (!needed.has(key)) {
@@ -2227,7 +2239,7 @@ function releaseImage(img) {
     img._cacheKeys?.clear();
     if (img.canvas) img.canvas.width = img.canvas.height = 0;
     if (img._thumbCanvas) img._thumbCanvas.width = img._thumbCanvas.height = 0;
-    img.canvas = img.ctx = img.history = img.mask = img.src = img._thumbCanvas = null;
+    img.canvas = img.ctx = img.history = img.mask = img.src = img._thumbCanvas = img._originalSrc = img._fullMeta = null;
   }).catch(error => console.error('Could not release image cache', error));
 }
 // History labels/revisions remain resident. Large pixel and mask buffers can
@@ -2290,6 +2302,11 @@ async function hydrateImage(img) {
       const opened = await window.electronAPI.readImageFull(img.path);
       dataUrl = opened.src;
       img._sourceVersion = opened.version;
+    }
+    if (!img._originalKey && !img._originalSrc) {
+      img._originalName = img.name;
+      if (window.electronAPI?.cachePut) img._originalKey = await cacheValue(img, { source: dataUrl });
+      else img._originalSrc = dataUrl;
     }
     const tmpImg = new Image();
     tmpImg.src = dataUrl;
@@ -2473,6 +2490,8 @@ function loadImageFromSrc(name, path, dataUrl, sourceVersion) {
       updateThumbCanvas(stub, tmpImg);
       if (window.electronAPI?.cachePut) {
         stub._sessionKey = await cacheValue(stub, { source: dataUrl, mask: null });
+        stub._originalKey = stub._sessionKey;
+        stub._originalName = name;
         stub.src = null;
       }
       resolve(stub);
@@ -3337,9 +3356,12 @@ async function persistImage(img, saveAs = false) {
     const revision = currentRevision(img);
     const src = await encodeExport(img, destination);
     if (window.electronAPI?.save) {
-      img._sourceVersion = await window.electronAPI.save(destination, src, expectedVersion);
+      img._sourceVersion = await window.electronAPI.save(destination, src, expectedVersion, {
+        policy: $('export-metadata').value, sourceKey: img._originalKey,
+      });
       img.path = destination;
     } else {
+      if ($('export-metadata').value !== 'strip') throw new Error('PNG text retention requires the desktop application.');
       const link = document.createElement('a');
       link.href = src; link.download = destination; link.click();
     }
@@ -3392,7 +3414,7 @@ async function saveAllChanges() { return saveImageSet(state.images.filter(img =>
 async function openMetaPanel() {
   const img = state.images[state.activeIdx];
   if (!img) { setStatus('No image open', false); return; }
-  await ensureFullSrc(img);
+  const previewSource = await ensureFullSrc(img);
   $('meta-filename').textContent = img.name;
   const body = $('meta-body'); body.innerHTML = '';
   // Collapse the full-metadata section back down every time the panel is
@@ -3401,11 +3423,11 @@ async function openMetaPanel() {
   $('meta-full-body').classList.remove('open');
   $('meta-full-body').innerHTML = '';
   $('meta-full-toggle').classList.remove('open');
-  $('meta-full-toggle-label').textContent = 'show full metadata';
+  $('meta-full-toggle-label').textContent = 'show original metadata';
   const ext = img.name.includes('.') ? img.name.split('.').pop().toUpperCase() : '—';
   const mp = ((img.w * img.h) / 1000000).toFixed(2);
   const ratio = (() => { const g = (a, b) => b ? g(b, a % b) : a; const d = g(img.w, img.h) || 1; return `${img.w / d}:${img.h / d}`; })();
-  const b64len = img.src.length - (img.src.indexOf(',') + 1);
+  const b64len = previewSource.length - (previewSource.indexOf(',') + 1);
   const bytes = Math.round(b64len * 0.75);
   const sizeStr = bytes > 1048576 ? (bytes / 1048576).toFixed(2) + ' MB' : bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B';
   const isNew = !img.path;
@@ -3413,6 +3435,8 @@ async function openMetaPanel() {
     ['filename', img.name], ['format', ext], ['dimensions', `${img.w} × ${img.h} px`],
     ['megapixels', mp + ' MP'], ['aspect', ratio], ['est. size', sizeStr], null,
     ['status', img.unsaved ? 'unsaved' : 'saved'],
+    ['metadata source', img._originalName || img.name],
+    ['save metadata', $('export-metadata').value === 'png-text' ? 'keep PNG text only' : 'remove source metadata'],
     ['source', isNew ? 'created in app' : (img.path || 'opened from file')],
   ];
   rows.forEach(row => {
@@ -3432,7 +3456,7 @@ function closeMetaPanelDirect() { $('overlay-meta').classList.remove('open'); }
 // FULL METADATA — raw, unsorted dump of every tag the reader can find
 // (EXIF for JPEG, tEXt/iTXt/eXIf chunks for PNG). This is deliberately
 // separate from the curated summary above: it's only decoded the first
-// time someone clicks "show full metadata" (see toggleFullMeta), and the
+// time someone clicks "show original metadata" (see toggleFullMeta), and the
 // result is cached on the image object so flipping it open/closed again
 // doesn't re-parse. Nothing here is sorted or filtered — it's presented
 // in the order it was found in the file, exactly as read.
@@ -3610,7 +3634,9 @@ async function readFullMetadata(img) {
   if (img._fullMeta) return img._fullMeta;
   let entries = [];
   try {
-    const bytes = dataUrlToBytes(img.src);
+    await hydrateImage(img);
+    const original = img._originalKey ? (await window.electronAPI.cacheGet(img._originalKey)).source : img._originalSrc;
+    const bytes = dataUrlToBytes(original);
     if (bytes[0] === 0xFF && bytes[1] === 0xD8) entries = parseJPEGFullMetadata(bytes);
     else if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) entries = parsePNGFullMetadata(bytes);
     else entries = [{ tag: 'Note', value: `No embedded EXIF/text metadata reader for this format (${img.name.split('.').pop().toUpperCase()}) — showing header info only.` }];
@@ -3625,13 +3651,13 @@ async function toggleFullMeta() {
   const toggle = $('meta-full-toggle'), label = $('meta-full-toggle-label'), full = $('meta-full-body');
   const isOpen = full.classList.contains('open');
   if (isOpen) {
-    full.classList.remove('open'); toggle.classList.remove('open'); label.textContent = 'show full metadata';
+    full.classList.remove('open'); toggle.classList.remove('open'); label.textContent = 'show original metadata';
     return;
   }
   const img = state.images[state.activeIdx];
   if (!img) return;
-  full.innerHTML = '<div class="meta-full-loading">reading full metadata…</div>';
-  full.classList.add('open'); toggle.classList.add('open'); label.textContent = 'hide full metadata';
+  full.innerHTML = '<div class="meta-full-loading">reading original metadata…</div>';
+  full.classList.add('open'); toggle.classList.add('open'); label.textContent = 'hide original metadata';
   // Only decoded now, on demand — parsing every tag out of the raw file
   // bytes up front (for every image, whether anyone looks or not) is what
   // would cause the lag; this way it's paid for once, lazily, per image.

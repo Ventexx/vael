@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { outputFormat, decodeExport, fileVersion, readSnapshot, atomicSave } = require('./image-files');
 const { SessionCache } = require('./session-cache');
+const { keepPngText } = require('./image-metadata');
 const sessionCache = new SessionCache();
 ipcMain.handle('cache-put', (_, value) => sessionCache.put(value));
 ipcMain.handle('cache-get', (_, key) => sessionCache.get(key));
@@ -222,8 +223,14 @@ ipcMain.handle('choose-save-path', async (_, defaultName) => {
 });
 
 // Save to known path
-ipcMain.handle('save', async (_, filePath, src, expectedVersion) => {
-  return atomicSave(filePath, decodeExport(filePath, src), expectedVersion);
+ipcMain.handle('save', async (_, filePath, src, expectedVersion, metadata = {}) => {
+  let bytes = decodeExport(filePath, src);
+  const policy = metadata.policy || 'strip';
+  if (policy === 'png-text') {
+    const original = await sessionCache.get(metadata.sourceKey);
+    bytes = keepPngText(bytes, Buffer.from(original.source.split(',')[1], 'base64'));
+  } else if (policy !== 'strip') throw new Error('Unknown metadata policy.');
+  return atomicSave(filePath, bytes, expectedVersion);
 });
 
 app.whenReady().then(createWindow);
