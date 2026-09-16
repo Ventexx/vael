@@ -1717,7 +1717,9 @@ function pushHistory(img, label, opts) {
     label,
     revision: pixelsChanged || !prev ? nextRevision++ : prev.revision,
     imageData,
+    pixelsKey: !pixelsChanged && prev ? prev.pixelsKey : null,
     mask,
+    maskKey: !maskChanged && prev ? prev.maskKey : null,
     sel: (state.images[state.activeIdx] === img && state.sel) ? structuredClone(state.sel) : null,
   };
   img.history = img.history.slice(0, img.historyIndex + 1);
@@ -1725,14 +1727,20 @@ function pushHistory(img, label, opts) {
   if (img.history.length > MAX_HISTORY) {
     img.history.shift();
   }
-  img.historyIndex = img.history.length - 1;
+  img.historyIndex = (img.history?.length || 0) - 1;
   updateUnsaved(img);
   if (state.images[state.activeIdx] === img) renderHistoryPanel();
 }
-function restoreHistoryState(img, idx) {
+async function restoreHistoryState(img, idx) {
   const st = img.history[idx];
-  img.ctx.putImageData(st.imageData, 0, 0);
-  img.mask = st.mask || null;
+  const pixels = st.imageData || await window.electronAPI.cacheGet(st.pixelsKey);
+  const imageData = pixels instanceof ImageData ? pixels : new ImageData(new Uint8ClampedArray(pixels.data), img.w, img.h);
+  const mask = st.mask || (st.maskKey ? await window.electronAPI.cacheGet(st.maskKey) : null);
+  img.ctx.putImageData(imageData, 0, 0);
+  st.imageData = imageData;
+  st.mask = mask;
+  img.mask = mask;
+  img.historyIndex = idx;
   markDirty(img);
   if (state.images[state.activeIdx] === img) {
     state.sel = st.sel ? structuredClone(st.sel) : null;
@@ -1740,36 +1748,31 @@ function restoreHistoryState(img, idx) {
     renderSelMaskOverlay();
   }
 }
-function undo() {
-  if (state.saveBusy) return;
-  const img = state.images[state.activeIdx];
-  if (!img || img.historyIndex <= 0) { setStatus('Nothing to undo', false); return; }
-  const undoneLabel = img.history[img.historyIndex].label;
-  img.historyIndex--;
-  restoreHistoryState(img, img.historyIndex);
-  updateUnsaved(img);
-  renderGallery(); updateStatusBar(); renderHistoryPanel();
-  setStatus(`Undid: ${undoneLabel}`, true);
-}
-function redo() {
-  if (state.saveBusy) return;
-  const img = state.images[state.activeIdx];
-  if (!img || img.historyIndex >= img.history.length - 1) { setStatus('Nothing to redo', false); return; }
-  img.historyIndex++;
-  restoreHistoryState(img, img.historyIndex);
-  updateUnsaved(img);
-  renderGallery(); updateStatusBar(); renderHistoryPanel();
-  setStatus(`Redid: ${img.history[img.historyIndex].label}`, true);
-}
-function jumpToHistory(idx) {
-  if (state.saveBusy) return;
+async function jumpToHistory(idx) {
+  if (state.saveBusy || state.filterBusy || state.historyBusy) return;
   const img = state.images[state.activeIdx];
   if (!img || idx === img.historyIndex || idx < 0 || idx >= img.history.length) return;
-  img.historyIndex = idx;
-  restoreHistoryState(img, idx);
-  updateUnsaved(img);
-  renderGallery(); updateStatusBar(); renderHistoryPanel();
-  setStatus(`Jumped to: ${img.history[idx].label}`, true);
+  state.historyBusy = true;
+  img._pinned = true;
+  try {
+    await hydrateImage(img);
+    await restoreHistoryState(img, idx);
+    updateUnsaved(img);
+    renderGallery(); updateStatusBar(); renderHistoryPanel();
+    setStatus(`History: ${img.history[idx].label}`, true);
+  } catch (error) {
+    setStatus(`Could not restore history: ${error.message}`, false);
+  } finally { img._pinned = false; state.historyBusy = false; }
+}
+async function undo() {
+  const img = state.images[state.activeIdx];
+  if (img && img.historyIndex > 0) await jumpToHistory(img.historyIndex - 1);
+  else setStatus('Nothing to undo', false);
+}
+async function redo() {
+  const img = state.images[state.activeIdx];
+  if (img && img.historyIndex < img.history.length - 1) await jumpToHistory(img.historyIndex + 1);
+  else setStatus('Nothing to redo', false);
 }
 function toggleHistoryPanel() {
   // History lives docked above the gallery (Paint.NET-style), so "toggling"
@@ -1790,9 +1793,9 @@ function renderHistoryPanel() {
     return;
   }
   undoBtn.disabled = img.historyIndex <= 0;
-  redoBtn.disabled = img.historyIndex >= img.history.length - 1;
+  redoBtn.disabled = img.historyIndex >= (img.history?.length || 0) - 1;
   list.innerHTML = '';
-  img.history.forEach((st, i) => {
+  (img.history || []).forEach((st, i) => {
     const row = document.createElement('div');
     row.className = 'history-item' + (i === img.historyIndex ? ' current' : (i > img.historyIndex ? ' future' : ''));
     row.textContent = st.label;
@@ -2004,7 +2007,7 @@ function setFiltersBusy(busy) {
 const BLUR_COOLDOWN_MS = 500;
 let _lastBlurAt = 0;
 async function runFilter(type, value) {
-  if (state.filterBusy || state.saveBusy) return;
+  if (state.filterBusy || state.saveBusy || state.historyBusy) return;
   if (value === undefined) value = getFilterValue(type);
   const isBlur = type !== 'pixelate';
   if (isBlur) {
@@ -2015,12 +2018,14 @@ async function runFilter(type, value) {
   if (state.multiSelected.size >= 2) return runFilterBatch(type, value);
   const img = state.images[state.activeIdx];
   if (!img) { setStatus('No image open', false); return; }
+  setFiltersBusy(true);
+  img._pinned = true;
   // Normally already hydrated by the time it's selected, but guard against
   // the filter hotkey landing before that finishes (or against any lazy
   // stub somehow becoming active).
   if (img._lazy) {
     try { await hydrateImage(img); }
-    catch (e) { setStatus(`Failed to open ${img.name}`, false); return; }
+    catch (e) { img._pinned = false; setFiltersBusy(false); setStatus(`Failed to open ${img.name}`, false); return; }
   }
   // Core workflow: either draw a selection first, or hit the hotkey with
   // nothing selected to pixelate the entire frame. No selection is treated
@@ -2043,6 +2048,7 @@ async function runFilter(type, value) {
     setStatus(`Failed to apply ${type}`, false);
   } finally {
     if (!hadSelection) img.mask = null;
+    img._pinned = false;
     setFiltersBusy(false);
   }
 }
@@ -2055,7 +2061,7 @@ async function runFilterBatch(type, value) {
   // The public runFilter entry point already applied the cooldown.
   setFiltersBusy(true);
   if (isBlur) setStatus('Bokeh blurring…', true);
-  const indices = [...state.multiSelected];
+  const images = [...state.multiSelected].map(i => state.images[i]).filter(Boolean);
   let ok = 0;
   try {
     // Sequential, not parallel: keeps memory bounded (each job transfers a
@@ -2066,12 +2072,11 @@ async function runFilterBatch(type, value) {
     // opened), so each is decoded here right before it's needed and folded
     // back down again afterward (via the same LRU as normal viewing) instead
     // of every selected image's full-res canvas being held in memory at once.
-    for (const i of indices) {
-      const img = state.images[i];
-      if (!img) continue;
+    for (const img of images) {
+      img._pinned = true;
       if (img._lazy) {
         try { await hydrateImage(img); }
-        catch (err) { console.error(err); continue; }
+        catch (err) { img._pinned = false; console.error(err); continue; }
       }
       const savedMask = img.mask;
       img.mask = makeMask(img.w, img.h).fill(255);
@@ -2086,6 +2091,7 @@ async function runFilterBatch(type, value) {
       }
       img.mask = savedMask;
       if (success) pushHistory(img, filterLabel(type, value), { maskChanged: false });
+      img._pinned = false;
     }
   } finally {
     setFiltersBusy(false);
@@ -2093,7 +2099,7 @@ async function runFilterBatch(type, value) {
   renderGallery();
   updateStatusBar();
   setStatus(ok ? `${type === 'pixelate' ? 'Pixelated' : 'Bokeh blurred'} ${ok} image${ok > 1 ? 's' : ''} (${value}px)` : `Failed to apply ${type}`, ok > 0);
-  return ok === indices.length && ok > 0;
+  return ok === images.length && ok > 0;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -2163,63 +2169,88 @@ async function touchHydrated(img) {
       lru.shift(); lru.push(victim);
       continue;
     }
-    lru.shift();
-    await evictImage(victim);
+    if (await evictImage(victim)) lru.splice(lru.indexOf(victim), 1);
+    else { lru.shift(); lru.push(victim); }
   }
 }
-// Folds a fully-loaded image back down to a lazy stub, freeing its canvas,
-// history, and mask. If it has unsaved edits, those are flattened into
-// img.src first (via a cheap toBlob encode) so re-opening it later restores
-// the edited pixels rather than the original file on disk.
-async function evictImage(img) {
-  if (img._lazy || !img.canvas) return;
-  try {
-    if (img._fullSrcDirty || !img.src) {
-      img.src = await canvasToDataURLAsync(img.canvas);
-      img._fullSrcDirty = false;
+// History labels/revisions remain resident. Large pixel and mask buffers can
+// live in the private session cache without losing undo or redo steps.
+async function cacheValue(img, value) {
+  const key = await window.electronAPI.cachePut(value);
+  (img._cacheKeys ||= new Set()).add(key);
+  return key;
+}
+async function spillHistory(img, keepCurrent = false) {
+  if (!window.electronAPI?.cachePut) return;
+  const pixelKeys = new Map(), maskKeys = new Map();
+  for (const st of img.history || []) {
+    if (keepCurrent && st === img.history[img.historyIndex]) continue;
+    const pixels = st.imageData, mask = st.mask;
+    if (pixels) {
+      const key = st.pixelsKey || pixelKeys.get(pixels) || await cacheValue(img, { data: pixels.data });
+      pixelKeys.set(pixels, key);
+      if (st.imageData === pixels) { st.pixelsKey = key; st.imageData = null; }
     }
-  } catch (e) {
-    return; // couldn't safely flatten edits — keep it resident rather than risk losing them
+    if (mask) {
+      const key = st.maskKey || maskKeys.get(mask) || await cacheValue(img, mask);
+      maskKeys.set(mask, key);
+      if (st.mask === mask) { st.maskKey = key; st.mask = null; }
+    }
   }
-  img.canvas = null;
-  img.ctx = null;
-  img.history = null;
-  img.historyIndex = 0;
-  img.mask = null;
-  img._lazy = true;
 }
-// Decodes a lazy stub's real pixels into a working canvas + baseline undo
-// history. Pulls from img.src if we already have the bytes in memory
-// (loose-file drops, or a previously-evicted-with-edits image); otherwise
-// fetches the original file's bytes from disk on demand via IPC. No-op if
-// the image is already hydrated.
+async function evictImage(img) {
+  if (img._evicting) return img._evicting;
+  if (img._lazy || !img.canvas || !window.electronAPI?.cachePut) return false;
+  img._evicting = (async () => {
+    try {
+      const revision = currentRevision(img);
+      const source = await canvasToDataURLAsync(img.canvas);
+      const key = await cacheValue(img, { source, mask: img.mask });
+      await spillHistory(img);
+      // Selection or another operation may have claimed the image while writing.
+      if (img === state.images[state.activeIdx] || img._pinned || currentRevision(img) !== revision) return false;
+      img._sessionKey = key;
+      img.canvas.width = img.canvas.height = 0;
+      img.canvas = null; img.ctx = null; img.src = null; img.mask = null;
+      img._lazy = true;
+      return true;
+    } catch (error) {
+      setStatus(`Could not free memory for ${img.name}: ${error.message}`, false);
+      return false; // Keep working pixels if writing the cache failed.
+    }
+  })();
+  try { return await img._evicting; } finally { img._evicting = null; }
+}
 async function hydrateImage(img) {
+  if (img._evicting) await img._evicting;
+  if (img._hydrating) return img._hydrating;
   if (!img._lazy) { await touchHydrated(img); return; }
-  let dataUrl = img.src;
-  if (!dataUrl) {
-    if (!window.electronAPI?.readImageFull || !img.path) throw new Error(`No source to load "${img.name}" from`);
-    dataUrl = await window.electronAPI.readImageFull(img.path);
-  }
-  const tmpImg = new Image();
-  await new Promise((resolve, reject) => {
-    tmpImg.onload = resolve;
-    tmpImg.onerror = () => reject(new Error(`Could not decode "${img.name}"`));
+  img._hydrating = (async () => {
+    const cached = img._sessionKey ? await window.electronAPI.cacheGet(img._sessionKey) : null;
+    let dataUrl = cached?.source || img.src;
+    if (!dataUrl) {
+      if (!window.electronAPI?.readImageFull || !img.path) throw new Error(`No source to load "${img.name}" from`);
+      dataUrl = await window.electronAPI.readImageFull(img.path);
+    }
+    const tmpImg = new Image();
     tmpImg.src = dataUrl;
-  });
-  const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
-  const { canvas, ctx } = makeCanvas(tmpImg, w, h);
-  if (img.revision == null) {
-    img.revision = nextRevision++;
-    img.savedRevision = img.revision;
-  }
-  img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
-  img.src = dataUrl; img._fullSrcDirty = false;
-  img._encodedRevision = img.revision;
-  img.history = [{ label: 'Opened image', revision: img.revision, imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
-  img.historyIndex = 0;
-  updateUnsaved(img);
-  img._lazy = false;
-  await touchHydrated(img);
+    await tmpImg.decode();
+    const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
+    const { canvas, ctx } = makeCanvas(tmpImg, w, h);
+    if (img.revision == null) { img.revision = nextRevision++; img.savedRevision = img.revision; }
+    img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
+    img.src = dataUrl; img._fullSrcDirty = false;
+    img._encodedRevision = img.revision;
+    if (!img.history?.length) {
+      img.history = [{ label: 'Opened image', revision: img.revision, imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
+      img.historyIndex = 0;
+    }
+    if (cached) img.mask = cached.mask;
+    updateUnsaved(img);
+    img._lazy = false;
+    await touchHydrated(img);
+  })();
+  try { return await img._hydrating; } finally { img._hydrating = null; }
 }
 function canvasToDataURLAsync(canvas) {
   return new Promise((resolve, reject) => {
@@ -2600,7 +2631,7 @@ function selectImage(idx) {
   fitImage(false);
   renderGallery();
   updateStatusBar();
-  if (img._lazy) {
+  if (img._lazy || img._evicting || img._hydrating) {
     // Nothing to draw yet — keep the previous frame off-screen rather than
     // drawing null/stale pixels, and let the status line show it's working.
     displayCanvas.style.display = 'none';
@@ -3213,8 +3244,9 @@ async function encodeExport(img, filePath) {
   }, mime, quality));
 }
 async function persistImage(img, saveAs = false) {
-  if (state.filterBusy || state.saveBusy) throw new Error('Wait for the current image operation to finish.');
+  if (state.filterBusy || state.saveBusy || state.historyBusy) throw new Error('Wait for the current image operation to finish.');
   state.saveBusy = true;
+  img._pinned = true;
   try {
     let destination = img.path;
     if (saveAs || !destination || !/\.(png|jpe?g|webp)$/i.test(destination)) {
@@ -3237,6 +3269,7 @@ async function persistImage(img, saveAs = false) {
     markSaved(img, revision);
     return true;
   } finally {
+    img._pinned = false;
     state.saveBusy = false;
   }
 }

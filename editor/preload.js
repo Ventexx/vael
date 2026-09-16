@@ -10,4 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFolder: () => ipcRenderer.invoke('open-folder'),
   inspectDroppedPaths: (paths) => ipcRenderer.invoke('inspect-dropped-paths', paths),
   readImageFull: (filePath) => ipcRenderer.invoke('read-image-full', filePath),
+  cachePut: value => ipcRenderer.invoke('cache-put', value),
+  cacheGet: key => ipcRenderer.invoke('cache-get', key),
+  cacheRemove: key => ipcRenderer.invoke('cache-remove', key),
 });

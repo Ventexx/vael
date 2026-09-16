@@ -13,7 +13,7 @@
   "build": {
     "appId": "com.vael.editor",
     "productName": "editor.",
-    "files": ["editor.html", "main.js", "preload.js", "image-files.js", "icon.ico", "icon.png"],
+    "files": ["editor.html", "main.js", "preload.js", "image-files.js", "session-cache.js", "icon.ico", "icon.png"],
     "win": {
       "target": "nsis",
       "icon": "icon.ico"

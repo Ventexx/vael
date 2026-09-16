@@ -2,6 +2,12 @@ const { app, BrowserWindow, ipcMain, globalShortcut, dialog, nativeImage } = req
 const path = require('path');
 const fs = require('fs');
 const { outputFormat, decodeExport } = require('./image-files');
+const { SessionCache } = require('./session-cache');
+const sessionCache = new SessionCache();
+ipcMain.handle('cache-put', (_, value) => sessionCache.put(value));
+ipcMain.handle('cache-get', (_, key) => sessionCache.get(key));
+ipcMain.handle('cache-remove', (_, key) => sessionCache.remove(key));
+app.on('will-quit', () => sessionCache.close());
 
 let win;
 
