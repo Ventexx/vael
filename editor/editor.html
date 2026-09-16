@@ -2287,7 +2287,9 @@ async function hydrateImage(img) {
     let dataUrl = cached?.source || img.src;
     if (!dataUrl) {
       if (!window.electronAPI?.readImageFull || !img.path) throw new Error(`No source to load "${img.name}" from`);
-      dataUrl = await window.electronAPI.readImageFull(img.path);
+      const opened = await window.electronAPI.readImageFull(img.path);
+      dataUrl = opened.src;
+      img._sourceVersion = opened.version;
     }
     const tmpImg = new Image();
     tmpImg.src = dataUrl;
@@ -2456,14 +2458,14 @@ function updateStatusBar() {
 // garbage-collected immediately rather than keeping a full canvas resident.
 // The real canvas + undo history only get built when the image is actually
 // opened (see hydrateImage), same as folder imports.
-function loadImageFromSrc(name, path, dataUrl) {
+function loadImageFromSrc(name, path, dataUrl, sourceVersion) {
   return new Promise((resolve, reject) => {
     const tmpImg = new Image();
     tmpImg.onload = async () => {
       try {
       const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
       const stub = {
-        name, path: path || null, unsaved: false, w, h,
+        name, path: path || null, _sourceVersion: sourceVersion, unsaved: false, w, h,
         canvas: null, ctx: null, src: dataUrl, _fullSrcDirty: false,
         mask: null, categoryId: null,
         history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
@@ -2481,6 +2483,9 @@ function loadImageFromSrc(name, path, dataUrl) {
   });
 }
 function loadImageFile(file) {
+  if (file.path && window.electronAPI?.readImageFull) {
+    return window.electronAPI.readImageFull(file.path).then(opened => loadImageFromSrc(file.name, file.path, opened.src, opened.version));
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = e => loadImageFromSrc(file.name, file.path || null, e.target.result).then(resolve, reject);
@@ -3316,18 +3321,23 @@ async function persistImage(img, saveAs = false) {
   state.saveBusy = true;
   img._pinned = true;
   try {
-    let destination = img.path;
-    if (saveAs || !destination || !/\.(png|jpe?g|webp)$/i.test(destination)) {
-      destination = window.electronAPI?.chooseSavePath
-        ? await window.electronAPI.chooseSavePath(defaultExportName(img.name))
-        : defaultExportName(img.name);
-      if (!destination) return false;
-    }
+    // Read the source before choosing an overwrite destination so its version
+    // describes exactly the bytes that supplied the working pixels.
     await hydrateImage(img);
+    let destination = img.path;
+    let expectedVersion = img._sourceVersion;
+    if (saveAs || !destination || !/\.(png|jpe?g|webp)$/i.test(destination)) {
+      if (window.electronAPI?.chooseSavePath) {
+        const chosen = await window.electronAPI.chooseSavePath(defaultExportName(img.name));
+        if (!chosen) return false;
+        destination = chosen.filePath;
+        expectedVersion = chosen.version;
+      } else destination = defaultExportName(img.name);
+    }
     const revision = currentRevision(img);
     const src = await encodeExport(img, destination);
     if (window.electronAPI?.save) {
-      await window.electronAPI.save(destination, src);
+      img._sourceVersion = await window.electronAPI.save(destination, src, expectedVersion);
       img.path = destination;
     } else {
       const link = document.createElement('a');
@@ -3366,12 +3376,13 @@ async function saveImageAs() {
 async function saveImageSet(images) {
   if (!images.length) { setStatus('Nothing to save', true); return; }
   let ok = 0, fail = 0;
+  const failures = [];
   for (const img of images) {
     try { if (await persistImage(img)) ok++; else fail++; }
-    catch (e) { fail++; console.error(img.name, e); }
+    catch (e) { fail++; failures.push(`${img.name}: ${e.message}`); console.error(img.name, e); }
   }
   renderGallery(); updateStatusBar();
-  setStatus(fail ? `Saved ${ok}, ${fail} skipped` : `Saved all changes (${ok})`, fail === 0);
+  setStatus(fail ? `Saved ${ok}, ${fail} skipped${failures.length ? ": " + failures.join("; ") : ""}` : `Saved all changes (${ok})`, fail === 0);
 }
 async function saveAllChanges() { return saveImageSet(state.images.filter(img => img.unsaved)); }
 

@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, globalShortcut, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { outputFormat, decodeExport } = require('./image-files');
+const { outputFormat, decodeExport, fileVersion, readSnapshot, atomicSave } = require('./image-files');
 const { SessionCache } = require('./session-cache');
 const sessionCache = new SessionCache();
 ipcMain.handle('cache-put', (_, value) => sessionCache.put(value));
@@ -202,10 +202,7 @@ ipcMain.handle('inspect-dropped-paths', async (_, paths) => {
 // asynchronously (not readFileSync) so a slow/large file never blocks the
 // main process or the UI.
 ipcMain.handle('read-image-full', async (_, filePath) => {
-  const buf = await fs.promises.readFile(filePath);
-  const ext = path.extname(filePath).slice(1).toLowerCase();
-  const mime = ext === 'jpg' ? 'jpeg' : ext;
-  return `data:image/${mime};base64,${buf.toString('base64')}`;
+  return readSnapshot(filePath);
 });
 
 // Choose the destination before the renderer encodes its canvas.
@@ -221,13 +218,12 @@ ipcMain.handle('choose-save-path', async (_, defaultName) => {
   if (!filePath) return null;
   const destination = path.extname(filePath) ? filePath : filePath + '.png';
   outputFormat(destination);
-  return destination;
+  return { filePath: destination, version: await fileVersion(destination) };
 });
 
 // Save to known path
-ipcMain.handle('save', async (_, filePath, src) => {
-  await fs.promises.writeFile(filePath, decodeExport(filePath, src));
-  return true;
+ipcMain.handle('save', async (_, filePath, src, expectedVersion) => {
+  return atomicSave(filePath, decodeExport(filePath, src), expectedVersion);
 });
 
 app.whenReady().then(createWindow);

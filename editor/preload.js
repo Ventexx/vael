@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximize: () => ipcRenderer.send('win-maximize'),
   close:    () => ipcRenderer.send('win-close'),
   quit:     () => ipcRenderer.send('win-close'),
-  save:     (filePath, src) => ipcRenderer.invoke('save', filePath, src),
+  save:     (filePath, src, expectedVersion) => ipcRenderer.invoke('save', filePath, src, expectedVersion),
   chooseSavePath: (name) => ipcRenderer.invoke('choose-save-path', name),
   openFolder: () => ipcRenderer.invoke('open-folder'),
   inspectDroppedPaths: (paths) => ipcRenderer.invoke('inspect-dropped-paths', paths),
