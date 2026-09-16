@@ -1673,6 +1673,13 @@ async function bokehBlurSelection(img, radius) {
 // HISTORY — per-image undo/redo, Paint.NET style
 // ════════════════════════════════════════════════════════════════════
 const MAX_HISTORY = 40;
+let nextRevision = 1;
+function currentRevision(img) { return img.history?.[img.historyIndex]?.revision ?? img.revision; }
+function updateUnsaved(img) {
+  img.revision = currentRevision(img);
+  img.unsaved = img.revision !== img.savedRevision;
+}
+function markSaved(img, revision) { img.savedRevision = revision; updateUnsaved(img); }
 
 // Pushes a new "notable action" snapshot onto img's history, discarding
 // any redo tail beyond the current pointer (a fresh action after undoing
@@ -1694,6 +1701,7 @@ function pushHistory(img, label, opts) {
   const mask = (maskChanged || !prev) ? img.mask : prev.mask;
   const snapshot = {
     label,
+    revision: pixelsChanged || !prev ? nextRevision++ : prev.revision,
     imageData,
     mask,
     sel: (state.images[state.activeIdx] === img && state.sel) ? structuredClone(state.sel) : null,
@@ -1702,10 +1710,9 @@ function pushHistory(img, label, opts) {
   img.history.push(snapshot);
   if (img.history.length > MAX_HISTORY) {
     img.history.shift();
-    if (img.savedAt >= 0) img.savedAt--;
   }
   img.historyIndex = img.history.length - 1;
-  img.unsaved = img.historyIndex !== img.savedAt;
+  updateUnsaved(img);
   if (state.images[state.activeIdx] === img) renderHistoryPanel();
 }
 function restoreHistoryState(img, idx) {
@@ -1725,7 +1732,7 @@ function undo() {
   const undoneLabel = img.history[img.historyIndex].label;
   img.historyIndex--;
   restoreHistoryState(img, img.historyIndex);
-  img.unsaved = img.historyIndex !== img.savedAt;
+  updateUnsaved(img);
   renderGallery(); updateStatusBar(); renderHistoryPanel();
   setStatus(`Undid: ${undoneLabel}`, true);
 }
@@ -1734,7 +1741,7 @@ function redo() {
   if (!img || img.historyIndex >= img.history.length - 1) { setStatus('Nothing to redo', false); return; }
   img.historyIndex++;
   restoreHistoryState(img, img.historyIndex);
-  img.unsaved = img.historyIndex !== img.savedAt;
+  updateUnsaved(img);
   renderGallery(); updateStatusBar(); renderHistoryPanel();
   setStatus(`Redid: ${img.history[img.historyIndex].label}`, true);
 }
@@ -1743,7 +1750,7 @@ function jumpToHistory(idx) {
   if (!img || idx === img.historyIndex || idx < 0 || idx >= img.history.length) return;
   img.historyIndex = idx;
   restoreHistoryState(img, idx);
-  img.unsaved = img.historyIndex !== img.savedAt;
+  updateUnsaved(img);
   renderGallery(); updateStatusBar(); renderHistoryPanel();
   setStatus(`Jumped to: ${img.history[idx].label}`, true);
 }
@@ -2184,16 +2191,16 @@ async function hydrateImage(img) {
   });
   const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
   const { canvas, ctx } = makeCanvas(tmpImg, w, h);
-  const wasUnsaved = img.unsaved;
+  if (img.revision == null) {
+    img.revision = nextRevision++;
+    img.savedRevision = img.revision;
+  }
   img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
   img.src = dataUrl; img._fullSrcDirty = false;
-  img.history = [{ label: 'Opened image', imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
+  img._encodedRevision = img.revision;
+  img.history = [{ label: 'Opened image', revision: img.revision, imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
   img.historyIndex = 0;
-  // Preserve the unsaved flag across a hydrate — historyIndex/savedAt get
-  // reset to a single fresh baseline, so nudge savedAt off 0 when the image
-  // was unsaved so `unsaved` still reads true after this.
-  img.savedAt = wasUnsaved ? -1 : 0;
-  img.unsaved = wasUnsaved;
+  updateUnsaved(img);
   img._lazy = false;
   await touchHydrated(img);
 }
@@ -2214,8 +2221,10 @@ function canvasToDataURLAsync(canvas) {
 async function ensureFullSrc(img) {
   if (img._lazy) await hydrateImage(img);
   if (img._fullSrcDirty || !img.src) {
+    const revision = currentRevision(img);
     img.src = await canvasToDataURLAsync(img.canvas);
-    img._fullSrcDirty = false;
+    img._encodedRevision = revision;
+    img._fullSrcDirty = currentRevision(img) !== revision;
   }
   return img.src;
 }
@@ -2350,7 +2359,7 @@ function loadImageFromSrc(name, path, dataUrl) {
         name, path: path || null, unsaved: false, w, h,
         canvas: null, ctx: null, src: dataUrl, _fullSrcDirty: false,
         mask: null, categoryId: null,
-        history: null, historyIndex: 0, savedAt: 0, _lazy: true,
+        history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
       };
       updateThumbCanvas(stub, tmpImg);
       resolve(stub);
@@ -2379,7 +2388,7 @@ function makeLazyStub(item) {
       name: item.name, path: item.path, unsaved: false, w: item.w || 0, h: item.h || 0,
       canvas: null, ctx: null, src: null, _fullSrcDirty: false,
       mask: null, categoryId: null,
-      history: null, historyIndex: 0, savedAt: 0, _lazy: true,
+      history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
     };
     if (!item.thumbDataUrl) { resolve(stub); return; }
     const t = new Image();
@@ -2785,10 +2794,11 @@ async function saveAllInCategory(categoryId) {
     const img = state.images[i];
     try {
       await ensureFullSrc(img);
-      if (img.path) { await window.electronAPI.save(img.path, img.src); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+      const revision = img._encodedRevision;
+      if (img.path) { await window.electronAPI.save(img.path, img.src); markSaved(img, revision); ok++; }
       else {
         const path = await window.electronAPI.saveAs(img.src, img.name);
-        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); markSaved(img, revision); ok++; }
         else fail++;
       }
     } catch (e) { fail++; }
@@ -3181,8 +3191,9 @@ async function saveImage() {
   if (!img.path) { saveImageAs(); return; }
   try {
     await ensureFullSrc(img);
+    const revision = img._encodedRevision;
     await window.electronAPI?.save?.(img.path, img.src);
-    img.unsaved = false; img.savedAt = img.historyIndex; renderGallery(); updateStatusBar();
+    markSaved(img, revision); renderGallery(); updateStatusBar();
     setStatus(`Saved ${img.name}`, true);
     advanceToNextImage(savedIdx);
   } catch (e) {
@@ -3194,6 +3205,7 @@ async function saveImageAs() {
   const savedIdx = state.activeIdx;
   try {
     await ensureFullSrc(img);
+    const revision = img._encodedRevision;
     const action = window.electronAPI?.saveAs
       ? window.electronAPI.saveAs(img.src, img.name)
       : Promise.resolve(downloadFallback(img));
@@ -3201,7 +3213,7 @@ async function saveImageAs() {
     if (path) {
       img.path = path;
       img.name = path.split(/[\\/]/).pop();
-      img.unsaved = false; img.savedAt = img.historyIndex; renderGallery(); updateStatusBar();
+      markSaved(img, revision); renderGallery(); updateStatusBar();
       setStatus(`Saved ${img.name}`, true);
       advanceToNextImage(savedIdx);
     } else {
@@ -3222,12 +3234,13 @@ async function saveAllChanges() {
   for (const img of unsaved) {
     try {
       await ensureFullSrc(img);
+      const revision = img._encodedRevision;
       if (img.path) {
         await window.electronAPI.save(img.path, img.src);
-        img.unsaved = false; img.savedAt = img.historyIndex; ok++;
+        markSaved(img, revision); ok++;
       } else {
         const path = await window.electronAPI.saveAs(img.src, img.name);
-        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); img.unsaved = false; img.savedAt = img.historyIndex; ok++; }
+        if (path) { img.path = path; img.name = path.split(/[\\/]/).pop(); markSaved(img, revision); ok++; }
         else fail++;
       }
     } catch (e) { fail++; }
