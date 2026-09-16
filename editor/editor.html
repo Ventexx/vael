@@ -1730,6 +1730,7 @@ function pushHistory(img, label, opts) {
   img.historyIndex = (img.history?.length || 0) - 1;
   updateUnsaved(img);
   if (state.images[state.activeIdx] === img) renderHistoryPanel();
+  scheduleMemoryCheck();
 }
 async function restoreHistoryState(img, idx) {
   const st = img.history[idx];
@@ -1757,6 +1758,7 @@ async function jumpToHistory(idx) {
   try {
     await hydrateImage(img);
     await restoreHistoryState(img, idx);
+    await enforceMemoryBudget();
     updateUnsaved(img);
     renderGallery(); updateStatusBar(); renderHistoryPanel();
     setStatus(`History: ${img.history[idx].label}`, true);
@@ -2036,6 +2038,7 @@ async function runFilter(type, value) {
   setFiltersBusy(true);
   if (isBlur) setStatus('Bokeh blurring…', true);
   try {
+    await reserveFilterMemory(img, type, value);
     if (type === 'pixelate') await pixelateSelection(img, value);
     else await bokehBlurSelection(img, value);
     pushHistory(img, filterLabel(type, value), { maskChanged: false });
@@ -2045,11 +2048,12 @@ async function runFilter(type, value) {
     return true;
   } catch (err) {
     console.error(err);
-    setStatus(`Failed to apply ${type}`, false);
+    setStatus(`Failed to apply ${type}: ${err.message}`, false);
   } finally {
     if (!hadSelection) img.mask = null;
     img._pinned = false;
     setFiltersBusy(false);
+    await enforceMemoryBudget();
   }
 }
 async function runFilterBatch(type, value) {
@@ -2082,6 +2086,7 @@ async function runFilterBatch(type, value) {
       img.mask = makeMask(img.w, img.h).fill(255);
       let success = false;
       try {
+        await reserveFilterMemory(img, type, value);
         if (type === 'pixelate') await pixelateSelection(img, value);
         else await bokehBlurSelection(img, value);
         ok++;
@@ -2092,6 +2097,7 @@ async function runFilterBatch(type, value) {
       img.mask = savedMask;
       if (success) pushHistory(img, filterLabel(type, value), { maskChanged: false });
       img._pinned = false;
+      await enforceMemoryBudget();
     }
   } finally {
     setFiltersBusy(false);
@@ -2131,47 +2137,98 @@ function markDirty(img) {
   if (state.images[state.activeIdx] === img) renderDisplay();
 }
 // ────────────────────────────────────────────────────────────────────
-// LAZY IMAGE LOADING & EVICTION
-// A folder (or a handful of folders dropped at once) can be hundreds or
-// thousands of images. Every image used to get a full-resolution canvas +
-// a full-resolution ImageData baseline decoded and held in memory forever,
-// the moment it was imported — at typical photo resolutions that's tens of
-// MB per image, times thousands of images, which is what was crashing the
-// app well before the old IPC-blob problem even came into play (see main.js).
-//
-// Now an imported image starts as a lightweight "lazy" stub: just its name,
-// path, dimensions and a small thumbnail — cheap enough that thousands of
-// them cost almost nothing. The real pixels (img.canvas/img.ctx/img.history)
-// only get decoded via hydrateImage() the moment something actually needs
-// them — opening it, running a filter on it, saving/exporting it. A small
-// LRU cap (LAZY_HOT_CAP) keeps only a bounded number of images fully
-// resident at once; once that cap is exceeded the least-recently-used ones
-// get folded back down to lazy stubs via evictImage() (preserving any edits
-// by first flattening them into img.src, so nothing is lost — it just needs
-// a quick re-decode if you come back to it).
-const LAZY_HOT_CAP = 24;
+// LAZY IMAGE LOADING & MEMORY BUDGET
+// Account for dimensions, shared history buffers, masks, encoded sources,
+// and thumbnails. This is a working-data budget, not a process-RAM guarantee:
+// Chromium, codecs and workers also need temporary allocations.
+const IMAGE_MEMORY_BUDGET = 256 * 1024 * 1024;
+const OPERATION_MEMORY_LIMIT = 1024 * 1024 * 1024;
 state._hydratedLRU = [];
-// Marks `img` as recently used and, if that pushes the resident set over the
-// cap, folds the least-recently-used ones (never the currently active image)
-// back down to lazy stubs to keep memory bounded regardless of how many
-// images are open in total.
+let memoryPass = Promise.resolve();
+let memoryTimer;
+function residentImageBytes() {
+  let bytes = 0;
+  const seen = new Set();
+  const add = (value, size) => { if (value && !seen.has(value)) { seen.add(value); bytes += size; } };
+  for (const img of state.images) {
+    add(img.canvas, (img.canvas?.width || 0) * (img.canvas?.height || 0) * 4);
+    add(img._thumbCanvas, (img._thumbCanvas?.width || 0) * (img._thumbCanvas?.height || 0) * 4);
+    add(img.src, (img.src?.length || 0) * 2);
+    add(img.mask?.buffer, img.mask?.byteLength || 0);
+    for (const st of img.history || []) {
+      add(st.imageData?.data.buffer, st.imageData?.data.byteLength || 0);
+      add(st.mask?.buffer, st.mask?.byteLength || 0);
+    }
+  }
+  return bytes;
+}
+function scheduleMemoryCheck() {
+  clearTimeout(memoryTimer);
+  memoryTimer = setTimeout(() => enforceMemoryBudget().catch(error => setStatus(`Memory cache: ${error.message}`, false)), 0);
+}
+async function pruneImageCache(img) {
+  if (img._evicting || img._hydrating) return;
+  const needed = new Set([img._sessionKey]);
+  for (const st of img.history || []) { needed.add(st.pixelsKey); needed.add(st.maskKey); }
+  for (const key of img._cacheKeys || []) {
+    if (!needed.has(key)) {
+      await window.electronAPI.cacheRemove(key);
+      img._cacheKeys.delete(key);
+    }
+  }
+}
+function enforceMemoryBudget(reserve = 0) {
+  const pass = memoryPass.then(async () => {
+    const budget = Math.max(0, (state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET) - reserve);
+    const lru = state._hydratedLRU = state._hydratedLRU.filter(img => state.images.includes(img));
+    for (const img of [...lru]) {
+      if (residentImageBytes() <= budget) break;
+      await spillHistory(img);
+      // Full encoded previews can be rebuilt from the current canvas.
+      if (!img._lazy) { img.src = null; img._fullSrcDirty = true; }
+    }
+    for (const img of [...lru]) {
+      if (residentImageBytes() <= budget) break;
+      if (img === state.images[state.activeIdx] || img._pinned || img._hydrating) continue;
+      if (await evictImage(img)) {
+        const at = lru.indexOf(img);
+        if (at >= 0) lru.splice(at, 1);
+      }
+    }
+    for (const img of state.images) await pruneImageCache(img);
+  });
+  memoryPass = pass.catch(() => {});
+  return pass;
+}
 async function touchHydrated(img) {
   const lru = state._hydratedLRU;
   const at = lru.indexOf(img);
   if (at !== -1) lru.splice(at, 1);
   lru.push(img);
-  let guard = lru.length; // safety valve, never loop more than this many times
-  while (lru.length > LAZY_HOT_CAP && guard-- > 0) {
-    const victim = lru[0];
-    if (victim === state.images[state.activeIdx]) {
-      // Never evict the currently active image — shuffle it to the back and
-      // try the next-oldest instead.
-      lru.shift(); lru.push(victim);
-      continue;
-    }
-    if (await evictImage(victim)) lru.splice(lru.indexOf(victim), 1);
-    else { lru.shift(); lru.push(victim); }
+  await enforceMemoryBudget();
+}
+async function reserveFilterMemory(img, type, value) {
+  const n = img.w * img.h;
+  // Blur workers use five Float64 planes plus input/output and halo rows.
+  const reserve = type === 'pixelate' ? n * 16
+    : n * 64 + img.w * (2 * Math.ceil(value) + 1) * BOKEH_POOL_SIZE * 96;
+  if (!Number.isFinite(reserve) || reserve + n * 8 > OPERATION_MEMORY_LIMIT) {
+    throw new Error('This image is too large for the filter memory budget. Use a smaller image or blur radius.');
   }
+  await enforceMemoryBudget(reserve);
+}
+function releaseImage(img) {
+  if (!img) return;
+  img._disposed = true;
+  state._hydratedLRU = state._hydratedLRU.filter(item => item !== img);
+  Promise.allSettled([img._hydrating, img._evicting, memoryPass]).then(async () => {
+    state._hydratedLRU = state._hydratedLRU.filter(item => item !== img);
+    for (const key of img._cacheKeys || []) await window.electronAPI.cacheRemove(key);
+    img._cacheKeys?.clear();
+    if (img.canvas) img.canvas.width = img.canvas.height = 0;
+    if (img._thumbCanvas) img._thumbCanvas.width = img._thumbCanvas.height = 0;
+    img.canvas = img.ctx = img.history = img.mask = img.src = img._thumbCanvas = null;
+  }).catch(error => console.error('Could not release image cache', error));
 }
 // History labels/revisions remain resident. Large pixel and mask buffers can
 // live in the private session cache without losing undo or redo steps.
@@ -2236,6 +2293,7 @@ async function hydrateImage(img) {
     tmpImg.src = dataUrl;
     await tmpImg.decode();
     const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
+    if (w * h * 12 > OPERATION_MEMORY_LIMIT) throw new Error("Image dimensions exceed the editing memory budget.");
     const { canvas, ctx } = makeCanvas(tmpImg, w, h);
     if (img.revision == null) { img.revision = nextRevision++; img.savedRevision = img.revision; }
     img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
@@ -2401,7 +2459,8 @@ function updateStatusBar() {
 function loadImageFromSrc(name, path, dataUrl) {
   return new Promise((resolve, reject) => {
     const tmpImg = new Image();
-    tmpImg.onload = () => {
+    tmpImg.onload = async () => {
+      try {
       const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
       const stub = {
         name, path: path || null, unsaved: false, w, h,
@@ -2410,7 +2469,12 @@ function loadImageFromSrc(name, path, dataUrl) {
         history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
       };
       updateThumbCanvas(stub, tmpImg);
+      if (window.electronAPI?.cachePut) {
+        stub._sessionKey = await cacheValue(stub, { source: dataUrl, mask: null });
+        stub.src = null;
+      }
       resolve(stub);
+      } catch (error) { reject(error); }
     };
     tmpImg.onerror = reject;
     tmpImg.src = dataUrl;
@@ -2637,7 +2701,7 @@ function selectImage(idx) {
     displayCanvas.style.display = 'none';
     setStatus(`Opening ${img.name}…`, true);
     hydrateImage(img).then(() => {
-      if (myToken !== _selectToken) return; // superseded by a newer selection
+      if (myToken !== _selectToken || img._disposed) return; // superseded by a newer selection
       fitImage(false);
       renderDisplay();
       renderHistoryPanel();
@@ -2654,6 +2718,8 @@ function selectImage(idx) {
   }
 }
 function removeImage(idx) {
+  if (state.filterBusy || state.saveBusy || state.historyBusy) { setStatus("Wait for the current operation before closing images.", false); return; }
+  releaseImage(state.images[idx]);
   state.images.splice(idx, 1);
   const remapped = new Set();
   state.multiSelected.forEach(i => { if (i !== idx) remapped.add(i > idx ? i - 1 : i); });
@@ -2700,6 +2766,7 @@ function addCategory(name) {
   return id;
 }
 function deleteCategory(id) {
+  if (state.filterBusy || state.saveBusy || state.historyBusy) { setStatus("Wait for the current operation before deleting a category.", false); return; }
   const cat = state.categories.find(c => c.id === id);
   if (!cat) return;
   const label = categoryLabel(cat);
@@ -2730,12 +2797,13 @@ function deleteCategory(id) {
 // the canvas instead of leaving stale pixels on screen.
 function removeImages(indices) {
   if (!indices || !indices.length) return;
+  if (state.filterBusy || state.saveBusy || state.historyBusy) { setStatus("Wait for the current operation before closing images.", false); return; }
   const ascending = [...new Set(indices)].sort((a, b) => a - b);
   const descending = [...ascending].reverse();
   const activeImg = state.activeIdx >= 0 ? state.images[state.activeIdx] : null;
   const anchor = ascending[0];
 
-  descending.forEach(i => state.images.splice(i, 1));
+  descending.forEach(i => { releaseImage(state.images[i]); state.images.splice(i, 1); });
 
   const newMultiSelected = new Set();
   state.multiSelected.forEach(i => {
