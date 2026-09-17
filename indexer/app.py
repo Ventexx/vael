@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from functools import wraps
 import queue
 import sqlite3
@@ -312,73 +313,45 @@ def _load_file_cache(name: str) -> dict[str, dict]:
 
 
 def _save_file_cache(name: str, data: dict[str, dict]) -> None:
-    """Atomically write the cache so a crash mid-write leaves the old file intact."""
-    try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _cache_path(name).with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(_cache_path(name))
-    except Exception:
-        pass
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(_cache_path(name), json.dumps(data))
 
 
-def _build_file_cache(folder: Path) -> dict[str, dict]:
-    """
-    Walk `folder` and build a fresh cache dict from the current filesystem state.
-    Only includes PNG+JSON pairs where both files exist.
-    Called after a successful index to update the on-disk cache.
-    """
-    result: dict[str, dict] = {}
-    for png in sorted(folder.rglob("*.png")):
-        jpath = png.with_suffix(".json")
-        if not jpath.exists():
-            continue
-        try:
-            result[str(png)] = {
-                "png_mtime": png.stat().st_mtime,
-                "json_mtime": jpath.stat().st_mtime,
-            }
-        except OSError:
-            pass
+def _walk_library(folder: Path, cancel_cb=None):
+    def failed(error):
+        raise error
+    for current, directories, files in os.walk(folder, onerror=failed):
+        _check_index_cancel(cancel_cb)
+        yield Path(current), files
+
+
+def _build_file_cache(folder: Path, cancel_cb=None) -> dict[str, dict]:
+    result = {}
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Library folder is unavailable: {folder}")
+    for directory, files in _walk_library(folder, cancel_cb):
+        for name in files:
+            _check_index_cancel(cancel_cb)
+            png = directory / name
+            if png.suffix.lower() != ".png":
+                continue
+            sidecar = png.with_suffix(".json")
+            if not sidecar.exists():
+                continue
+            ps, js = png.stat(), sidecar.stat()
+            result[str(png)] = {"png_mtime": ps.st_mtime_ns, "json_mtime": js.st_mtime_ns,
+                                "png_size": ps.st_size, "json_size": js.st_size}
     return result
 
 
-def _diff_against_cache(
-    folder: Path, cache: dict[str, dict]
-) -> tuple[set[str], set[str], set[str]]:
-    """
-    Fast os.stat pass over `folder`.  Returns three sets of PNG paths:
-      added   – present on disk but not in cache
-      changed – present in both but at least one mtime differs
-      deleted – present in cache but no longer on disk (as a valid pair)
+def _cache_changes(current: dict, previous: dict):
+    return (set(current) - set(previous),
+            {key for key in current.keys() & previous.keys() if current[key] != previous[key]},
+            set(previous) - set(current))
 
-    No file contents are read; only st_mtime is checked.
-    """
-    added: set[str] = set()
-    changed: set[str] = set()
-    seen: set[str] = set()
 
-    for png in folder.rglob("*.png"):
-        jpath = png.with_suffix(".json")
-        if not jpath.exists():
-            continue  # unpaired – skip, same rule as _run_index
-        key = str(png)
-        seen.add(key)
-        try:
-            png_mtime = png.stat().st_mtime
-            json_mtime = jpath.stat().st_mtime
-        except OSError:
-            continue
-
-        if key not in cache:
-            added.add(key)
-        else:
-            cached = cache[key]
-            if png_mtime != cached.get("png_mtime") or json_mtime != cached.get("json_mtime"):
-                changed.add(key)
-
-    deleted: set[str] = set(cache.keys()) - seen
-    return added, changed, deleted
+def _diff_against_cache(folder: Path, cache: dict[str, dict]):
+    return _cache_changes(_build_file_cache(folder), cache)
 
 
 # ── Startup Scripts ────────────────────────────────────────────────────────────
@@ -520,72 +493,27 @@ def _check_index_cancel(cancel_cb) -> None:
 
 
 def _refresh_folder_metadata(conn: sqlite3.Connection, folder: Path, cancel_cb=None) -> None:
-    """Refresh folder copy values even when no image/JSON pair changed."""
-    # ── Scan for !F-[FolderName].json files and upsert into folder_meta ──
-    # Walk every directory under `folder` (including root) and look for a
-    # file matching !F-<dirname>.json (case-insensitive on the stem).
-    seen_folder_keys: set[str] = set()
-    for dir_path in folder.rglob("*"):
-        _check_index_cancel(cancel_cb)
-        if not dir_path.is_dir():
+    seen = set()
+    for directory, files in _walk_library(folder, cancel_cb):
+        expected = f"!f-{directory.name}.json".casefold()
+        name = next((name for name in files if name.casefold() == expected), None)
+        if name is None:
             continue
-        expected_stem = f"!F-{dir_path.name}"
-        meta_file = dir_path / f"{expected_stem}.json"
-        if not meta_file.exists():
-            # Try case-insensitive match on Windows-style paths
-            matches = [
-                f
-                for f in dir_path.iterdir()
-                if f.suffix.lower() == ".json"
-                and f.stem.lower() == expected_stem.lower()
-            ]
-            meta_file = matches[0] if matches else None
-        if meta_file and meta_file.exists():
-            try:
-                raw = meta_file.read_text(encoding="utf-8", errors="ignore")
-                data = json.loads(raw)
-                # Take the first (and for now only) value
-                copy_value = str(next(iter(data.values()))) if data else ""
-            except Exception:
-                copy_value = ""
-            rel = str(dir_path.relative_to(folder)).replace("\\", "/")
-            if rel == ".":
-                rel = ""
-            seen_folder_keys.add(rel)
-            conn.execute(
-                "INSERT INTO folder_meta(folder_key, copy_value)"
-                " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
-                (rel, copy_value),
-            )
-    # Also check the root folder itself for a matching !F-<rootname>.json
-    root_stem = f"!F-{folder.name}"
-    root_meta = folder / f"{root_stem}.json"
-    if not root_meta.exists():
-        matches = [
-            f
-            for f in folder.iterdir()
-            if f.suffix.lower() == ".json" and f.stem.lower() == root_stem.lower()
-        ]
-        root_meta = matches[0] if matches else None
-    if root_meta and root_meta.exists():
+        meta_file = directory / name
         try:
-            raw = root_meta.read_text(encoding="utf-8", errors="ignore")
-            data = json.loads(raw)
-            copy_value = str(next(iter(data.values()))) if data else ""
-        except Exception:
-            copy_value = ""
-        seen_folder_keys.add("")
-        conn.execute(
-            "INSERT INTO folder_meta(folder_key, copy_value)"
-            " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
-            ("", copy_value),
-        )
-    # Remove stale folder_meta rows for folders that no longer have an F-*.json
-    existing_fk = {
-        r[0] for r in conn.execute("SELECT folder_key FROM folder_meta").fetchall()
-    }
-    for stale_fk in existing_fk - seen_folder_keys:
-        conn.execute("DELETE FROM folder_meta WHERE folder_key=?", (stale_fk,))
+            data = _read_metadata(meta_file)
+            value = str(next(iter(data.values()))) if data else ""
+        except ValueError:
+            value = ""
+        key = directory.relative_to(folder).as_posix()
+        if key == ".":
+            key = ""
+        seen.add(key)
+        conn.execute("INSERT INTO folder_meta(folder_key, copy_value) VALUES(?,?) "
+                     "ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value", (key, value))
+    for (key,) in conn.execute("SELECT folder_key FROM folder_meta").fetchall():
+        if key not in seen:
+            conn.execute("DELETE FROM folder_meta WHERE folder_key=?", (key,))
 
 
 def _run_index(
@@ -680,11 +608,7 @@ def _run_index(
             return db_total, changes
 
         # ── Full scan path (original behaviour) ───────────────────────────────
-        candidates = [
-            png
-            for png in sorted(folder.rglob("*.png"))
-            if png.with_suffix(".json").exists()
-        ]
+        candidates = [Path(key) for key in _build_file_cache(folder, cancel_cb)]
         total = len(candidates)
         found: set[str] = set()
         changes = 0
@@ -1193,9 +1117,10 @@ class Database:
             ).fetchall()
             results = []
             for row in rows:
+                _check_index_cancel(getattr(self, "_cancel_cb", None))
                 d = dict(row)
                 try:
-                    data = json.loads(d.get("json_data", "{}"))
+                    data = _json_object(d.get("json_data", "{}"))
                 except Exception:
                     data = {}
                 tokens = [
@@ -1538,6 +1463,7 @@ class IndexWorker(QThread):
         self._db_path = db_path
         self._folder = folder
         self._full_rebuild = full_rebuild
+        self.warning_text = ""
         self._flagged = flagged  # (added, changed, deleted) or None for full scan
 
     def run(self) -> None:
@@ -1545,6 +1471,12 @@ class IndexWorker(QThread):
             self.progress.emit(current, total, msg)
 
         try:
+            _cb(0, 0, "Checking for changes...")
+            current = _build_file_cache(self._folder, self.isInterruptionRequested)
+            if not self._full_rebuild and self._flagged is None:
+                previous = _load_file_cache(self._db_path.stem)
+                if previous:
+                    self._flagged = _cache_changes(current, previous)
             total, _ = _run_index(
                 self._db_path, self._folder, self._full_rebuild, _cb, self._flagged,
                 self.isInterruptionRequested,
@@ -1552,6 +1484,10 @@ class IndexWorker(QThread):
         except Exception as exc:
             self.failed.emit(f"{self._folder}: {exc}")
         else:
+            try:
+                _save_file_cache(self._db_path.stem, current)
+            except Exception as exc:
+                self.warning_text = f"Index updated; file cache could not be saved: {exc}"
             self.succeeded.emit(total)
 
 
@@ -2571,7 +2507,6 @@ class FolderSection(QWidget):
         self._cards.append(card)
         self._card_grid.addWidget(card, i // COLS, i % COLS)
         card.set_tagged_mode(self._show_tagged)
-        self._update_tag_dot()
 
     def _on_card_view_requested(self, card: ThumbnailCard) -> None:
         """Relay view request with the ordered card list of this folder."""
@@ -2836,6 +2771,57 @@ class FolderSection(QWidget):
 # ── Results Panel ──────────────────────────────────────────────────────────────
 
 
+class SearchWorker(QThread):
+    completed = Signal(int, object, object)
+    failed = Signal(int, str)
+
+    def __init__(self, db, segments, generation, limit=2000):
+        super().__init__()
+        self.generation = generation
+        self.path = db.path
+        self.segments = segments
+        self.limit = limit
+        self.members = {name: set(paths) for name, paths in db._temp_members.items()}
+        self.dev_assets = [dict(asset) for asset in db._assets] if DEV_MODE else None
+
+    def run(self):
+        connection = None
+        try:
+            if DEV_MODE:
+                db = DevDatabase()
+                db._assets = self.dev_assets
+                metadata = dict(_DEV_FOLDER_META)
+            else:
+                connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+                connection.row_factory = sqlite3.Row
+                connection.set_progress_handler(lambda: int(self.isInterruptionRequested()), 1000)
+                connection.execute("BEGIN")
+                db = object.__new__(Database)
+                db._conn = connection
+                db._cancel_cb = self.isInterruptionRequested
+                metadata = {row[0]: row[1] for row in connection.execute("SELECT folder_key, copy_value FROM folder_meta")}
+            db._temp_members = self.members
+            assets, seen = [], set()
+            for segment in self.segments:
+                _check_index_cancel(self.isInterruptionRequested)
+                for asset in db.search(segment.get("text", ""), limit=self.limit,
+                                       folder_only=segment.get("folder_only", False),
+                                       json_only=segment.get("json_only", False),
+                                       id_only=segment.get("id_only", False)):
+                    key = asset["image_path"]
+                    if key not in seen:
+                        seen.add(key)
+                        assets.append(asset)
+            _check_index_cancel(self.isInterruptionRequested)
+            self.completed.emit(self.generation, assets, metadata)
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(self.generation, str(exc))
+        finally:
+            if connection:
+                connection.close()
+
+
 class ResultsPanel(QScrollArea):
     card_view_requested = Signal(object, list)  # (card, ordered_cards_in_folder)
 
@@ -2871,6 +2857,16 @@ class ResultsPanel(QScrollArea):
 
         # Loading overlay (child of the viewport so it covers the scroll area)
         self._overlay = LoadingOverlay(self.viewport())
+
+        self._query_generation = 0
+        self._query_worker = None
+        self._pending_query = None
+        self._closing = False
+        self._folder_metadata = {}
+        self._building_sections = []
+        self._render_steps = None
+        self._render_timer = QTimer(self)
+        self._render_timer.timeout.connect(self._render_batch)
 
         # ── Middle-mouse autopan ──────────────────────────────────────────
         # Attributes must all exist before installEventFilter, which can
@@ -2919,7 +2915,6 @@ class ResultsPanel(QScrollArea):
     ) -> None:
         self._db = db
         self._root_folder = root_folder
-        self.refresh()
 
     def refresh(
         self,
@@ -2930,62 +2925,108 @@ class ResultsPanel(QScrollArea):
         json_only: bool = False,
         id_only: bool = False,
     ) -> None:
-        assets = (
-            self._db.search(
-                query, folder_only=folder_only, json_only=json_only, id_only=id_only
-            )
-            if self._db
-            else []
-        )
-        self._show_and_populate(assets, restore_keys=restore_keys, restore_scroll=restore_scroll)
+        self._request_query([{"text": query, "folder_only": folder_only,
+                              "json_only": json_only, "id_only": id_only}], restore_keys, restore_scroll)
 
-    def refresh_multi(
-        self,
-        segments: list[dict],
-        restore_keys: Optional[set[str]] = None,
-        restore_scroll: int = 0,
-    ) -> None:
-        """Run several independent searches (see _split_search_query /
-        _parse_search_segment) and display the combined, de-duplicated
-        results as one result set -- this is what powers the 'text1;text2;...'
-        multi-search syntax in the main search bar."""
-        assets: list[dict] = []
-        if self._db:
-            seen: set[str] = set()
-            for seg in segments:
-                for asset in self._db.search(
-                    seg.get("text", ""),
-                    folder_only=seg.get("folder_only", False),
-                    json_only=seg.get("json_only", False),
-                    id_only=seg.get("id_only", False),
-                ):
-                    key = asset.get("image_path", "")
-                    if key and key in seen:
-                        continue  # already matched by an earlier segment
-                    if key:
-                        seen.add(key)
-                    assets.append(asset)
-        self._show_and_populate(assets, restore_keys=restore_keys, restore_scroll=restore_scroll)
+    def refresh_multi(self, segments, restore_keys=None, restore_scroll=0) -> None:
+        self._request_query(segments, restore_keys, restore_scroll)
 
-    def _show_and_populate(
-        self,
-        assets: list[dict],
-        restore_keys: Optional[set[str]] = None,
-        restore_scroll: int = 0,
-    ) -> None:
-        if assets:
-            # Show a message BEFORE the UI freezes while rendering all thumbnails.
-            # processEvents() flushes it to screen before the heavy _populate() call.
-            self.show_loading("Rendering images... this may take a moment")
-            QApplication.processEvents()
-        self._populate(assets, restore_keys=restore_keys)
+    def _request_query(self, segments, restore_keys, restore_scroll):
+        if self._closing:
+            return
+        self._query_generation += 1
+        self._render_timer.stop()
+        self._render_steps = None
+        self._pending_query = (segments, restore_keys, restore_scroll, self._query_generation)
+        self.show_loading("Searching...")
+        if self._query_worker is not None:
+            self._query_worker.requestInterruption()
+        else:
+            self._start_pending_query()
+
+    def _start_pending_query(self):
+        if self._closing or self._pending_query is None:
+            return
+        segments, keys, scroll, generation = self._pending_query
+        self._pending_query = None
+        self._query_restore = (keys, scroll)
+        if self._db is None:
+            self._folder_metadata = {}
+            self._show_and_populate([], keys, scroll)
+            return
+        worker = SearchWorker(self._db, segments, generation)
+        worker.completed.connect(self._on_query_result)
+        worker.failed.connect(self._on_query_failed)
+        worker.finished.connect(self._on_query_stopped)
+        self._query_worker = worker
+        worker.start()
+
+    def _on_query_result(self, generation, assets, metadata):
+        if generation != self._query_generation or self._closing:
+            return
+        self._folder_metadata = metadata
+        keys, scroll = self._query_restore
+        self._show_and_populate(assets, keys, scroll)
+
+    def _on_query_failed(self, generation, error):
+        if generation != self._query_generation:
+            return
         self.hide_loading()
-        if restore_scroll:
-            # Two deferred ticks: first lets folder bodies become visible,
-            # second lets the scroll area recalculate its full content height.
-            QTimer.singleShot(0, lambda: QTimer.singleShot(
-                0, lambda: self.verticalScrollBar().setValue(restore_scroll)
-            ))
+        window = self.window()
+        if hasattr(window, "_set_status"):
+            window._set_status(f"Search failed: {error}")
+
+    def _on_query_stopped(self):
+        worker = self._query_worker
+        self._query_worker = None
+        if worker:
+            worker.deleteLater()
+        if self._closing:
+            QTimer.singleShot(0, self.window().close)
+        else:
+            self._start_pending_query()
+
+    def stop_work(self):
+        self._closing = True
+        self._pending_query = None
+        self._render_timer.stop()
+        self._render_steps = None
+        if self._query_worker is not None:
+            self._query_worker.requestInterruption()
+            return True
+        return False
+
+    def _show_and_populate(self, assets, restore_keys=None, restore_scroll=0):
+        self._render_timer.stop()
+        for section in self._building_sections:
+            section.deleteLater()
+        self._building_sections = []
+        self.show_loading("Rendering results...")
+        self._render_scroll = restore_scroll
+        self._render_steps = self._populate_steps(assets, restore_keys)
+        self._render_timer.start(0)
+
+    def _render_batch(self):
+        deadline = time.perf_counter() + 0.008
+        try:
+            for _ in range(30):
+                next(self._render_steps)
+                if time.perf_counter() >= deadline:
+                    break
+        except StopIteration:
+            self._render_timer.stop()
+            self._render_steps = None
+            self._building_sections = []
+            self.hide_loading()
+            if self._render_scroll:
+                self.verticalScrollBar().setValue(self._render_scroll)
+        except Exception as exc:
+            self._render_timer.stop()
+            self._render_steps = None
+            self.hide_loading()
+            window = self.window()
+            if hasattr(window, "_set_status"):
+                window._set_status(f"Could not render results: {exc}")
 
     def show_loading(self, msg: str = "Loading...") -> None:
         self._overlay.set_message(msg)
@@ -3037,7 +3078,7 @@ class ResultsPanel(QScrollArea):
 
         _apply(self._layout)
 
-    def _populate(self, assets: list[dict], restore_keys: Optional[set[str]] = None) -> None:
+    def _populate_steps(self, assets: list[dict], restore_keys: Optional[set[str]] = None):
         # If no explicit keys provided, snapshot what's currently open so a
         # normal refresh (JSON edit, delete, etc.) preserves expanded state.
         if restore_keys is None:
@@ -3047,6 +3088,7 @@ class ResultsPanel(QScrollArea):
             item = self._layout.takeAt(0)
             if item is not None and (w := item.widget()):
                 w.deleteLater()
+            yield
 
         # Collect all unique folder keys (including implicit ancestor folders)
         all_folders_set: set[str] = set()
@@ -3072,7 +3114,7 @@ class ResultsPanel(QScrollArea):
             parts = fk.split("/") if fk else []
             depth = len(parts)
             title = parts[-1] if parts else "(root)"
-            copy_value = self._db.get_folder_meta(fk) if self._db else None
+            copy_value = self._folder_metadata.get(fk)
             sec = FolderSection(
                 title,
                 depth=depth,
@@ -3086,6 +3128,8 @@ class ResultsPanel(QScrollArea):
             sec.folder_tagged.connect(self._on_folder_tagged)
             sec.card_view_requested.connect(self.card_view_requested)
             sections[fk] = sec
+            self._building_sections.append(sec)
+            yield
 
         # Now add sections to the layout in sorted display order
         for fk in all_folders:
@@ -3114,11 +3158,14 @@ class ResultsPanel(QScrollArea):
             fk = (asset.get("folder", "") or "").replace("\\", "/")
             if fk in sections:
                 sections[fk].add_card(asset, self._db)
+            yield
 
         # Re-open any folder that was expanded before the refresh
         for fk, sec in sections.items():
             if fk in restore_keys:
                 sec._toggle()
+            sec._update_tag_dot()
+            yield
 
         self._layout.addStretch()
         self._apply_tagged_mode()
@@ -5435,19 +5482,7 @@ class MainWindow(QMainWindow):
         if db is None or folder is None or not folder.is_dir():
             raise FileNotFoundError(f"Library folder is unavailable: {folder or name}")
 
-        # ── Cache diff (skipped on full rebuild) ─────────────────────────────────────────
-        flagged: Optional[tuple[set[str], set[str], set[str]]] = None
-        if not full_rebuild:
-            cache = _load_file_cache(name)
-            if cache:
-                self._results.update_loading("Checking for changes...")
-                self._set_status("Checking for changes...")
-                QApplication.processEvents()
-                added, changed, deleted = _diff_against_cache(folder, cache)
-                flagged = (added, changed, deleted)
-            # No cache yet (first run) — flagged stays None → full scan
-
-        worker = IndexWorker(db.path, folder, full_rebuild=full_rebuild, flagged=flagged)
+        worker = IndexWorker(db.path, folder, full_rebuild=full_rebuild)
         worker.progress.connect(self._on_index_progress)
         worker.succeeded.connect(
             lambda total, n=name, rb=full_rebuild: self._on_index_finished(n, total, rb)
@@ -5480,15 +5515,8 @@ class MainWindow(QMainWindow):
         self._search.setEnabled(True)
         self._menu_btn.setEnabled(True)
         self._set_active_db(name)
-        self._set_status(f"{total} assets")
-
-        # ── Write updated file cache after a successful index ───────────────────
-        # Rebuild the cache from disk so it reflects the current state exactly.
-        # Runs in the main thread after indexing; the rglob is stat-only (fast).
-        folder = self.db_manager.root_for(name)
-        if folder is not None and folder.exists():
-            new_cache = _build_file_cache(folder)
-            _save_file_cache(name, new_cache)
+        warning = getattr(self._index_worker, "warning_text", "")
+        self._set_status(f"{total} assets" + (f" — {warning}" if warning else ""))
 
     def _open_note_window(self) -> None:
         if self._note_window is None:
@@ -5915,6 +5943,10 @@ class MainWindow(QMainWindow):
             self._close_after_index = True
             self._index_worker.requestInterruption()
             self._set_status("Stopping indexing before closing...")
+            event.ignore()
+            return
+        if self._results.stop_work():
+            self._set_status("Stopping search before closing...")
             event.ignore()
             return
         QApplication.instance().removeEventFilter(self)
