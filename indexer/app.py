@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from functools import wraps
 import queue
 import sqlite3
 import subprocess
@@ -90,13 +93,118 @@ def _json_object(raw: str) -> dict:
     return data
 
 
-def _read_metadata(path: Path, allow_missing: bool = False) -> dict:
+def _read_metadata_snapshot(path: Path, allow_missing: bool = False) -> tuple[dict, Optional[bytes]]:
     try:
-        return _json_object(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
     except FileNotFoundError:
         if allow_missing:
-            return {}
+            return {}, None
         raise
+    return _json_object(raw.decode("utf-8")), raw
+
+
+def _read_metadata(path: Path, allow_missing: bool = False) -> dict:
+    return _read_metadata_snapshot(path, allow_missing)[0]
+
+
+_ANY_VERSION = object()
+
+
+def _atomic_write_text(path: Path, text: str, expected=_ANY_VERSION) -> None:
+    """Publish a complete UTF-8 file; reject changes since the edit snapshot."""
+    def check():
+        if expected is _ANY_VERSION:
+            return
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current != expected:
+            raise RuntimeError(f"{path} changed outside this edit. Reload it before trying again.")
+    if path.is_symlink():
+        raise ValueError(f"Refusing to replace a metadata symlink: {path}")
+    check()
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        check()
+        if expected is None:
+            os.link(temporary, path)  # create-only; never overwrite a newly created file
+        else:
+            os.replace(temporary, path)
+    finally:
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass  # A leftover scratch file must not turn a published save into a failure.
+
+
+def _asset_metadata_for_edit(asset: dict, readonly: bool = False) -> dict:
+    if DEV_MODE or readonly:
+        return _json_object(asset.get("json_data", "{}"))
+    data, expected = _read_metadata_snapshot(Path(asset["json_path"]))
+    asset["_metadata_expected"] = expected
+    return data
+
+
+def _save_asset_metadata(asset: dict, text: str, db, expected=_ANY_VERSION, readonly=False) -> None:
+    _json_object(text)
+    if not DEV_MODE and not readonly:
+        if expected is _ANY_VERSION:
+            expected = asset.get("_metadata_expected", _ANY_VERSION)
+        if expected is _ANY_VERSION:
+            raise RuntimeError("No current file snapshot is available. Reload before editing.")
+        _atomic_write_text(Path(asset["json_path"]), text, expected)
+        journal = getattr(db, "_metadata_journal", None)
+        if journal is not None:
+            journal.append((dict(asset), expected, text.encode("utf-8")))
+    asset["json_data"] = text
+    asset["_metadata_expected"] = text.encode("utf-8")
+    if db:
+        try:
+            db.update_json(asset["image_path"], text)
+        except Exception as exc:
+            raise RuntimeError(f"File saved, but the index could not be updated. Reload the library. {exc}") from exc
+
+
+def _rollback_metadata_batch(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        db = self._db
+        if db is None or self._readonly or DEV_MODE:
+            return method(self, *args, **kwargs)
+        journal = []
+        db._metadata_journal = journal
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as error:
+            failures = []
+            for asset, previous, written in reversed(journal):
+                try:
+                    _atomic_write_text(Path(asset["json_path"]), previous.decode("utf-8"), written)
+                    db.update_json(asset["image_path"], previous.decode("utf-8"))
+                except Exception as rollback_error:
+                    failures.append(f"{asset['json_path']}: {rollback_error}")
+            if failures:
+                raise RuntimeError(f"{error}\nSome earlier changes could not be restored:\n" + "\n".join(failures)) from error
+            raise
+        finally:
+            del db._metadata_journal
+    return wrapped
+
+
+def _report_metadata_errors(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Metadata operation stopped:\n{exc}")
+            return None
+    return wrapped
 
 
 # ── Prefs ──────────────────────────────────────────────────────────────────────
@@ -1526,16 +1634,22 @@ class EditJsonDialog(_DraggableDialog):
         self._editor = QPlainTextEdit()
         self._editor.setObjectName("jsonEditor")
 
-        # Load raw JSON - in dev mode the json_path is a fake sentinel, so skip disk
-        json_path = asset.get("json_path", "")
-        raw = ""
-        if not DEV_MODE and json_path and Path(json_path).exists():
+        self._load_error = None
+        self._expected = _ANY_VERSION
+        raw = asset.get("json_data", "{}")
+        if not DEV_MODE:
             try:
-                raw = Path(json_path).read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                raw = asset.get("json_data", "{}")
-        else:
-            raw = asset.get("json_data", "{}")
+                try:
+                    self._expected = Path(asset["json_path"]).read_bytes()
+                    raw = self._expected.decode("utf-8")
+                except FileNotFoundError:
+                    if not asset.get("allow_create"):
+                        raise
+                    self._expected = None
+                    raw = "{}"
+            except Exception as exc:
+                self._load_error = str(exc)
+                raw = f"Could not read the source file: {exc}"
 
         try:
             raw = json.dumps(json.loads(raw), indent=2, ensure_ascii=False)
@@ -1648,28 +1762,15 @@ class EditJsonDialog(_DraggableDialog):
         self._editor.cursorPositionChanged.connect(_clear_highlight)
 
     def _save(self) -> None:
+        if self._load_error:
+            QMessageBox.critical(self, APP_NAME, self._load_error)
+            return
         new_text = self._editor.toPlainText().strip()
         try:
-            json.loads(new_text)
-        except json.JSONDecodeError as e:
-            QMessageBox.warning(self, APP_NAME, f"Invalid JSON:\n{e}")
+            _save_asset_metadata(self._asset, new_text, self._db, self._expected)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not save metadata:\n{exc}")
             return
-
-        # ── DEV MODE: skip ALL disk I/O; only update the in-memory stub ───────
-        if not DEV_MODE:
-            json_path = self._asset.get("json_path", "")
-            if json_path:
-                try:
-                    Path(json_path).write_text(new_text, encoding="utf-8")
-                except Exception as exc:
-                    QMessageBox.critical(
-                        self, APP_NAME, f"Could not write file:\n{exc}"
-                    )
-                    return
-
-        if self._db:
-            self._db.update_json(self._asset["image_path"], new_text)
-
         self.accept()
 
 
@@ -2215,8 +2316,7 @@ class ThumbnailCard(QWidget):
             return
 
         try:
-            data = (_json_object(self.asset.get("json_data", "{}")) if DEV_MODE
-                    else _read_metadata(Path(self.asset["json_path"])))
+            data = _asset_metadata_for_edit(self.asset)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, APP_NAME, f"Cannot edit metadata: {exc}")
             return
@@ -2233,23 +2333,11 @@ class ThumbnailCard(QWidget):
             data.pop("Identifier", None)
         new_text = json.dumps(data, indent=2, ensure_ascii=False)
 
-        if DEV_MODE:
-            self.asset["json_data"] = new_text
-            if self._db:
-                self._db.update_json(self.asset["image_path"], new_text)
+        try:
+            _save_asset_metadata(self.asset, new_text, self._db)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not save metadata:\n{exc}")
             return
-
-        json_path = self.asset.get("json_path", "")
-        if json_path:
-            try:
-                Path(json_path).write_text(new_text, encoding="utf-8")
-            except Exception as exc:
-                QMessageBox.critical(self, APP_NAME, f"Could not write file:\n{exc}")
-                return
-
-        if self._db:
-            self._db.update_json(self.asset["image_path"], new_text)
-        self.asset["json_data"] = new_text
 
     def _add_identifier_from_menu(self) -> None:
         """'+ Add Identifier' row at the bottom of the card's Edit ID
@@ -2273,47 +2361,16 @@ class ThumbnailCard(QWidget):
         if not tag:
             return
 
-        if DEV_MODE:
-            # In dev mode just update in-memory json_data
-            try:
-                data = json.loads(self.asset.get("json_data", "{}"))
-            except Exception:
-                data = {}
+        try:
+            data = _asset_metadata_for_edit(self.asset)
             existing = data.get("tags", "")
             data["tags"] = f"{existing}, {tag}" if existing else tag
             new_text = json.dumps(data, indent=2, ensure_ascii=False)
-            self.asset["json_data"] = new_text
-            if self._db:
-                self._db.update_json(self.asset["image_path"], new_text)
-            self.edited.emit(self.asset["image_path"])
-            return
-
-        json_path = self.asset.get("json_path", "")
-        if not json_path:
-            return
-        try:
-            data = _read_metadata(Path(json_path))
-        except (OSError, ValueError) as exc:
-            QMessageBox.critical(self, APP_NAME, f"Cannot edit {json_path}:\n{exc}")
-            return
-
-        existing = data.get("tags", "")
-        data["tags"] = f"{existing}, {tag}" if existing else tag
-        new_text = json.dumps(data, indent=2, ensure_ascii=False)
-
-        try:
-            Path(json_path).write_text(new_text, encoding="utf-8")
+            _save_asset_metadata(self.asset, new_text, self._db)
         except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Could not write file:\n{exc}")
+            QMessageBox.critical(self, APP_NAME, f"Could not save metadata:\n{exc}")
             return
-
-        if self._db:
-            self._db.update_json(self.asset["image_path"], new_text)
-        self.asset["json_data"] = new_text
         self.edited.emit(self.asset["image_path"])
-
-
-# ── Folder Section ─────────────────────────────────────────────────────────────
 
 
 class FolderSection(QWidget):
@@ -2618,7 +2675,7 @@ class FolderSection(QWidget):
         meta_path = folder_dir / meta_filename
 
         try:
-            data = _read_metadata(meta_path, allow_missing=True)
+            data, expected = _read_metadata_snapshot(meta_path, allow_missing=True)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, APP_NAME, f"Cannot edit {meta_path}:\n{exc}")
             return
@@ -2627,9 +2684,7 @@ class FolderSection(QWidget):
         data["tags"] = f"{existing}, {tag}" if existing else tag
 
         try:
-            meta_path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            _atomic_write_text(meta_path, json.dumps(data, indent=2, ensure_ascii=False), expected)
         except Exception as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not write file:\n{exc}")
             return
@@ -2637,8 +2692,7 @@ class FolderSection(QWidget):
         # Re-index the folder meta and update copy_value so Copy button appears
         if self._db_ref and self._root_folder:
             try:
-                conn = sqlite3.connect(str(self._db_ref.path))
-                conn.row_factory = sqlite3.Row
+                conn = self._db_ref._conn
                 copy_val = str(next(iter(data.values()))) if data else ""
                 conn.execute(
                     "INSERT INTO folder_meta(folder_key, copy_value)"
@@ -2646,9 +2700,8 @@ class FolderSection(QWidget):
                     (self._folder_key, copy_val),
                 )
                 conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                QMessageBox.warning(self, APP_NAME, f"File saved, but folder index update failed. Reload the library.\n{exc}")
 
         self.folder_tagged.emit(self._folder_key)
 
@@ -2667,13 +2720,10 @@ class FolderSection(QWidget):
         meta_path = folder_dir / meta_filename
 
         try:
-            if meta_path.exists():
-                raw = meta_path.read_text(encoding="utf-8", errors="ignore")
-            else:
-                raw = "{}"
-            raw = json.dumps(json.loads(raw), indent=2, ensure_ascii=False)
-        except Exception:
-            raw = "{}"
+            raw = meta_path.read_text(encoding="utf-8") if meta_path.exists() else "{}"
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not read {meta_path}:\n{exc}")
+            return
 
         # Build a fake asset dict so EditJsonDialog can work
         fake_asset = {
@@ -2681,6 +2731,7 @@ class FolderSection(QWidget):
             "json_path": str(meta_path),
             "json_data": raw,
             "name": meta_filename,
+            "allow_create": True,
         }
         dlg = EditJsonDialog(fake_asset, None, self)
         if dlg.exec():
@@ -2694,17 +2745,15 @@ class FolderSection(QWidget):
                     )
                     data = json.loads(new_raw)
                     copy_val = str(next(iter(data.values()))) if data else ""
-                    conn = sqlite3.connect(str(self._db_ref.path))
-                    conn.row_factory = sqlite3.Row
+                    conn = self._db_ref._conn
                     conn.execute(
                         "INSERT INTO folder_meta(folder_key, copy_value)"
                         " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
                         (self._folder_key, copy_val),
                     )
                     conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    QMessageBox.warning(self, APP_NAME, f"File saved, but folder index update failed. Reload the library.\n{exc}")
             self.folder_tagged.emit(self._folder_key)
 
     def _open_in_explorer(self) -> None:
@@ -4157,26 +4206,13 @@ class ManageIdentifiersDialog(_DraggableDialog):
         return None
 
     def _write_asset_json(self, asset: dict, new_text: str) -> None:
-        """Mirrors ThumbnailCard._toggle_identifier's disk+db write path."""
-        if not self._readonly:
-            json_path = asset.get("json_path", "")
-            if json_path:
-                try:
-                    Path(json_path).write_text(new_text, encoding="utf-8")
-                except Exception:
-                    pass  # best-effort; the DB copy below stays authoritative
-        if self._db:
-            self._db.update_json(asset["image_path"], new_text)
-        asset["json_data"] = new_text
+        _save_asset_metadata(asset, new_text, self._db, readonly=self._readonly)
 
     def _strip_identifier_from_asset(self, name: str, image_path: str) -> None:
         asset = self._find_asset(image_path)
         if asset is None:
             return
-        try:
-            data = json.loads(asset.get("json_data", "{}"))
-        except Exception:
-            data = {}
+        data = _asset_metadata_for_edit(asset, self._readonly)
         toks = [
             t.strip()
             for t in str(data.get("Identifier", "") or "").split(",")
@@ -4190,10 +4226,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         self._write_asset_json(asset, json.dumps(data, indent=2, ensure_ascii=False))
 
     def _add_identifier_to_asset(self, name: str, asset: dict) -> None:
-        try:
-            data = json.loads(asset.get("json_data", "{}"))
-        except Exception:
-            data = {}
+        data = _asset_metadata_for_edit(asset, self._readonly)
         toks = [
             t.strip()
             for t in str(data.get("Identifier", "") or "").split(",")
@@ -4213,10 +4246,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         asset = self._find_asset(image_path)
         if asset is None:
             return
-        try:
-            data = json.loads(asset.get("json_data", "{}"))
-        except Exception:
-            data = {}
+        data = _asset_metadata_for_edit(asset, self._readonly)
         toks = [
             t.strip()
             for t in str(data.get("Identifier", "") or "").split(",")
@@ -4233,6 +4263,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
             data.pop("Identifier", None)
         self._write_asset_json(asset, json.dumps(data, indent=2, ensure_ascii=False))
 
+    @_report_metadata_errors
     def _remove_member(self, name: str, image_path: str) -> None:
         if self._db is None:
             return
@@ -4243,6 +4274,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         self._refresh_list()
         self._select_identifier_row(name)
 
+    @_rollback_metadata_batch
     def _migrate_temporary(self, name: str, new_temporary: bool) -> None:
         """Move every current member of `name` between the asset's own JSON
         and this Database's in-memory temp set, then flip the bookkeeping
@@ -4282,6 +4314,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         finally:
             self._overlay.hide()
 
+    @_rollback_metadata_batch
     def _cascade_rename(self, old_name: str, new_name: str, members: list) -> None:
         """Rewrite `old_name` -> `new_name` inside every asset that currently
         has it, so a rename actually propagates everywhere instead of just
@@ -4304,6 +4337,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         finally:
             self._overlay.hide()
 
+    @_rollback_metadata_batch
     def _cascade_remove(self, name: str, members: list) -> None:
         """Strip `name` out of every asset that currently has it, so a
         removal doesn't leave orphaned, invisible-but-still-searchable
@@ -4405,6 +4439,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
 
     # ── Actions ──────────────────────────────────────────────────────────
 
+    @_report_metadata_errors
     def _edit_identifier(self) -> None:
         name = self._current_identifier_name()
         if name is None:
@@ -4431,9 +4466,9 @@ class ManageIdentifiersDialog(_DraggableDialog):
             # still-searchable ghost. Grab the member list under the OLD name
             # before renaming the table entry.
             members = [] if was_temp else self._get_members(name)
-            self._db.rename_identifier(name, new_name)
             if not was_temp:
                 self._cascade_rename(name, new_name, members)
+            self._db.rename_identifier(name, new_name)
             idx = self._identifiers.index(name)
             self._identifiers[idx] = new_name
             if name in self._expanded:
@@ -4459,6 +4494,7 @@ class ManageIdentifiersDialog(_DraggableDialog):
         self._refresh_list()
         self._select_identifier_row(name)
 
+    @_report_metadata_errors
     def _remove_identifier(self) -> None:
         name = self._current_identifier_name()
         if name is None:
@@ -4480,10 +4516,10 @@ class ManageIdentifiersDialog(_DraggableDialog):
             )
             if resp != QMessageBox.StandardButton.Yes:
                 return
-        self._identifiers.remove(name)
-        self._expanded.discard(name)
         if members:
             self._cascade_remove(name, members)
+        self._identifiers.remove(name)
+        self._expanded.discard(name)
         if self._db:
             self._db.remove_identifier(name)
         self._refresh_list()
