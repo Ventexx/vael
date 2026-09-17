@@ -510,13 +510,23 @@ PIXMAP_WORKER.start()
 # ── Index logic (thread-safe, opens its own connection) ───────────────────────
 
 
-def _refresh_folder_metadata(conn: sqlite3.Connection, folder: Path) -> None:
+class IndexCancelled(Exception):
+    pass
+
+
+def _check_index_cancel(cancel_cb) -> None:
+    if cancel_cb and cancel_cb():
+        raise IndexCancelled("Indexing cancelled.")
+
+
+def _refresh_folder_metadata(conn: sqlite3.Connection, folder: Path, cancel_cb=None) -> None:
     """Refresh folder copy values even when no image/JSON pair changed."""
     # ── Scan for !F-[FolderName].json files and upsert into folder_meta ──
     # Walk every directory under `folder` (including root) and look for a
     # file matching !F-<dirname>.json (case-insensitive on the stem).
     seen_folder_keys: set[str] = set()
-    for dir_path in sorted(folder.rglob("*")):
+    for dir_path in folder.rglob("*"):
+        _check_index_cancel(cancel_cb)
         if not dir_path.is_dir():
             continue
         expected_stem = f"!F-{dir_path.name}"
@@ -584,6 +594,7 @@ def _run_index(
     full_rebuild: bool = False,
     progress_cb=None,  # callable(current, total, msg) or None
     flagged: Optional[tuple[set[str], set[str], set[str]]] = None,
+    cancel_cb=None,
 ) -> tuple[int, int]:
     """
     Opens a *fresh* SQLite connection on the calling thread, indexes `folder`,
@@ -595,13 +606,15 @@ def _run_index(
              everything else in the DB is left as-is.  When None (or when
              full_rebuild is True) the original full-scan behaviour runs.
     """
+    _check_index_cancel(cancel_cb)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Library folder is unavailable: {folder}")
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
         if full_rebuild:
             conn.execute("DELETE FROM assets")
             conn.execute("DELETE FROM folder_meta")
-            conn.commit()
 
         # Ensure folder_meta exists (for DBs created before this feature)
         conn.execute("""
@@ -610,7 +623,6 @@ def _run_index(
                 copy_value  TEXT    NOT NULL DEFAULT ''
             )
         """)
-        conn.commit()
 
         existing: set[str] = {
             r[0] for r in conn.execute("SELECT image_path FROM assets").fetchall()
@@ -624,6 +636,7 @@ def _run_index(
 
             # Process deleted first – just remove from DB
             for p in deleted:
+                _check_index_cancel(cancel_cb)
                 conn.execute("DELETE FROM assets WHERE image_path=?", (p,))
 
             to_process = sorted(added | changed)
@@ -631,6 +644,7 @@ def _run_index(
             changes = len(deleted)
 
             for i, key in enumerate(to_process, 1):
+                _check_index_cancel(cancel_cb)
                 png = Path(key)
                 jpath = png.with_suffix(".json")
                 try:
@@ -659,7 +673,8 @@ def _run_index(
                 if progress_cb:
                     progress_cb(i, total, f"Indexing ({i}/{total})")
 
-            _refresh_folder_metadata(conn, folder)
+            _refresh_folder_metadata(conn, folder, cancel_cb)
+            _check_index_cancel(cancel_cb)
             conn.commit()
             db_total: int = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             return db_total, changes
@@ -675,6 +690,7 @@ def _run_index(
         changes = 0
 
         for i, png in enumerate(candidates, 1):
+            _check_index_cancel(cancel_cb)
             jpath = png.with_suffix(".json")
             try:
                 raw = jpath.read_text(encoding="utf-8", errors="ignore")
@@ -710,8 +726,9 @@ def _run_index(
             conn.execute("DELETE FROM assets WHERE image_path=?", (p,))
         changes += len(stale)
 
-        _refresh_folder_metadata(conn, folder)
+        _refresh_folder_metadata(conn, folder, cancel_cb)
 
+        _check_index_cancel(cancel_cb)
         conn.commit()
 
         db_total: int = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
@@ -1507,7 +1524,8 @@ class IndexWorker(QThread):
     """Indexes a folder in a background thread using its own SQLite connection."""
 
     progress = Signal(int, int, str)  # current, total, message
-    finished = Signal(int)  # final total
+    succeeded = Signal(int)
+    failed = Signal(str)
 
     def __init__(
         self,
@@ -1526,10 +1544,15 @@ class IndexWorker(QThread):
         def _cb(current, total, msg):
             self.progress.emit(current, total, msg)
 
-        total, _ = _run_index(
-            self._db_path, self._folder, self._full_rebuild, _cb, self._flagged
-        )
-        self.finished.emit(total)
+        try:
+            total, _ = _run_index(
+                self._db_path, self._folder, self._full_rebuild, _cb, self._flagged,
+                self.isInterruptionRequested,
+            )
+        except Exception as exc:
+            self.failed.emit(f"{self._folder}: {exc}")
+        else:
+            self.succeeded.emit(total)
 
 
 # ── Thumbnail Card ─────────────────────────────────────────────────────────────
@@ -5385,6 +5408,12 @@ class MainWindow(QMainWindow):
         self._do_search()
 
     def _start_load_db(self, name: str, full_rebuild: bool = False) -> None:
+        try:
+            self._begin_load_db(name, full_rebuild)
+        except Exception as exc:
+            self._on_index_failed(str(exc))
+
+    def _begin_load_db(self, name: str, full_rebuild: bool = False) -> None:
         """Begin background indexing for a database, showing the loading overlay.
 
         On a normal (non-rebuild) startup the file cache is diffed first so only
@@ -5403,12 +5432,8 @@ class MainWindow(QMainWindow):
 
         db = self.db_manager.get(name)
         folder = self.db_manager.root_for(name)
-        if db is None or folder is None or not folder.exists():
-            self._results.hide_loading()
-            self._search.setEnabled(True)
-            self._menu_btn.setEnabled(True)
-            self._set_active_db(name)
-            return
+        if db is None or folder is None or not folder.is_dir():
+            raise FileNotFoundError(f"Library folder is unavailable: {folder or name}")
 
         # ── Cache diff (skipped on full rebuild) ─────────────────────────────────────────
         flagged: Optional[tuple[set[str], set[str], set[str]]] = None
@@ -5424,11 +5449,26 @@ class MainWindow(QMainWindow):
 
         worker = IndexWorker(db.path, folder, full_rebuild=full_rebuild, flagged=flagged)
         worker.progress.connect(self._on_index_progress)
-        worker.finished.connect(
+        worker.succeeded.connect(
             lambda total, n=name, rb=full_rebuild: self._on_index_finished(n, total, rb)
         )
+        worker.failed.connect(self._on_index_failed)
+        worker.finished.connect(lambda w=worker: self._on_index_stopped(w))
         self._index_worker = worker
         worker.start()
+
+    def _on_index_failed(self, error: str) -> None:
+        self._results.hide_loading()
+        self._search.setEnabled(True)
+        self._menu_btn.setEnabled(True)
+        self._set_status(f"Indexing stopped: {error}")
+
+    def _on_index_stopped(self, worker) -> None:
+        if self._index_worker is worker:
+            self._index_worker = None
+        worker.deleteLater()
+        if getattr(self, "_close_after_index", False):
+            QTimer.singleShot(0, self.close)
 
     def _on_index_progress(self, current: int, total: int, msg: str) -> None:
         self._results.update_loading(msg)
@@ -5441,7 +5481,6 @@ class MainWindow(QMainWindow):
         self._menu_btn.setEnabled(True)
         self._set_active_db(name)
         self._set_status(f"{total} assets")
-        self._index_worker = None
 
         # ── Write updated file cache after a successful index ───────────────────
         # Rebuild the cache from disk so it reflects the current state exactly.
@@ -5872,11 +5911,13 @@ class MainWindow(QMainWindow):
     # ── Window close ──────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        QApplication.instance().removeEventFilter(self)
-        # Stop any running worker
         if self._index_worker and self._index_worker.isRunning():
-            self._index_worker.quit()
-            self._index_worker.wait(2000)
+            self._close_after_index = True
+            self._index_worker.requestInterruption()
+            self._set_status("Stopping indexing before closing...")
+            event.ignore()
+            return
+        QApplication.instance().removeEventFilter(self)
         # Close all open database connections
         self.db_manager.close_all()
         # Clear pixmap cache to release file handles
