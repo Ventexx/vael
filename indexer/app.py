@@ -349,6 +349,74 @@ PIXMAP_WORKER.start()
 # ── Index logic (thread-safe, opens its own connection) ───────────────────────
 
 
+def _refresh_folder_metadata(conn: sqlite3.Connection, folder: Path) -> None:
+    """Refresh folder copy values even when no image/JSON pair changed."""
+    # ── Scan for !F-[FolderName].json files and upsert into folder_meta ──
+    # Walk every directory under `folder` (including root) and look for a
+    # file matching !F-<dirname>.json (case-insensitive on the stem).
+    seen_folder_keys: set[str] = set()
+    for dir_path in sorted(folder.rglob("*")):
+        if not dir_path.is_dir():
+            continue
+        expected_stem = f"!F-{dir_path.name}"
+        meta_file = dir_path / f"{expected_stem}.json"
+        if not meta_file.exists():
+            # Try case-insensitive match on Windows-style paths
+            matches = [
+                f
+                for f in dir_path.iterdir()
+                if f.suffix.lower() == ".json"
+                and f.stem.lower() == expected_stem.lower()
+            ]
+            meta_file = matches[0] if matches else None
+        if meta_file and meta_file.exists():
+            try:
+                raw = meta_file.read_text(encoding="utf-8", errors="ignore")
+                data = json.loads(raw)
+                # Take the first (and for now only) value
+                copy_value = str(next(iter(data.values()))) if data else ""
+            except Exception:
+                copy_value = ""
+            rel = str(dir_path.relative_to(folder)).replace("\\", "/")
+            if rel == ".":
+                rel = ""
+            seen_folder_keys.add(rel)
+            conn.execute(
+                "INSERT INTO folder_meta(folder_key, copy_value)"
+                " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
+                (rel, copy_value),
+            )
+    # Also check the root folder itself for a matching !F-<rootname>.json
+    root_stem = f"!F-{folder.name}"
+    root_meta = folder / f"{root_stem}.json"
+    if not root_meta.exists():
+        matches = [
+            f
+            for f in folder.iterdir()
+            if f.suffix.lower() == ".json" and f.stem.lower() == root_stem.lower()
+        ]
+        root_meta = matches[0] if matches else None
+    if root_meta and root_meta.exists():
+        try:
+            raw = root_meta.read_text(encoding="utf-8", errors="ignore")
+            data = json.loads(raw)
+            copy_value = str(next(iter(data.values()))) if data else ""
+        except Exception:
+            copy_value = ""
+        seen_folder_keys.add("")
+        conn.execute(
+            "INSERT INTO folder_meta(folder_key, copy_value)"
+            " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
+            ("", copy_value),
+        )
+    # Remove stale folder_meta rows for folders that no longer have an F-*.json
+    existing_fk = {
+        r[0] for r in conn.execute("SELECT folder_key FROM folder_meta").fetchall()
+    }
+    for stale_fk in existing_fk - seen_folder_keys:
+        conn.execute("DELETE FROM folder_meta WHERE folder_key=?", (stale_fk,))
+
+
 def _run_index(
     db_path: Path,
     folder: Path,
@@ -430,6 +498,7 @@ def _run_index(
                 if progress_cb:
                     progress_cb(i, total, f"Indexing ({i}/{total})")
 
+            _refresh_folder_metadata(conn, folder)
             conn.commit()
             db_total: int = conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
             return db_total, changes
@@ -480,70 +549,7 @@ def _run_index(
             conn.execute("DELETE FROM assets WHERE image_path=?", (p,))
         changes += len(stale)
 
-        # ── Scan for !F-[FolderName].json files and upsert into folder_meta ──
-        # Walk every directory under `folder` (including root) and look for a
-        # file matching !F-<dirname>.json (case-insensitive on the stem).
-        seen_folder_keys: set[str] = set()
-        for dir_path in sorted(folder.rglob("*")):
-            if not dir_path.is_dir():
-                continue
-            expected_stem = f"!F-{dir_path.name}"
-            meta_file = dir_path / f"{expected_stem}.json"
-            if not meta_file.exists():
-                # Try case-insensitive match on Windows-style paths
-                matches = [
-                    f
-                    for f in dir_path.iterdir()
-                    if f.suffix.lower() == ".json"
-                    and f.stem.lower() == expected_stem.lower()
-                ]
-                meta_file = matches[0] if matches else None
-            if meta_file and meta_file.exists():
-                try:
-                    raw = meta_file.read_text(encoding="utf-8", errors="ignore")
-                    data = json.loads(raw)
-                    # Take the first (and for now only) value
-                    copy_value = str(next(iter(data.values()))) if data else ""
-                except Exception:
-                    copy_value = ""
-                rel = str(dir_path.relative_to(folder)).replace("\\", "/")
-                if rel == ".":
-                    rel = ""
-                seen_folder_keys.add(rel)
-                conn.execute(
-                    "INSERT INTO folder_meta(folder_key, copy_value)"
-                    " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
-                    (rel, copy_value),
-                )
-        # Also check the root folder itself for a matching !F-<rootname>.json
-        root_stem = f"!F-{folder.name}"
-        root_meta = folder / f"{root_stem}.json"
-        if not root_meta.exists():
-            matches = [
-                f
-                for f in folder.iterdir()
-                if f.suffix.lower() == ".json" and f.stem.lower() == root_stem.lower()
-            ]
-            root_meta = matches[0] if matches else None
-        if root_meta and root_meta.exists():
-            try:
-                raw = root_meta.read_text(encoding="utf-8", errors="ignore")
-                data = json.loads(raw)
-                copy_value = str(next(iter(data.values()))) if data else ""
-            except Exception:
-                copy_value = ""
-            seen_folder_keys.add("")
-            conn.execute(
-                "INSERT INTO folder_meta(folder_key, copy_value)"
-                " VALUES(?,?) ON CONFLICT(folder_key) DO UPDATE SET copy_value=excluded.copy_value",
-                ("", copy_value),
-            )
-        # Remove stale folder_meta rows for folders that no longer have an F-*.json
-        existing_fk = {
-            r[0] for r in conn.execute("SELECT folder_key FROM folder_meta").fetchall()
-        }
-        for stale_fk in existing_fk - seen_folder_keys:
-            conn.execute("DELETE FROM folder_meta WHERE folder_key=?", (stale_fk,))
+        _refresh_folder_metadata(conn, folder)
 
         conn.commit()
 
@@ -5291,8 +5297,8 @@ class MainWindow(QMainWindow):
         """Begin background indexing for a database, showing the loading overlay.
 
         On a normal (non-rebuild) startup the file cache is diffed first so only
-        changed/added/deleted files are re-indexed.  If no files changed at all
-        the worker is skipped entirely.  full_rebuild bypasses the cache.
+        changed/added/deleted image pairs are re-indexed. Folder metadata is
+        always refreshed, including changes with no image-pair changes.
         """
         if self._index_worker and self._index_worker.isRunning():
             return  # already busy
@@ -5323,16 +5329,6 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
                 added, changed, deleted = _diff_against_cache(folder, cache)
                 flagged = (added, changed, deleted)
-                n_changes = len(added) + len(changed) + len(deleted)
-                if n_changes == 0:
-                    # Nothing changed — skip indexing entirely
-                    self._results.hide_loading()
-                    self._search.setEnabled(True)
-                    self._menu_btn.setEnabled(True)
-                    self._set_active_db(name)
-                    db_total = db.count()
-                    self._set_status(f"{db_total} assets (no changes)")
-                    return
             # No cache yet (first run) — flagged stays None → full scan
 
         worker = IndexWorker(db.path, folder, full_rebuild=full_rebuild, flagged=flagged)
