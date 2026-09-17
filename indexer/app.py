@@ -83,6 +83,22 @@ NAME_H = 16
 COLS = 6
 
 
+def _json_object(raw: str) -> dict:
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Metadata must be a JSON object; the existing file was not changed.")
+    return data
+
+
+def _read_metadata(path: Path, allow_missing: bool = False) -> dict:
+    try:
+        return _json_object(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if allow_missing:
+            return {}
+        raise
+
+
 # ── Prefs ──────────────────────────────────────────────────────────────────────
 
 
@@ -2199,11 +2215,13 @@ class ThumbnailCard(QWidget):
             return
 
         try:
-            data = json.loads(self.asset.get("json_data", "{}"))
-        except Exception:
-            data = {}
+            data = (_json_object(self.asset.get("json_data", "{}")) if DEV_MODE
+                    else _read_metadata(Path(self.asset["json_path"])))
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, f"Cannot edit metadata: {exc}")
+            return
 
-        current = self._get_active_identifiers()
+        current = [t.strip() for t in str(data.get("Identifier", "") or "").split(",") if t.strip()]
         if name in current:
             current = [c for c in current if c != name]
         else:
@@ -2274,14 +2292,10 @@ class ThumbnailCard(QWidget):
         if not json_path:
             return
         try:
-            raw = (
-                Path(json_path).read_text(encoding="utf-8", errors="ignore")
-                if Path(json_path).exists()
-                else "{}"
-            )
-            data = json.loads(raw)
-        except Exception:
-            data = {}
+            data = _read_metadata(Path(json_path))
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, f"Cannot edit {json_path}:\n{exc}")
+            return
 
         existing = data.get("tags", "")
         data["tags"] = f"{existing}, {tag}" if existing else tag
@@ -2604,13 +2618,10 @@ class FolderSection(QWidget):
         meta_path = folder_dir / meta_filename
 
         try:
-            if meta_path.exists():
-                raw = meta_path.read_text(encoding="utf-8", errors="ignore")
-                data = json.loads(raw)
-            else:
-                data = {}
-        except Exception:
-            data = {}
+            data = _read_metadata(meta_path, allow_missing=True)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, f"Cannot edit {meta_path}:\n{exc}")
+            return
 
         existing = data.get("tags", "")
         data["tags"] = f"{existing}, {tag}" if existing else tag
