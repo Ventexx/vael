@@ -210,21 +210,70 @@ def _report_metadata_errors(method):
 # ── Prefs ──────────────────────────────────────────────────────────────────────
 
 
+class _StoredDict(dict):
+    pass
+
+
+class _StoredList(list):
+    pass
+
+
+def _storage_error(path: Path, error: Exception) -> None:
+    message = f"Could not read or save {path}:\n{error}\nThe existing file was kept."
+    if QApplication.instance() is not None:
+        QMessageBox.warning(None, APP_NAME, message)
+    else:
+        print(message, file=sys.stderr)
+
+
+def _load_state(path: Path, kind=dict):
+    result = _StoredDict() if kind is dict else _StoredList()
+    result._source_bytes = None
+    result._load_error = None
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, kind):
+            raise ValueError(f"Expected a JSON {kind.__name__}.")
+        result.update(value) if kind is dict else result.extend(value)
+        result._source_bytes = raw
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        result._load_error = str(exc)
+        _storage_error(path, exc)
+    return result
+
+
+def _save_state(path: Path, data) -> bool:
+    if DEV_MODE:
+        return True
+    try:
+        if getattr(data, "_load_error", None):
+            raise ValueError(f"Fix the unreadable file before saving: {data._load_error}")
+        expected = getattr(data, "_source_bytes", _ANY_VERSION)
+        if expected is _ANY_VERSION:
+            current = _load_state(path, dict if isinstance(data, dict) else list)
+            if current._load_error:
+                return False
+            expected = current._source_bytes
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(data, indent=2, ensure_ascii=False)
+        _atomic_write_text(path, text, expected)
+        if isinstance(data, (_StoredDict, _StoredList)):
+            data._source_bytes = text.encode("utf-8")
+        return True
+    except Exception as exc:
+        _storage_error(path, exc)
+        return False
+
+
 def _load_prefs() -> dict:
-    try:
-        if PREFS_FILE.exists():
-            return json.loads(PREFS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
+    return _load_state(PREFS_FILE)
 
 
-def _save_prefs(data: dict) -> None:
-    try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        PREFS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+def _save_prefs(data: dict) -> bool:
+    return _save_state(PREFS_FILE, data)
 
 
 # ── File Cache ─────────────────────────────────────────────────────────────────
@@ -364,23 +413,11 @@ SCRIPTS_FILE = APP_DIR / "startup_scripts.json"
 
 
 def _load_scripts() -> list[dict]:
-    """Return list of {name, path, args} dicts."""
-    try:
-        if SCRIPTS_FILE.exists():
-            data = json.loads(SCRIPTS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-    except Exception:
-        pass
-    return []
+    return _load_state(SCRIPTS_FILE, list)
 
 
-def _save_scripts(scripts: list[dict]) -> None:
-    try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        SCRIPTS_FILE.write_text(json.dumps(scripts, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+def _save_scripts(scripts: list[dict]) -> bool:
+    return _save_state(SCRIPTS_FILE, scripts)
 
 
 # ── Pixmap Cache ───────────────────────────────────────────────────────────────
@@ -1334,18 +1371,19 @@ class DatabaseManager:
         self._load()
 
     def _load(self) -> None:
-        if self._roots_file.exists():
-            try:
-                data = json.loads(self._roots_file.read_text(encoding="utf-8"))
-                self._roots = {k: Path(v) for k, v in data.items()}
-            except Exception:
-                pass
+        self._registry = _load_state(self._roots_file)
+        try:
+            self._roots = {k: Path(v) for k, v in self._registry.items()}
+        except (TypeError, ValueError) as exc:
+            self._registry._load_error = str(exc)
+            _storage_error(self._roots_file, exc)
 
     def _save(self) -> None:
-        self._roots_file.write_text(
-            json.dumps({k: str(v) for k, v in self._roots.items()}, indent=2),
-            encoding="utf-8",
-        )
+        self._registry.clear()
+        self._registry.update({k: str(v) for k, v in self._roots.items()})
+        if not _save_state(self._roots_file, self._registry):
+            self._load()
+            raise RuntimeError("The library registry could not be saved.")
 
     def names(self) -> list[str]:
         return sorted(self._roots.keys())
@@ -1378,6 +1416,8 @@ class DatabaseManager:
 
     def remove(self, name: str) -> None:
         """Remove a database entry and delete its .db file if it exists."""
+        self._roots.pop(name, None)
+        self._save()
         # Close and unload from memory first
         db = self._dbs.pop(name, None)
         if db:
@@ -1395,9 +1435,6 @@ class DatabaseManager:
                 cf.unlink()
         except Exception:
             pass
-        # Remove from roots registry and persist
-        self._roots.pop(name, None)
-        self._save()
 
     def close_all(self) -> None:
         for db in self._dbs.values():
@@ -3325,6 +3362,7 @@ class OpenDatabaseDialog(_DraggableDialog):
     def _on_selection_changed(self, row: int) -> None:
         self._remove_db_btn.setEnabled(row >= 0)
 
+    @_report_metadata_errors
     def _remove_db(self) -> None:
         item = self._list.currentItem()
         if not item:
@@ -3524,7 +3562,7 @@ class StartupScriptsDialog(_DraggableDialog):
         #    work visually - but nothing is written to startup_scripts.json.
         #    Changes are lost when the dialog closes. The real scripts file on
         #    disk is left completely untouched.
-        self._save_scripts = (lambda _scripts: None) if readonly else _save_scripts
+        self._save_scripts = (lambda _scripts: True) if readonly else self._persist_scripts
 
         self.setWindowTitle(
             "Startup Scripts" + ("  [dev - changes not saved]" if readonly else "")
@@ -3653,6 +3691,12 @@ class StartupScriptsDialog(_DraggableDialog):
         lay.addWidget(footer)
 
         self._restore_pos()
+
+    def _persist_scripts(self, scripts) -> bool:
+        if _save_scripts(scripts):
+            return True
+        self._scripts = _load_scripts()
+        return False
 
     def _refresh_list(self) -> None:
         row = self._list.currentRow()
@@ -5578,6 +5622,7 @@ class MainWindow(QMainWindow):
                     self.db_manager.unload(self._active_db)
                 self._start_load_db(name)
 
+    @_report_metadata_errors
     def _action_add_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose a folder to add")
         if not path:
@@ -5853,41 +5898,20 @@ class MainWindow(QMainWindow):
 
 
 def _load_notes() -> dict:
-    try:
-        if NOTES_FILE.exists():
-            return json.loads(NOTES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
+    return _load_state(NOTES_FILE)
 
 
-def _save_notes(data: dict) -> None:
-    try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
-        NOTES_FILE.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception:
-        pass
+def _save_notes(data: dict) -> bool:
+    return _save_state(NOTES_FILE, data)
 
 
 _AZ_SORT_KEY = "A-Z Sort in Folder"
 
 
 def _ensure_az_sort_flag(data: dict) -> dict:
-    """Check for the 'A-Z Sort in Folder' flag at the root of the notes JSON.
-
-    - If the key is missing it is inserted at the very top (position 0) with
-      value True and the file is saved immediately.
-    - If the key already exists its value is left unchanged.
-    - Returns the (possibly updated) data dict.
-    """
+    """Apply the default in memory; reading notes must never rewrite the file."""
     if _AZ_SORT_KEY not in data:
-        # Insert at the very top by rebuilding the dict with the flag first
-        updated = {_AZ_SORT_KEY: True}
-        updated.update(data)
-        _save_notes(updated)
-        return updated
+        data[_AZ_SORT_KEY] = True
     return data
 
 
@@ -5920,14 +5944,14 @@ def _set_nested(data: dict, keys: list, name: str, value: str) -> None:
     _set_nested(data[k], keys[1:], name, value)
 
 
-def _add_note_entry(name: str, value: str, category: str) -> None:
+def _add_note_entry(name: str, value: str, category: str) -> bool:
     data = _load_notes()
     if category:
         parts = [p for p in category.split("/") if p]
         _set_nested(data, parts, name, value)
     else:
         data[name] = value
-    _save_notes(data)
+    return _save_notes(data)
 
 
 # ── Note Entry Card ────────────────────────────────────────────────────────────
@@ -6186,14 +6210,9 @@ class NoteSection(QWidget):
         """Write the inverse of current_effective into this folder's dict in notes.json."""
         if not self._notes_file or not self._category_path:
             return
-        try:
-            data = (
-                json.loads(self._notes_file.read_text(encoding="utf-8", errors="ignore"))
-                if self._notes_file.exists()
-                else {}
-            )
-        except Exception:
-            data = {}
+        data = _load_state(self._notes_file)
+        if data._load_error:
+            return
 
         # Navigate to this folder's dict, preserving existing content at each level
         parts = self._category_path.split("/")
@@ -6205,7 +6224,8 @@ class NoteSection(QWidget):
             node = node[part]
 
         node[_AZ_SORT_KEY] = not current_effective
-        _save_notes(data)
+        if not _save_state(self._notes_file, data):
+            return
 
         # Reload the panel so the new sort takes effect immediately
         if self._panel_ref is not None:
@@ -6334,14 +6354,9 @@ class NotePanel(QScrollArea):
         # Snapshot state before clearing so we can restore it after repopulating
         expanded_titles = self._get_expanded_titles()
         scroll_value = self.verticalScrollBar().value()
-        try:
-            data = (
-                json.loads(self._notes_file.read_text(encoding="utf-8"))
-                if self._notes_file.exists()
-                else {}
-            )
-        except Exception:
-            data = {}
+        data = _load_state(self._notes_file)
+        if data._load_error:
+            return
         # Ensure the A-Z Sort flag exists; inserts it at the top if missing
         data = _ensure_az_sort_flag(data)
         az_sort = bool(data.get(_AZ_SORT_KEY, True))
@@ -6603,8 +6618,8 @@ class CreateNoteDialog(_DraggableDialog):
             QMessageBox.warning(self, APP_NAME, "Name and Value are required.")
             return
         category = self._cat_edit.text().strip()
-        _add_note_entry(name, value, category)
-        self.accept()
+        if _add_note_entry(name, value, category):
+            self.accept()
 
 
 # ── Note Window ────────────────────────────────────────────────────────────────
