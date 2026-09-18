@@ -623,11 +623,13 @@ QProgressBar#bulkLoadProgress::chunk {
     border-radius: 3px;
 }
 QLabel#bulkLoadCount {
+    background: transparent;
     color: #00d4a0;
     font-size: 15px;
     font-weight: 700;
 }
 QLabel#bulkLoadDetail {
+    background: transparent;
     color: rgba(230,230,230,0.85);
     font-size: 12px;
 }
@@ -967,17 +969,20 @@ POLL_INTERVAL = 1.0
 POLL_TIMEOUT = 600
 
 HOTKEYS = [
-    ("Ctrl+R", "Run the active workflow"),
-    ("Ctrl+Shift+A", "Add current workflow (with current inputs) to the run queue"),
+    ("Ctrl+Enter", "Run the active workflow"),
+    ("Ctrl+Shift+Enter", "Add current workflow (with current inputs) to the run queue"),
     ("Ctrl+Shift+R", "Run every queued workflow, one after another"),
     ("Ctrl+Shift+X", "Clear the run queue"),
     ("Ctrl+N", "Create a new workflow"),
     ("Ctrl+Tab", "Next workflow"),
     ("Ctrl+Shift+Tab", "Previous workflow"),
-    ("Ctrl+O", "Toggle the Outputs / Queue sidebar"),
-    ("Ctrl+Shift+W", "Toggle the Workflows sidebar"),
+    ("Ctrl+1 \u2013 Ctrl+9, Ctrl+0", "Jump to workflow 1-10 (in sidebar order)"),
+    ("Ctrl+Up", "Close current folder, open the one above"),
+    ("Ctrl+Down", "Close current folder, open the one below"),
+    ("Ctrl+W", "Open/close the Workflows sidebar"),
+    ("Ctrl+S", "Open/close the Outputs / Queue sidebar"),
+    ("Ctrl+O", "Open the outputs folder on disk"),
     ("Ctrl+,", "Open Settings"),
-    ("Ctrl+Shift+O", "Open the outputs folder on disk"),
     ("F5", "Refresh the outputs list"),
 ]
 
@@ -3508,9 +3513,9 @@ class RosterBar(QWidget):
         outer.setSpacing(6)
 
         toolbar = QHBoxLayout()
-        roster_label = QLabel("INPUT ROSTER")
-        roster_label.setObjectName("hint")
-        toolbar.addWidget(roster_label)
+        self.roster_label = QLabel("INPUT ROSTER")
+        self.roster_label.setObjectName("hint")
+        toolbar.addWidget(self.roster_label)
         toolbar.addStretch(1)
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setObjectName("dangerButton")
@@ -3638,6 +3643,7 @@ class RosterBar(QWidget):
             state.runStateChanged.connect(self._on_run_state_changed)
             state.slotsRebuilt.connect(self._on_slots_rebuilt)
 
+        self._update_roster_label()
         self._rebuild_icons()
         self._rebuild_params()
 
@@ -3654,6 +3660,15 @@ class RosterBar(QWidget):
             self.run_btn.setEnabled(not state.running)
             self._on_status_changed(state.status_text, state.status_error)
             self._set_running(state.running)
+
+    def _update_roster_label(self):
+        """Keeps the "INPUT ROSTER" header in sync with whichever workflow
+        is currently active, e.g. "INPUT ROSTER • My Workflow". Falls back
+        to the bare header when nothing is selected."""
+        if self.state is not None and getattr(self.state, "name", None):
+            self.roster_label.setText(f"INPUT ROSTER \u2022 {self.state.name}")
+        else:
+            self.roster_label.setText("INPUT ROSTER")
 
     def _on_slots_rebuilt(self):
         self._rebuild_icons()
@@ -5720,6 +5735,8 @@ class MainWindow(QMainWindow):
         item = self.workflow_sidebar.list.item(idx)
         if item is not None:
             item.setText(name)
+        if state is self.active_workflow:
+            self.roster_bar._update_roster_label()
 
     def _on_workflow_selected(self, row):
         if row < 0 or row >= len(self.workflow_states):
@@ -6144,17 +6161,35 @@ class MainWindow(QMainWindow):
             sc.activated.connect(func)
             self._shortcuts.append(sc)
 
-        bind("Ctrl+R", self._hk_run_current)
-        bind("Ctrl+Shift+A", self._hk_queue_current)
+        # Run / queue the active workflow. Bound to both the main-keyboard
+        # and numpad Enter key so either physical key works.
+        bind("Ctrl+Return", self._hk_run_current)
+        bind("Ctrl+Enter", self._hk_run_current)
+        bind("Ctrl+Shift+Return", self._hk_queue_current)
+        bind("Ctrl+Shift+Enter", self._hk_queue_current)
+
         bind("Ctrl+Shift+R", self.queue_manager.run_queue)
         bind("Ctrl+Shift+X", self.queue_manager.clear)
         bind("Ctrl+N", self._new_workflow_flow)
         bind("Ctrl+Tab", self._hk_next_workflow)
         bind("Ctrl+Shift+Tab", self._hk_prev_workflow)
-        bind("Ctrl+O", self._toggle_sidebar)
-        bind("Ctrl+Shift+W", self._toggle_workflow_sidebar)
+
+        # Jump straight to workflow N in the sidebar: Ctrl+1..Ctrl+9 for the
+        # 1st-9th workflow, Ctrl+0 for the 10th (mirrors their auto-assigned
+        # roster-icon numbering, where the topmost workflow is "1" and the
+        # tenth is "0").
+        for digit in "1234567890":
+            index = 9 if digit == "0" else int(digit) - 1
+            bind(f"Ctrl+{digit}", lambda idx=index: self._hk_select_workflow(idx))
+
+        # Folder tabs in the center Image Browser panel.
+        bind("Ctrl+Up", self._hk_prev_folder_tab)
+        bind("Ctrl+Down", self._hk_next_folder_tab)
+
+        bind("Ctrl+W", self._toggle_workflow_sidebar)
+        bind("Ctrl+S", self._toggle_sidebar)
+        bind("Ctrl+O", self.outputs_tab._open_folder)
         bind("Ctrl+,", self.open_settings)
-        bind("Ctrl+Shift+O", self.outputs_tab._open_folder)
         bind("F5", self.outputs_tab.refresh)
 
     def _hk_run_current(self):
@@ -6176,6 +6211,23 @@ class MainWindow(QMainWindow):
         n = lw.count()
         if n:
             lw.setCurrentRow((lw.currentRow() - 1) % n)
+
+    def _hk_select_workflow(self, index):
+        lw = self.workflow_sidebar.list
+        if 0 <= index < lw.count():
+            lw.setCurrentRow(index)
+
+    def _hk_prev_folder_tab(self):
+        tabs = self.image_browser.tabs
+        n = tabs.count()
+        if n:
+            tabs.setCurrentIndex((tabs.currentIndex() - 1) % n)
+
+    def _hk_next_folder_tab(self):
+        tabs = self.image_browser.tabs
+        n = tabs.count()
+        if n:
+            tabs.setCurrentIndex((tabs.currentIndex() + 1) % n)
 
 
 def apply_style(app: QApplication) -> None:
