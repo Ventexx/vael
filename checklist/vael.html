@@ -479,6 +479,7 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 
 <div id="counter"></div>
 <div id="save-toast">saved</div>
+<div id="storage-status" role="alert" hidden style="position:fixed;bottom:70px;left:20px;right:20px;padding:12px;background:var(--surface);border:1px solid var(--red);color:var(--text);z-index:101;font-size:12px"></div>
 
 <div id="theme-bar">
   <span class="theme-label">theme</span>
@@ -505,6 +506,38 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 
 <script>
 const ALL_THEMES = ['dark', 'white'];
+const storageFailures = new Map();
+const unreadableStorage = new Set();
+function storageError(key, error, unreadable = false) {
+  if (unreadable) unreadableStorage.add(key);
+  storageFailures.set(key, String(error.message || error));
+  updateStorageStatus();
+}
+function updateStorageStatus() {
+  const status = document.getElementById('storage-status');
+  status.hidden = !storageFailures.size;
+  status.textContent = storageFailures.size
+    ? 'Changes may not be saved. Keep this tab open and export your list before reloading. ' + [...storageFailures.values()].join(' ')
+    : '';
+}
+function storageRecovered(key) {
+  storageFailures.delete(key);
+  updateStorageStatus();
+}
+function writeStorage(key, value) {
+  if (unreadableStorage.has(key)) {
+    storageError(key, 'Unreadable saved data was preserved. Repair it before reloading.');
+    return false;
+  }
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    storageRecovered(key);
+    return true;
+  } catch (error) {
+    storageError(key, 'Browser storage failed: ' + error.message);
+    return false;
+  }
+}
 
 function loadSettingsSync() {
   try {
@@ -517,19 +550,20 @@ function loadSettingsSync() {
       const legacy = localStorage.getItem('vanta_settings');
       if (legacy) {
         raw = legacy;
-        localStorage.setItem('vael_settings', legacy);
       }
     }
     if (raw) {
       const d = JSON.parse(raw);
-      if (d.theme && ALL_THEMES.includes(d.theme)) return d;
+      if (!d || !ALL_THEMES.includes(d.theme)) throw new Error('Invalid saved theme settings.');
+      if (localStorage.getItem('vael_settings') === null) writeStorage('vael_settings', d);
+      return d;
     }
-  } catch(e) {}
+  } catch(e) { storageError('vael_settings', e, true); }
   return null;
 }
 
 function saveSettings(settings) {
-  try { localStorage.setItem('vael_settings', JSON.stringify(settings)); flashToast(); } catch(e) {}
+  if (writeStorage('vael_settings', settings)) flashToast();
 }
 
 function flashToast() {
@@ -620,6 +654,7 @@ function updateTB() {
 // If a profile is currently open, persist every change to it automatically
 // so the profile always reflects the latest state without requiring a manual save.
 function autoSaveIfOpen() {
+  isDirty = true;
   if (currentProfileId) {
     saveToCurrentProfile();
   } else {
@@ -1122,22 +1157,48 @@ let isDirty = false;
 
 const PROFILES_KEY = 'vael_profiles';
 const LEGACY_PROFILES_KEY = 'vanta_profiles'; // pre-rename key, read once below for migration
+let profilesFallback = { profiles: [], counter: 0 };
+function validateProfiles(store) {
+  if (!store || !Array.isArray(store.profiles) || !Number.isSafeInteger(store.counter) || store.counter < 0) throw new Error('Invalid saved profiles.');
+  const ids = new Set();
+  for (const profile of store.profiles) {
+    if (!profile || !Number.isSafeInteger(profile.id) || ids.has(profile.id) || typeof profile.name !== 'string') throw new Error('Invalid saved profile.');
+    ids.add(profile.id);
+    validateItems(profile.items);
+  }
+  return store;
+}
 function loadProfiles() {
   try {
     const raw = localStorage.getItem(PROFILES_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw !== null) {
+      const store = validateProfiles(JSON.parse(raw));
+      profilesFallback = JSON.parse(JSON.stringify(store));
+      return store;
+    }
     // One-time migration: carry over profiles saved under the old "vanta."
     // branding so the rename doesn't wipe out anyone's saved lists.
     const legacy = localStorage.getItem(LEGACY_PROFILES_KEY);
     if (legacy) {
-      localStorage.setItem(PROFILES_KEY, legacy);
-      return JSON.parse(legacy);
+      const store = validateProfiles(JSON.parse(legacy));
+      profilesFallback = JSON.parse(JSON.stringify(store));
+      writeStorage(PROFILES_KEY, store);
+      return store;
     }
     return { profiles: [], counter: 0 };
   }
-  catch(e) { return { profiles: [], counter: 0 }; }
+  catch(e) {
+    storageError(PROFILES_KEY, e, true);
+    return JSON.parse(JSON.stringify(profilesFallback));
+  }
 }
-function saveProfilesStore(store) { localStorage.setItem(PROFILES_KEY, JSON.stringify(store)); }
+function saveProfilesStore(store) {
+  try { validateProfiles(store); }
+  catch (error) { storageError(PROFILES_KEY, error); return false; }
+  if (!writeStorage(PROFILES_KEY, store)) return false;
+  profilesFallback = JSON.parse(JSON.stringify(store));
+  return true;
+}
 
 function renderSidebar() {
   const sbList = document.getElementById('sb-list');
@@ -1170,7 +1231,10 @@ function renderSidebar() {
         nameEl.textContent = newName;
         const store2 = loadProfiles();
         const idx = store2.profiles.findIndex(x => x.id === p.id);
-        if (idx !== -1) { store2.profiles[idx].name = newName; saveProfilesStore(store2); }
+        if (idx !== -1) {
+          store2.profiles[idx].name = newName;
+          if (!saveProfilesStore(store2)) nameEl.textContent = p.name;
+        }
       }
       nameEl.addEventListener('blur', finishRename, { once: true });
       nameEl.addEventListener('keydown', e => {
@@ -1218,7 +1282,7 @@ function setStarredProfile(id) {
   const makeStarred = !target.starred;
   store.profiles.forEach(p => { p.starred = false; });
   target.starred = makeStarred;
-  saveProfilesStore(store);
+  if (!saveProfilesStore(store)) return;
   renderSidebar();
 }
 
@@ -1275,11 +1339,12 @@ function saveCurrentAsProfile() {
   store.counter = (store.counter || 0) + 1;
   const p = { id: Date.now(), name: 'profile ' + store.counter, items: cloneItems(), savedAt: Date.now(), starred: false };
   store.profiles.unshift(p);
-  saveProfilesStore(store);
+  if (!saveProfilesStore(store)) { isDirty = true; return false; }
   currentProfileId = p.id;
   isDirty = false;
   renderSidebar();
   flashToast();
+  return true;
 }
 
 function saveToCurrentProfile() {
@@ -1289,10 +1354,11 @@ function saveToCurrentProfile() {
   if (idx === -1) { saveCurrentAsProfile(); return; }
   store.profiles[idx].items = cloneItems();
   store.profiles[idx].savedAt = Date.now();
-  saveProfilesStore(store);
+  if (!saveProfilesStore(store)) { isDirty = true; return false; }
   isDirty = false;
   renderSidebar();
   flashToast();
+  return true;
 }
 
 function openProfile(id) {
@@ -1337,7 +1403,7 @@ function loadStartupProfile() {
 function deleteProfile(id) {
   const store = loadProfiles();
   store.profiles = store.profiles.filter(x => x.id !== id);
-  saveProfilesStore(store);
+  if (!saveProfilesStore(store)) return;
   if (currentProfileId === id) { currentProfileId = null; isDirty = false; }
   renderSidebar();
 }
