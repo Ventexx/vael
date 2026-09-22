@@ -436,6 +436,7 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
   <div class="sb-list" id="sb-list"></div>
   <div class="sb-footer">
     <button class="sb-foot-btn" id="sb-import-btn">import</button>
+    <button class="sb-foot-btn" id="sb-restore-btn" hidden title="Restore the most recently deleted profile">restore deleted</button>
     <button class="sb-foot-btn" id="sb-export-btn">export</button>
   </div>
 </div>
@@ -1197,8 +1198,9 @@ const LEGACY_PROFILES_KEY = 'vanta_profiles'; // pre-rename key, read once below
 let profilesFallback = { profiles: [], counter: 0 };
 function validateProfiles(store) {
   if (!store || !Array.isArray(store.profiles) || !Number.isSafeInteger(store.counter) || store.counter < 0) throw new Error('Invalid saved profiles.');
+  if (store.deletedProfiles !== undefined && !Array.isArray(store.deletedProfiles)) throw new Error('Invalid deleted-profile recovery data.');
   const ids = new Set();
-  for (const profile of store.profiles) {
+  for (const profile of [...store.profiles, ...(store.deletedProfiles || [])]) {
     if (!profile || !Number.isSafeInteger(profile.id) || ids.has(profile.id) || typeof profile.name !== 'string') throw new Error('Invalid saved profile.');
     ids.add(profile.id);
     validateItems(profile.items);
@@ -1240,6 +1242,7 @@ function saveProfilesStore(store) {
 function renderSidebar() {
   const sbList = document.getElementById('sb-list');
   const store = loadProfiles();
+  document.getElementById('sb-restore-btn').hidden = !(store.deletedProfiles || []).length;
   if (!store.profiles.length) {
     sbList.innerHTML = `<div class="sb-empty">no saved profiles yet.<br>press + to save the current list.</div>`;
     return;
@@ -1374,7 +1377,7 @@ function saveCurrentAsProfile() {
   if (!items.length) return;
   const store = loadProfiles();
   store.counter = (store.counter || 0) + 1;
-  const p = { id: Date.now(), name: 'profile ' + store.counter, items: cloneItems(), savedAt: Date.now(), starred: false };
+  const p = { id: nextProfileId(store), name: 'profile ' + store.counter, items: cloneItems(), savedAt: Date.now(), starred: false };
   store.profiles.unshift(p);
   if (!saveProfilesStore(store)) { isDirty = true; return false; }
   currentProfileId = p.id;
@@ -1443,11 +1446,29 @@ function loadStartupProfile() {
 
 function deleteProfile(id) {
   const store = loadProfiles();
+  const deleted = store.profiles.find(profile => profile.id === id);
+  if (!deleted) return;
+  store.deletedProfiles = [{...deleted, deletedAt: Date.now()}, ...(store.deletedProfiles || [])].slice(0, 20);
   store.profiles = store.profiles.filter(x => x.id !== id);
   if (!saveProfilesStore(store)) return;
-  if (currentProfileId === id) { currentProfileId = null; isDirty = false; }
+  if (currentProfileId === id) { currentProfileId = null; isDirty = true; persistDraft(); }
   renderSidebar();
 }
+function nextProfileId(store) {
+  return [...store.profiles, ...(store.deletedProfiles || [])].reduce((next, profile) => Math.max(next, profile.id + 1), Date.now());
+}
+function restoreDeletedProfile() {
+  const store = loadProfiles();
+  if (!store.deletedProfiles?.length) return;
+  const restored = store.deletedProfiles.shift();
+  delete restored.deletedAt;
+  if (store.profiles.some(profile => profile.starred)) restored.starred = false;
+  store.profiles.unshift(restored);
+  if (!saveProfilesStore(store)) return;
+  renderSidebar();
+  flashToast();
+}
+document.getElementById('sb-restore-btn').addEventListener('click', restoreDeletedProfile);
 
 function showModal(msg, onYes) {
   const backdrop = document.getElementById('modal-backdrop');
