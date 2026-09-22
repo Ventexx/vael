@@ -1,6 +1,6 @@
 # Vael: project context and improvement backlog
 
-Last updated: 2026-09-16.
+Last updated: 2026-09-22.
 
 ## Read this first
 
@@ -98,6 +98,41 @@ and collapsible panels. Preserve the established style when adding controls.
   not a cross-application lock. Linux, production-scale peak RAM, and power-loss
   durability were not verified. See `editor/editor.md` for the detailed limits.
 
+- Indexer reliability fixes I1-I8 and I12 were implemented and pushed:
+  - I1 / `35013e1`: folder metadata refreshes even with no changed image/JSON pairs.
+  - I2 / `6ee9053`: tag edits reject malformed or unreadable source metadata.
+  - I3 / `e1e434a`: source-version checks, atomic file publication, explicit write
+    errors, and rollback of earlier sidecar writes when an identifier batch fails.
+  - I4 / `34abb9b`: settings/notes failures are visible, corrupt files are preserved,
+    and failed new-note saves retain the dialog contents.
+  - I5 / `c79d999`: failed or cancelled indexing rolls back; UI controls recover;
+    shutdown waits for workers instead of destroying running threads.
+  - I6 / `ddb4a5f`, `a6dbe76`: background filesystem scans and searches, separate
+    SQLite connections, stale-query suppression, incremental card rendering, and
+    worker shutdown. The owner's transparent-load fix is retained in `ddb4a5f`.
+  - I7 / `7857989`: complete counted search results with 500-item pages instead of
+    the UI's silent 2,000-result limit; OR searches deduplicate across terms.
+  - I8 / `59c53c2`, `8a8120b`: run scripts with the current interpreter and no shell,
+    show failures, validate saved entries, stop the sequence on failure, and support
+    cancellation plus orderly shutdown.
+  - I12 / `d933402`: version-aware, 32 MiB / 1,024-entry decoded-image cache;
+    background QImage decoding; GUI-thread QPixmap conversion; stale requests
+    discarded; viewer previews capped at 2,048 pixels per side.
+- The owner's tested folder-focus feature was included separately in `14e082a`.
+  Expanded results and note sections scroll into view; state restoration does not
+  trigger focus scrolling. User Cover edits present during this work were left intact.
+- Twelve local Indexer checks passed on Windows, including an offscreen Qt desktop
+  smoke check, 2,450-match paging, live temporary script execution/cancellation,
+  simulated write failures, invalid/stale metadata, rollback, preview replacement,
+  transparency, cache limits, and shutdown. Checks are local outside the repository.
+  Offscreen fonts rendered as missing glyphs, so final font appearance was not
+  verified. Linux/macOS, network filesystems, power-loss durability, and large-library
+  peak RAM were not verified. File-version checks are not cross-application locks;
+  batch rollback can itself fail and reports that outcome. Cache limits are not a
+  total-process RAM cap, freshness uses file stats rather than content hashes, and
+  detached script children may survive cancellation. Usage and limits are in
+  `indexer/indexer.md` (`3323c19`).
+
 ## All remaining optional improvements from the review
 
 IDs refer to the original brainstorming review. None of the following is a blanket
@@ -145,8 +180,7 @@ controls, and C9 has some status distinctions; the remaining parts are listed he
   selected field across selected assets. Preview the scope and retain an undo record.
 - **I11 — Library health view:** find unmatched image/JSON pairs, malformed JSON,
   unavailable folders, and stale index entries; reveal each affected file directly.
-- **I12 — Thumbnail freshness and bounds:** include modification information in
-  cache keys and apply a memory budget. This is also a remaining reliability issue.
+- **I12 — Thumbnail freshness and bounds:** completed as a reliability fix; see above.
 - **I13 — Temporary identifiers:** visibly distinguish temporary collections from
   persistent identifiers and offer explicit promotion to persistent state.
 
@@ -220,7 +254,8 @@ Test the outcomes the owner relies on:
   save conflicts, and metadata policy. Local checks now cover these; see above.
 - Cover: queue failure, timeout/reconnection, duplicate submission, shutdown, and
   output refresh/trash behavior. Existing local checks cover these with mocks.
-- Indexer: incremental metadata refresh and failed or stale writes.
+- Indexer: local checks now cover incremental metadata refresh, failed/stale writes,
+  rollback, background search/paging, script failures/cancellation, previews, and shutdown.
 - Reviewer: partial trash failures and cache freshness.
 - Checklist: import validation, autosave, text/list undo, and profile switching.
 - Backup: pending recovery and shared-history behavior across archives.
@@ -230,8 +265,9 @@ establishes real-server or OS integration behavior.
 
 ### 4. Accurate documentation
 
-Bring documentation into agreement with code: indexer's renamed data directory,
-identifier and search behavior, and reviewer's flags. Editor's batch/save/cache
+Indexer documentation now covers its renamed data directory, identifiers, OR search,
+paging, persistence, scripts, and preview limits. Reviewer's flags still need review.
+Editor's batch/save/cache
 behavior is now documented in `editor/editor.md`; keep it current.
 Cover now has `cover/cover.md`; keep it current. Review backup recovery instructions
 against the actual recovery implementation. Correct outdated names and file paths.
@@ -254,18 +290,19 @@ specific sequence of clicks and clearly show which files/jobs are being handed o
 
 ## Remaining correctness findings: quick orientation
 
-These were identified in the review and remain after the Cover and Editor work. Verify
+These were identified in the review and remain after the Cover, Editor, and Indexer work. Verify
 them against the current implementation before fixing them.
 
 | App | Findings |
 | --- | --- |
-| indexer | I1 folder metadata skipped by incremental reload; I2 malformed JSON replaced during tag edits; I3 stale/non-atomic metadata writes; I4 silent settings/notes failures; I5 indexing errors leave loading state; I6 main-thread filesystem/search/render work; I7 silent 2,000-result cap; I8 script execution/error/cancellation handling; I12 cache freshness and bounds |
 | reviewer | R1 full-memory rescan; R2 unbounded full-resolution cache; R3 blocking scans/reads; R4 failed trash marks cleared; R5 stale replaced-file previews; R6 global shortcuts; R7 overlapping-root duplicates |
 | checklist | L1 unnamed draft loss; L2 unvalidated import; L3 undo intercepts text editing; L4 storage failures; L5 delayed-clear timing race; L6 profile deletion has no recovery; L11 cross-tab overwrites; L12 external fonts |
 | backup | B1 pending recovery writes its JSON wrapper; B2 recovery test misses that bug; B3 shared-history run-ID race; B4 latest comparison not scoped by backup family; B5 verification races archive replacement; B6 failures after publication need accurate outcome reporting |
 
 Editor E1-E7 are complete. E8-E12 remain optional and unapproved.
-The strongest next candidates are backup B1-B2 and indexer I1-I3.
+Indexer I1-I8 and I12 are complete. I9-I11 and I13 remain optional and unapproved.
+The strongest next correctness candidates are backup B1-B2 and reviewer R4-R5;
+choose the next app with the owner before starting it.
 
 ## New feature candidates for owner review
 
