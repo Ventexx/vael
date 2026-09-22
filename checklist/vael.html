@@ -478,7 +478,7 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 
 <div id="counter"></div>
 <div id="save-toast">saved</div>
-<div id="storage-status" role="alert" hidden style="position:fixed;bottom:70px;left:20px;right:20px;padding:12px;background:var(--surface);border:1px solid var(--red);color:var(--text);z-index:101;font-size:12px"></div>
+<div id="storage-status" role="alert" hidden style="position:fixed;bottom:70px;left:20px;right:20px;padding:12px;background:var(--surface);border:1px solid var(--red);color:var(--text);z-index:10002;font-size:12px"></div>
 
 <div id="theme-bar">
   <span class="theme-label">theme</span>
@@ -549,13 +549,13 @@ function loadSettingsSync() {
     // one has data, carry it over so the rename doesn't reset anyone's
     // theme. Harmless no-op once the new key exists.
     let raw = localStorage.getItem('vael_settings');
-    if (!raw) {
+    if (raw === null) {
       const legacy = localStorage.getItem('vanta_settings');
-      if (legacy) {
+      if (legacy !== null) {
         raw = legacy;
       }
     }
-    if (raw) {
+    if (raw !== null) {
       const d = JSON.parse(raw);
       if (!d || !ALL_THEMES.includes(d.theme)) throw new Error('Invalid saved theme settings.');
       if (hasStorageLock && localStorage.getItem('vael_settings') === null) writeStorage('vael_settings', d);
