@@ -444,7 +444,7 @@ class PixmapWorker(QThread):
         self._queue.put((card, path))
 
     def run(self) -> None:
-        while True:
+        while not self.isInterruptionRequested():
             try:
                 card, path = self._queue.get(timeout=0.5)
             except queue.Empty:
@@ -3007,6 +3007,8 @@ class ResultsPanel(QScrollArea):
         self._render_timer.start(0)
 
     def _render_batch(self):
+        if self._render_steps is None:
+            return
         deadline = time.perf_counter() + 0.008
         try:
             for _ in range(30):
@@ -3019,7 +3021,9 @@ class ResultsPanel(QScrollArea):
             self._building_sections = []
             self.hide_loading()
             if self._render_scroll:
-                self.verticalScrollBar().setValue(self._render_scroll)
+                generation, scroll = self._query_generation, self._render_scroll
+                QTimer.singleShot(0, lambda: QTimer.singleShot(0, lambda:
+                    self.verticalScrollBar().setValue(scroll) if generation == self._query_generation else None))
         except Exception as exc:
             self._render_timer.stop()
             self._render_steps = None
@@ -3144,6 +3148,7 @@ class ResultsPanel(QScrollArea):
                     sections[parent_key].add_child_section(sec)
                 else:
                     self._layout.addWidget(sec)
+            yield
 
         # Sort cards by natural (numeric-aware) name order before adding.
         # The DB query only does a plain SQL "ORDER BY folder, name", which
@@ -5947,6 +5952,13 @@ class MainWindow(QMainWindow):
             return
         if self._results.stop_work():
             self._set_status("Stopping search before closing...")
+            event.ignore()
+            return
+        if PIXMAP_WORKER.isRunning():
+            if not getattr(self, "_waiting_for_pixmaps", False):
+                self._waiting_for_pixmaps = True
+                PIXMAP_WORKER.finished.connect(self.close)
+            PIXMAP_WORKER.requestInterruption()
             event.ignore()
             return
         QApplication.instance().removeEventFilter(self)
