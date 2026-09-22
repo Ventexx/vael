@@ -4,8 +4,10 @@ import json
 import os
 import tempfile
 import time
+import threading
+import weakref
+from collections import OrderedDict
 from functools import wraps
-import queue
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +20,7 @@ from typing import Optional
 # os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QIcon, QImage, QImageReader, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -395,87 +397,140 @@ def _save_scripts(scripts: list[dict]) -> bool:
 
 # ── Pixmap Cache ───────────────────────────────────────────────────────────────
 
-_PIXMAP_CACHE: dict[str, QPixmap] = {}
+class ImageCache:
+    """Worker-owned LRU of decoded images, bounded by bytes and entry count."""
+
+    def __init__(self, budget: int = 32 * 1024 * 1024):
+        self.budget = budget
+        self.bytes = 0
+        self.items = OrderedDict()
+
+    def get(self, key):
+        image = self.items.get(key)
+        if image is not None:
+            self.items.move_to_end(key)
+        return image
+
+    def put(self, key, image: QImage) -> None:
+        # Remove older versions of this path/size immediately.
+        for old in list(self.items):
+            if old[:2] == key[:2]:
+                self.bytes -= self.items.pop(old).sizeInBytes()
+        size = image.sizeInBytes()
+        if image.isNull() or size > self.budget:
+            return
+        while self.items and (self.bytes + size > self.budget or len(self.items) >= 1024):
+            _, removed = self.items.popitem(last=False)
+            self.bytes -= removed.sizeInBytes()
+        self.items[key] = image
+        self.bytes += size
+
+    def clear(self) -> None:
+        self.items.clear()
+        self.bytes = 0
 
 
-def _load_pixmap(path: str) -> QPixmap:
-    """Return a cached thumbnail pixmap, or load+scale synchronously (drag fallback)."""
-    if path not in _PIXMAP_CACHE:
-        pix = QPixmap(path)
-        if not pix.isNull():
-            scaled = pix.scaled(
-                THUMB_W,
-                THUMB_H,
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = (scaled.width() - THUMB_W) // 2
-            y = (scaled.height() - THUMB_H) // 2
-            pix = scaled.copy(x, y, THUMB_W, THUMB_H)
-        _PIXMAP_CACHE[path] = pix
-    return _PIXMAP_CACHE[path]
+_PIXMAP_CACHE = ImageCache()
 
 
-# ── Background Pixmap Loader ───────────────────────────────────────────────────
-#
-# A single long-lived worker thread that drains a queue of (card, path) pairs.
-# Each pixmap is loaded and scaled off the main thread, then delivered via signal
-# so the card can set it without ever blocking the UI.
-#
-# Usage:
-#   PIXMAP_WORKER.submit(card, image_path)
-#
-# The worker is started once at module level and runs for the lifetime of the app.
-# ──────────────────────────────────────────────────────────────────────────────
+def _image_version(path: str) -> tuple:
+    stat = os.stat(path)
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+
+def _read_preview(path: str, preview: bool = False) -> QImage:
+    """Decode in the worker. QPixmap creation belongs to the GUI thread."""
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid():
+        raise OSError(reader.errorString())
+    bound = QSize(2048, 2048) if preview else QSize(THUMB_W, THUMB_H)
+    mode = (Qt.AspectRatioMode.KeepAspectRatio if preview
+            else Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+    scaled = size.scaled(bound, mode)
+    # Very narrow images must not request enormous intermediate thumbnails.
+    scaled = scaled.boundedTo(size)
+    if max(scaled.width(), scaled.height()) > 2048:
+        scaled = scaled.scaled(QSize(2048, 2048), Qt.AspectRatioMode.KeepAspectRatio)
+    scaled = QSize(max(1, scaled.width()), max(1, scaled.height()))
+    reader.setScaledSize(scaled)
+    image = reader.read()
+    if image.isNull():
+        raise OSError(reader.errorString())
+    if preview:
+        if max(image.width(), image.height()) > 2048:
+            return image.scaled(2048, 2048, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+        return image
+    # Crop before scaling to avoid huge allocations for extreme aspect ratios.
+    w, h = image.width(), image.height()
+    crop_w = min(w, max(1, h * THUMB_W // THUMB_H))
+    crop_h = min(h, max(1, w * THUMB_H // THUMB_W))
+    return image.copy((w-crop_w)//2, (h-crop_h)//2, crop_w, crop_h).scaled(
+        THUMB_W, THUMB_H, Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation)
 
 
 class PixmapWorker(QThread):
-    """Loads and scales thumbnail pixmaps off the main thread."""
+    """One decoder; coalesce requests and route each result to its live recipient."""
 
-    # Delivers (card_widget, pixmap) back to the main thread
-    pixmap_ready = Signal(object, QPixmap)
+    image_ready = Signal(object, int, QImage, str)
 
     def __init__(self) -> None:
         super().__init__()
-        self._queue: queue.Queue = queue.Queue()
+        self._pending = OrderedDict()
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self.image_ready.connect(self._deliver)
 
-    def submit(self, card: "ThumbnailCard", path: str) -> None:
-        """Queue a card for image loading. Safe to call from the main thread."""
-        self._queue.put((card, path))
+    def submit(self, target: QWidget, path: str, preview: bool = False) -> None:
+        target._image_request = getattr(target, "_image_request", 0) + 1
+        request = (weakref.ref(target), target._image_request, path, preview)
+        with self._lock:
+            self._pending[id(target)] = request
+            # A viewer request takes priority over queued thumbnails.
+            self._pending.move_to_end(id(target), last=not preview)
+            while len(self._pending) > 1024:
+                self._pending.popitem(last=False)
+        self._wake.set()
+
+    def _deliver(self, recipient, token: int, image: QImage, error: str) -> None:
+        import shiboken6
+        target = recipient()
+        if (target is not None and shiboken6.isValid(target)
+                and getattr(target, "_image_request", None) == token):
+            target._on_image_ready(image, error)
 
     def run(self) -> None:
+        QImageReader.setAllocationLimit(128)
         while not self.isInterruptionRequested():
-            try:
-                card, path = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            # Skip if the card was already deleted (e.g. after a search refresh)
-            try:
-                if card is None:
+            self._wake.wait(.1)
+            with self._lock:
+                if not self._pending:
+                    self._wake.clear()
                     continue
-            except RuntimeError:
+                _, (recipient, token, path, preview) = self._pending.popitem(last=False)
+            if recipient() is None:
                 continue
+            image, error = QImage(), ""
+            try:
+                version = _image_version(path)
+                key = (path, preview, *version)
+                image = _PIXMAP_CACHE.get(key)
+                if image is None:
+                    image = _read_preview(path, preview)
+                    if _image_version(path) != version:
+                        raise OSError("Image changed while loading; reopen it to retry")
+                    _PIXMAP_CACHE.put(key, image)
+            except Exception as exc:
+                image, error = QImage(), str(exc)
+            if not self.isInterruptionRequested():
+                self.image_ready.emit(recipient, token, image, error)
+        with self._lock:
+            self._pending.clear()
 
-            # Load into the shared cache if not already present
-            if path not in _PIXMAP_CACHE:
-                pix = QPixmap(path)
-                if not pix.isNull():
-                    scaled = pix.scaled(
-                        THUMB_W,
-                        THUMB_H,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    x = (scaled.width() - THUMB_W) // 2
-                    y = (scaled.height() - THUMB_H) // 2
-                    pix = scaled.copy(x, y, THUMB_W, THUMB_H)
-                _PIXMAP_CACHE[path] = pix
 
-            self.pixmap_ready.emit(card, _PIXMAP_CACHE[path])
-
-
-# Single global worker — started once, lives for the whole app session.
 PIXMAP_WORKER = PixmapWorker()
 PIXMAP_WORKER.start()
 
@@ -1982,32 +2037,15 @@ class ThumbnailCard(QWidget):
 
         self._image_loaded = False
 
-        # Connect once to the global worker so pixmaps arrive on the main thread
-        PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
-
     def request_image(self) -> None:
-        """Called by FolderSection when the folder is expanded.  No-op if already loaded."""
-        if self._image_loaded:
-            return
+        """Revalidate file freshness whenever a folder is expanded."""
         path = self.asset.get("image_path", "")
-        if not path:
-            return
-        # If the pixmap is already cached (e.g. same folder reopened), apply instantly
-        if path in _PIXMAP_CACHE:
-            self._apply_pixmap_data(_PIXMAP_CACHE[path])
-        else:
+        if path:
             PIXMAP_WORKER.submit(self, path)
 
-    def _on_pixmap_ready(self, card: "ThumbnailCard", pix: QPixmap) -> None:
-        """Slot called on the main thread when the worker finishes a pixmap."""
-        if card is not self:
-            return
-        self._apply_pixmap_data(pix)
-        # Disconnect to avoid accumulating dead connections after many refreshes
-        try:
-            PIXMAP_WORKER.pixmap_ready.disconnect(self._on_pixmap_ready)
-        except RuntimeError:
-            pass
+    def _on_image_ready(self, image: QImage, error: str) -> None:
+        self._img_lbl.setToolTip(error)
+        self._apply_pixmap_data(QPixmap.fromImage(image))
 
     def _apply_pixmap_data(self, pix: QPixmap) -> None:
         """Render the rounded thumbnail from an already-scaled pixmap."""
@@ -2063,8 +2101,8 @@ class ThumbnailCard(QWidget):
         drag = QDrag(self)
         drag.setMimeData(mime)
         # Use the thumbnail as the drag pixmap so the user sees what they're dragging
-        pix = _load_pixmap(image_path)
-        if not pix.isNull():
+        pix = self._img_lbl.pixmap()
+        if pix is not None and not pix.isNull():
             drag.setPixmap(
                 pix.scaled(
                     THUMB_W // 2,
@@ -4988,6 +5026,9 @@ class ImgViewerOverlay(QWidget):
         self.setFocus()
 
     def close_viewer(self) -> None:
+        self._image_request = getattr(self, "_image_request", 0) + 1
+        self._img_lbl.setProperty("_raw_pix", None)
+        self._img_lbl.clear()
         self.hide()
         self._current_card = None
         self._cards = []
@@ -5018,21 +5059,24 @@ class ImgViewerOverlay(QWidget):
         card = self._current_card
         if card is None:
             return
-        name = card.asset.get("name", "")
-        self._name_lbl.setText(name)
-
+        self._name_lbl.setText(card.asset.get("name", ""))
+        self._image_request = getattr(self, "_image_request", 0) + 1
+        self._img_lbl.setProperty("_raw_pix", None)
+        self._img_lbl.clear()
+        self._img_lbl.setToolTip("")
+        self._img_lbl.resize(200, 200)
         path = card.asset.get("image_path", "")
-        if not path:
-            self._img_lbl.clear()
-            self._img_lbl.setText("(no image)")
-            self._place_widgets()
-            return
+        self._img_lbl.setText("Loading..." if path else "(no image)")
+        if path:
+            PIXMAP_WORKER.submit(self, path, preview=True)
+        self._place_widgets()
 
-        pix = QPixmap(path)
-        if pix.isNull():
-            self._img_lbl.setText("?")
+    def _on_image_ready(self, image: QImage, error: str) -> None:
+        self._img_lbl.setToolTip(error)
+        if image.isNull():
+            self._img_lbl.setText("Unable to load image")
         else:
-            self._img_lbl.setProperty("_raw_pix", pix)
+            self._img_lbl.setProperty("_raw_pix", QPixmap.fromImage(image))
             self._scale_image()
         self._place_widgets()
 
