@@ -388,7 +388,20 @@ SCRIPTS_FILE = APP_DIR / "startup_scripts.json"
 
 
 def _load_scripts() -> list[dict]:
-    return _load_state(SCRIPTS_FILE, list)
+    scripts = _load_state(SCRIPTS_FILE, list)
+    if scripts._load_error:
+        return scripts
+    for index, entry in enumerate(scripts, 1):
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("name"), str)
+                or not isinstance(entry.get("path"), str)
+                or not entry["path"].strip()
+                or not isinstance(entry.get("args", ""), str)):
+            scripts._load_error = f"Invalid startup script entry {index}: expected name, path, and text arguments."
+            _storage_error(SCRIPTS_FILE, scripts._load_error)
+            scripts.clear()
+            break
+    return scripts
 
 
 def _save_scripts(scripts: list[dict]) -> bool:
