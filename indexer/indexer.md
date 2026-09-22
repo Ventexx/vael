@@ -12,10 +12,10 @@ A desktop app for browsing, searching, and editing structured data paired with v
 ## features
 
 - **folder-based indexing** — scans directories for `.png` + `.json` pairs into a SQLite index, organized into collapsible, nested folder sections
-- **smart incremental indexing** — a file-cache diff skips unchanged files on reload, so re-indexing a large library is near-instant
-- **instant search**, with a folder-only mode (append ` f` to a query, e.g. `characters f`)
-- thumbnail grid with lazy-loaded, cached previews so the UI never freezes
-- full-screen image viewer with arrow-key / on-screen navigation
+- **incremental indexing** — background scans compare file timestamps and sizes, skip unchanged image/JSON pairs, and refresh folder metadata on every reload
+- **background search**, with name, folder, JSON, identifier, and combined searches; counted pages show up to 500 matches at a time
+- thumbnail grid with lazy-loaded previews and a bounded cache; replaced images refresh when their folder is reopened or results reload
+- in-window image viewer with background decoding and arrow-key / on-screen navigation
 - **drag & drop** — drag a card out of the app to copy the image file itself into another program
 - per-field copy menu (right-click a card to copy any JSON field), plus a quick "Add Tag" action
 - inline JSON editor for both individual assets and folder-level metadata (`!F-<folder>.json`)
@@ -69,16 +69,18 @@ icon.png                  — app icon
 cover.png                 — cover image used in this readme
 ```
 
-`scripts/` directory must be created manually if you want to use startup scripts.
+Startup scripts can live anywhere; choose each Python file through **≡ → Startup Scripts**.
 
 ---
 
 ## local data
 
-Everything the app persists lives in a single folder, separate from your indexed asset folders (which are only ever read from, never restructured):
+The index and app settings live separately from your asset folders. Indexing reads the source files; explicit JSON, tag, and persistent identifier edits write the selected source sidecars.
 
-- **Windows:** `C:\Users\<YourUser>\.asset_indexer\`
-- **Linux / macOS:** `~/.asset_indexer/`
+- **Windows:** `C:\Users\<YourUser>\.vael_indexer\`
+- **Linux / macOS:** `~/.vael_indexer/`
+
+The old `.asset_indexer` folder is migrated on startup when the new folder does not already exist.
 
 It holds:
 - indexed databases (`.db` files)
@@ -86,5 +88,46 @@ It holds:
 - preferences (`prefs.json`)
 - notes (`notes.json`)
 - startup-scripts config (`startup_scripts.json`)
+- registered library roots (`roots.json`)
 
 To fully remove the app, delete the project folder along with this data folder. Removing a database from within the app only deletes its index file — your original asset folder is never touched.
+
+## search and identifiers
+
+| Query | Matches |
+| --- | --- |
+| `portrait` | Asset names containing `portrait` |
+| `characters f` | Folder paths containing `characters` |
+| `;short hair` | Raw JSON containing `short hair` |
+| `id-favorites` | Persistent or temporary identifier text containing `favorites` |
+| `portrait;landscape` | Either name, with duplicates removed |
+| `portrait;characters f;id-favorites` | Any of the three searches |
+| `portrait;;short hair` | Name matches OR JSON matches |
+
+Combined searches use **OR**. Previous/Next changes the 500-result page, and the counter shows the total matches. A folder can span several pages; the image viewer navigates the cards on the current page. Search and ordering run in a worker, while cards are added in short UI batches. Counting and sorting still take time for large libraries.
+
+Persistent identifiers live in the asset's `Identifier` JSON field. Temporary memberships live only in the current database session; closing or unloading that database loses them. Converting an identifier to persistent state writes its member sidecars. Rename/remove operations roll back earlier writes if a later sidecar fails, and report any rollback that could not be completed safely.
+
+## saves and reload failures
+
+- Tag and identifier changes reject malformed or unreadable JSON. The JSON editor can repair malformed text explicitly.
+- Saves write a sibling temporary file, flush it, check the original bytes, and publish the replacement. A stale editor refuses to overwrite a changed source; reopen it to review the current contents.
+- Preferences, notes, library registration, and script settings report read/write failures. A failed new-note save leaves the note dialog open.
+- Failed or cancelled indexing rolls back its transaction and restores usable controls. Closing waits for active workers to stop.
+- Conflict checks are not a cross-application lock, and a batch of files is not one atomic filesystem transaction. Backups remain useful for important metadata.
+
+## startup scripts
+
+Scripts run sequentially with the **same Python interpreter as Indexer**, using each script's parent folder as its working directory. Install their dependencies in that environment. Arguments are passed directly, without a command shell; quote paths containing spaces. Shell operators, environment-variable expansion, and redirection are not interpreted.
+
+A failure stops the sequence and shows the filename, exit code, and up to the last 16 KiB of captured output. Automatic indexing does not continue after failure or cancellation. Fix the script and retry **Reload Database → with Scripts**, or choose a database/reload without scripts when you want to proceed independently.
+
+**Cancel scripts** stops execution; closing the app also cancels and waits. Windows cancellation attempts to stop the script's process tree, with a direct-process fallback. Other platforms stop the direct process. Detached child processes may survive, and cancellation cannot undo work a script already performed. Script output is held in a temporary file until the process exits; it is not a live console.
+
+## preview limits and verification
+
+Decoded images share a 32 MiB / 1,024-entry least-recently-used cache. Keys include path, preview type, modification/creation timestamps, and file size. A same-size replacement that preserves those timestamps may require restarting to invalidate its cached preview. There is no live filesystem watcher.
+
+The viewer decodes a preview up to 2,048 pixels per side. Qt's decoder allocation limit is 128 MiB; formats may need intermediate decoding memory. These limits are not a total-process RAM cap: visible cards, database results, and widget copies also consume memory. Oversized/unreadable previews show a failure instead of retaining the previous image.
+
+Twelve local regression checks passed on Windows, including an offscreen Qt desktop smoke check. They cover metadata refresh, invalid/stale/failed saves, rollback, indexing failure, responsive search and paging beyond 2,000 matches, settings errors, real script execution/cancellation, preview freshness/transparency/cache bounds, and shutdown. The local scripts are outside the repository. Offscreen font rendering was unavailable, so the screenshot does not establish final font appearance. Linux/macOS behavior, network filesystems, power-loss durability, and production-scale memory were not verified.
