@@ -1092,22 +1092,12 @@ function del(id) {
 }
 
 function clearDone() {
-  const doneIds = items.filter(n => n.type === 'task' && (n.done || n.rejected)).map(n => n.id);
-  if (!doneIds.length) return;
+  const doneIds = new Set(items.filter(n => n.type === 'task' && (n.done || n.rejected)).map(n => n.id));
+  if (!doneIds.size) return;
   const b = cloneItems();
-
-  const els = doneIds.map(id => list.querySelector(`[data-id="${id}"]`)).filter(Boolean);
-  els.forEach(el => {
-    el.style.transition = 'opacity 0.22s ease, transform 0.22s ease';
-    el.style.opacity = '0';
-    el.style.transform = 'translateX(6px)';
-  });
-
-  setTimeout(() => {
-    items = items.filter(n => !(n.type === 'task' && (n.done || n.rejected)));
-    pushHistory(b);
-    render();
-  }, 230);
+  items = items.filter(n => !doneIds.has(n.id));
+  pushHistory(b);
+  render();
 }
 
 input.addEventListener('keydown', e => {
