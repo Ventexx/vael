@@ -660,6 +660,7 @@ function autoSaveIfOpen() {
   } else {
     isDirty = true;
   }
+  persistDraft();
 }
 function undo() { if (!undoStack.length) return; redoStack.push(cloneItems()); items = undoStack.pop(); render(); updateTB(); autoSaveIfOpen(); }
 function redo() { if (!redoStack.length) return; undoStack.push(cloneItems()); items = redoStack.pop(); render(); updateTB(); autoSaveIfOpen(); }
@@ -1066,9 +1067,9 @@ function addTask() {
   const b = cloneItems();
   const it = { id: ++idCounter, type: 'task', text, done: false };
   items.push(it);
+  input.value = '';
   pushHistory(b);
   render(it.id);
-  input.value = '';
   input.focus();
 }
 
@@ -1154,6 +1155,48 @@ document.addEventListener('keydown', e => {
 // Profile system
 let currentProfileId = null;
 let isDirty = false;
+const DRAFT_KEY = 'vael_draft';
+let draftSaved = true;
+function persistDraft() {
+  const draft = { items: cloneItems(), profileId: currentProfileId,
+    dirty: isDirty, input: input.value, savedAt: Date.now() };
+  // An empty input and a successfully saved profile need no recovery snapshot.
+  if ((currentProfileId !== null || !items.length) && !isDirty && !input.value) {
+    if (unreadableStorage.has(DRAFT_KEY)) return draftSaved = false;
+    try { localStorage.removeItem(DRAFT_KEY); storageRecovered(DRAFT_KEY); return draftSaved = true; }
+    catch (error) { storageError(DRAFT_KEY, error); return draftSaved = false; }
+  }
+  return draftSaved = writeStorage(DRAFT_KEY, draft);
+}
+function restoreDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (raw === null) return false;
+    const draft = JSON.parse(raw);
+    const restored = validateItems(draft.items);
+    if (typeof draft.input !== 'string' || typeof draft.dirty !== 'boolean'
+        || (draft.profileId !== null && !Number.isSafeInteger(draft.profileId))) throw new Error('Invalid saved draft.');
+    items = restored;
+    idCounter = highestItemId(items);
+    currentProfileId = draft.profileId;
+    isDirty = draft.dirty;
+    input.value = draft.input;
+    render(); updateTB(); renderSidebar();
+    return true;
+  } catch (error) { storageError(DRAFT_KEY, error, true); draftSaved = false; return false; }
+}
+input.addEventListener('input', persistDraft);
+function finishActiveEdit() {
+  if (document.activeElement?.isContentEditable) document.activeElement.blur();
+}
+window.addEventListener('pagehide', () => { finishActiveEdit(); persistDraft(); });
+window.addEventListener('beforeunload', event => {
+  finishActiveEdit();
+  if (!persistDraft() && (isDirty || input.value)) { event.preventDefault(); event.returnValue = ''; }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { finishActiveEdit(); persistDraft(); }
+});
 
 const PROFILES_KEY = 'vael_profiles';
 const LEGACY_PROFILES_KEY = 'vanta_profiles'; // pre-rename key, read once below for migration
@@ -1342,6 +1385,7 @@ function saveCurrentAsProfile() {
   if (!saveProfilesStore(store)) { isDirty = true; return false; }
   currentProfileId = p.id;
   isDirty = false;
+  persistDraft();
   renderSidebar();
   flashToast();
   return true;
@@ -1356,6 +1400,7 @@ function saveToCurrentProfile() {
   store.profiles[idx].savedAt = Date.now();
   if (!saveProfilesStore(store)) { isDirty = true; return false; }
   isDirty = false;
+  persistDraft();
   renderSidebar();
   flashToast();
   return true;
@@ -1373,13 +1418,15 @@ function openProfile(id) {
     undoStack = []; redoStack = [];
     currentProfileId = id;
     isDirty = false;
+    input.value = '';
+    persistDraft();
     render();
     updateTB();
     renderSidebar();
     sidebar.classList.remove('open');
   }
 
-  if (isDirty && items.length > 0) {
+  if (isDirty || input.value) {
     showModal('Opening a new profile will discard any unsaved changes to your current list.<br>Are you sure you want to proceed?', doOpen);
   } else {
     doOpen();
@@ -1445,10 +1492,12 @@ document.getElementById('sb-import-btn').addEventListener('click', () => {
           undoStack = []; redoStack = [];
           currentProfileId = null;
           isDirty = true;
+          input.value = '';
+          persistDraft();
           render(); updateTB(); renderSidebar();
           sidebar.classList.remove('open');
         }
-        if (isDirty && items.length > 0) {
+        if (isDirty || input.value) {
           showModal('Importing will replace your current list.<br>Are you sure you want to proceed?', doImport);
         } else { doImport(); }
       } catch(err) { alert('Could not import: ' + err.message + '\nYour current list was not changed.'); }
@@ -1463,7 +1512,7 @@ document.getElementById('sb-new-btn').addEventListener('click', saveCurrentAsPro
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
-    if (!items.length) return;
+    finishActiveEdit();
     saveToCurrentProfile();
   }
 });
@@ -1475,7 +1524,7 @@ document.addEventListener('keydown', e => {
   if (cached && ALL_THEMES.includes(cached.theme)) currentTheme = cached.theme;
   applyTheme(currentTheme, false);
   renderSidebar();
-  loadStartupProfile();
+  if (!restoreDraft()) loadStartupProfile();
   input.focus();
 })();
 </script>
