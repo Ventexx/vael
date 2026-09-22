@@ -3636,24 +3636,91 @@ class ScriptRunner(QThread):
     """Runs startup scripts sequentially in a background thread."""
 
     progress = Signal(int, int, str)  # current, total, message
-    finished = Signal()
 
     def __init__(self, scripts: list[dict]):
         super().__init__()
         self._scripts = scripts
+        self.error = ""
+        self.cancelled = False
 
     def run(self) -> None:
-        total = len(self._scripts)
-        for i, entry in enumerate(self._scripts, 1):
-            self.progress.emit(i, total, f"Executing Startup Scripts ({i}/{total})")
-            cmd = f'python "{entry["path"]}"'
-            if entry.get("args", "").strip():
-                cmd += f" {entry['args'].strip()}"
-            try:
-                subprocess.run(cmd, shell=True, check=False)
-            except Exception:
-                pass
-        self.finished.emit()
+        try:
+            for i, entry in enumerate(self._scripts, 1):
+                if self.isInterruptionRequested():
+                    self.cancelled = True
+                    return
+                path = Path(entry["path"]).resolve(strict=True)
+                if not path.is_file():
+                    raise ValueError(f"Not a script file: {path}")
+                args = _script_arguments(entry.get("args", ""))
+                self.progress.emit(i, len(self._scripts),
+                                   f"Running {path.name} ({i}/{len(self._scripts)})")
+                # A file avoids pipe deadlocks and unbounded captured output in RAM.
+                with tempfile.TemporaryFile() as output:
+                    with subprocess.Popen(
+                        [sys.executable, str(path), *args], cwd=str(path.parent),
+                        shell=False, stdin=subprocess.DEVNULL, stdout=output,
+                        stderr=subprocess.STDOUT,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    ) as process:
+                        while process.poll() is None:
+                            if self.isInterruptionRequested():
+                                self.cancelled = True
+                                if os.name == "nt":
+                                    try:
+                                        subprocess.run(
+                                            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            creationflags=subprocess.CREATE_NO_WINDOW, timeout=5,
+                                        )
+                                    except (OSError, subprocess.TimeoutExpired):
+                                        process.terminate()
+                                else:
+                                    process.terminate()
+                                try:
+                                    process.wait(timeout=2)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    process.wait()
+                                return
+                            try:
+                                process.wait(timeout=0.1)
+                            except subprocess.TimeoutExpired:
+                                pass
+                        if process.returncode:
+                            output.seek(0, os.SEEK_END)
+                            output.seek(max(0, output.tell() - 16384))
+                            detail = output.read().decode("utf-8", errors="replace").strip()
+                            raise RuntimeError(f"{path}\nExit code {process.returncode}\n{detail}")
+        except Exception as exc:
+            self.error = str(exc)
+
+
+def _script_arguments(value: str) -> list[str]:
+    """Parse argument text without invoking a shell; preserve Windows paths."""
+    if not isinstance(value, str):
+        raise ValueError("Script arguments must be text")
+    if not value.strip():
+        return []
+    if os.name != "nt":
+        import shlex
+        return shlex.split(value)
+    import ctypes
+    from ctypes import wintypes
+    parse = ctypes.windll.shell32.CommandLineToArgvW
+    parse.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    parse.restype = ctypes.POINTER(wintypes.LPWSTR)
+    count = ctypes.c_int()
+    argv = parse("script " + value, ctypes.byref(count))
+    if not argv:
+        raise ctypes.WinError()
+    try:
+        return [argv[i] for i in range(1, count.value)]
+    finally:
+        free = ctypes.windll.kernel32.LocalFree
+        free.argtypes = [ctypes.c_void_p]
+        free.restype = ctypes.c_void_p
+        free(argv)
 
 
 # ── Add Script Dialog ──────────────────────────────────────────────────────────
@@ -5537,6 +5604,11 @@ class MainWindow(QMainWindow):
         sb_lay.addWidget(self._status_lbl)
         sb_lay.addStretch()
 
+        self._cancel_scripts_btn = QPushButton("Cancel scripts")
+        self._cancel_scripts_btn.clicked.connect(self._cancel_scripts)
+        self._cancel_scripts_btn.hide()
+        sb_lay.addWidget(self._cancel_scripts_btn)
+
         self._sort_btn = QPushButton("A-Z")
         self._sort_btn.setObjectName("sortBtn")
         self._sort_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -5577,29 +5649,62 @@ class MainWindow(QMainWindow):
             return
         # ── PRODUCTION PATH (unchanged) ───────────────────────────────────────
         scripts = _load_scripts()
+        if getattr(scripts, "_load_error", None):
+            self._set_status("Startup scripts could not be read")
+            return
         if not scripts:
             self._pick_initial_db()
             return
 
-        self._results.show_loading(f"Executing Startup Scripts (1/{len(scripts)})")
-        self._search.setEnabled(False)
-        self._menu_btn.setEnabled(False)
-
-        runner = ScriptRunner(scripts)
-        runner.progress.connect(self._on_script_progress)
-        runner.finished.connect(self._on_scripts_finished)
-        self._script_runner = runner
-        runner.start()
+        self._start_scripts(scripts, startup=True)
 
     def _on_script_progress(self, current: int, total: int, msg: str) -> None:
         self._results.update_loading(msg)
         self._set_status(msg)
 
     def _on_scripts_finished(self) -> None:
+        runner = self._script_runner
+        if runner is None:
+            return
         self._script_runner = None
+        runner.deleteLater()
+        self._cancel_scripts_btn.hide()
+        self._results.hide_loading()
         self._search.setEnabled(True)
         self._menu_btn.setEnabled(True)
-        self._pick_initial_db()
+        if getattr(self, "_close_after_scripts", False):
+            QTimer.singleShot(0, self.close)
+            return
+        if runner.cancelled or runner.isInterruptionRequested() or runner.error:
+            self._set_status("Startup script failed" if runner.error else "Scripts cancelled")
+            if runner.error:
+                QMessageBox.warning(self, "Startup script failed", runner.error)
+            return
+        if self._scripts_at_startup:
+            self._pick_initial_db()
+        elif self._active_db:
+            self._start_load_db(self._active_db)
+
+    def _start_scripts(self, scripts: list, startup: bool = False) -> None:
+        if self._script_runner is not None:
+            return
+        self._scripts_at_startup = startup
+        self._results.show_loading(f"Executing Startup Scripts (1/{len(scripts)})")
+        self._search.setEnabled(False)
+        self._menu_btn.setEnabled(False)
+        self._cancel_scripts_btn.setEnabled(True)
+        self._cancel_scripts_btn.show()
+        runner = ScriptRunner(scripts)
+        runner.progress.connect(self._on_script_progress)
+        runner.finished.connect(self._on_scripts_finished)
+        self._script_runner = runner
+        runner.start()
+
+    def _cancel_scripts(self) -> None:
+        if self._script_runner:
+            self._script_runner.requestInterruption()
+            self._cancel_scripts_btn.setEnabled(False)
+            self._set_status("Stopping scripts...")
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -5827,29 +5932,16 @@ class MainWindow(QMainWindow):
             self._do_search()
             return
         scripts = _load_scripts()
+        if getattr(scripts, "_load_error", None):
+            self._set_status("Startup scripts could not be read")
+            return
         if not scripts:
             # No scripts configured - fall back to a plain reload
             if self._active_db:
                 self._start_load_db(self._active_db)
             return
 
-        self._results.show_loading(f"Executing Startup Scripts (1/{len(scripts)})")
-        self._search.setEnabled(False)
-        self._menu_btn.setEnabled(False)
-
-        runner = ScriptRunner(scripts)
-        runner.progress.connect(self._on_script_progress)
-        runner.finished.connect(self._on_reload_scripts_finished)
-        self._script_runner = runner
-        runner.start()
-
-    def _on_reload_scripts_finished(self) -> None:
-        """Called when startup scripts finish during a 'Reload with Scripts'."""
-        self._script_runner = None
-        self._search.setEnabled(True)
-        self._menu_btn.setEnabled(True)
-        if self._active_db:
-            self._start_load_db(self._active_db)
+        self._start_scripts(scripts)
 
     def _action_open_db(self) -> None:
         dlg = OpenDatabaseDialog(self.db_manager, self._active_db, self)
@@ -6111,6 +6203,11 @@ class MainWindow(QMainWindow):
     # ── Window close ──────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
+        if self._script_runner is not None:
+            self._close_after_scripts = True
+            self._cancel_scripts()
+            event.ignore()
+            return
         if self._index_worker and self._index_worker.isRunning():
             self._close_after_index = True
             self._index_worker.requestInterruption()
