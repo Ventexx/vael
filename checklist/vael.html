@@ -562,6 +562,50 @@ const redoBtn  = document.getElementById('redo-btn');
 const cleanBtn = document.getElementById('clean-btn');
 
 function cloneItems() { return JSON.parse(JSON.stringify(items)); }
+function validateItems(value, renewIds = false) {
+  if (!Array.isArray(value) || value.length > 10000) throw new Error('Expected a list of at most 10,000 items.');
+  const ids = new Set();
+  let next = 0;
+  function identifier(id) {
+    if (renewIds) return ++next;
+    if (!Number.isSafeInteger(id) || id < 1 || ids.has(id)) throw new Error('Item and note IDs must be unique positive integers.');
+    ids.add(id);
+    return id;
+  }
+  function text(value) {
+    if (typeof value !== 'string' || value.length > 100000) throw new Error('Task, header, and note text must be strings of at most 100,000 characters.');
+    return value;
+  }
+  return value.map(node => {
+    if (!node || typeof node !== 'object' || !['task', 'spacer'].includes(node.type)) throw new Error('Each item must be a task or separator.');
+    const result = { id: identifier(node.id), type: node.type };
+    if (node.type === 'spacer') {
+      if (node.header != null) result.header = text(node.header);
+    } else {
+      result.text = text(node.text);
+      for (const key of ['done', 'rejected']) {
+        if (node[key] !== undefined && typeof node[key] !== 'boolean') throw new Error('Task status must be true or false.');
+        result[key] = node[key] === true;
+      }
+      if (result.done && result.rejected) throw new Error('A task cannot be both completed and rejected.');
+      if (node.notes !== undefined) {
+        if (!Array.isArray(node.notes) || node.notes.length > 10000) throw new Error('Notes must be a list of at most 10,000 entries.');
+        result.notes = node.notes.map(note => {
+          if (!note || typeof note !== 'object') throw new Error('Invalid note.');
+          return { id: identifier(note.id), text: text(note.text) };
+        });
+      }
+    }
+    return result;
+  });
+}
+function highestItemId(value) {
+  return value.reduce((max, node) => Math.max(max, node.id, ...(node.notes || []).map(note => note.id)), 0);
+}
+function parseImport(raw) {
+  const data = JSON.parse(raw);
+  return validateItems(Array.isArray(data) ? data : data?.items, true);
+}
 function pushHistory(b) {
   undoStack.push(b);
   redoStack = [];
@@ -1259,7 +1303,7 @@ function openProfile(id) {
 
   function doOpen() {
     items = JSON.parse(JSON.stringify(p.items));
-    idCounter = items.reduce((m, n) => Math.max(m, n.id || 0), idCounter);
+    idCounter = Math.max(idCounter, highestItemId(items));
     undoStack = []; redoStack = [];
     currentProfileId = id;
     isDirty = false;
@@ -1281,7 +1325,7 @@ function loadStartupProfile() {
   const starred = store.profiles.find(p => p.starred);
   if (!starred) return;
   items = JSON.parse(JSON.stringify(starred.items));
-  idCounter = items.reduce((m, n) => Math.max(m, n.id || 0), idCounter);
+  idCounter = Math.max(idCounter, highestItemId(items));
   undoStack = []; redoStack = [];
   currentProfileId = starred.id;
   isDirty = false;
@@ -1323,14 +1367,15 @@ document.getElementById('sb-import-btn').addEventListener('click', () => {
   fileInput.type = 'file'; fileInput.accept = '.json,application/json';
   fileInput.addEventListener('change', () => {
     const file = fileInput.files[0]; if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { alert('Import is limited to 5 MiB. Your current list was not changed.'); return; }
     const reader = new FileReader();
+    reader.onerror = () => alert('Could not read the file. Your current list was not changed.');
     reader.onload = e => {
       try {
-        const data = JSON.parse(e.target.result);
-        const imported = Array.isArray(data) ? data : (data.items || []);
+        const imported = parseImport(e.target.result);
         function doImport() {
           items = imported;
-          idCounter = items.reduce((m, n) => Math.max(m, n.id || 0), idCounter);
+          idCounter = Math.max(idCounter, highestItemId(items));
           undoStack = []; redoStack = [];
           currentProfileId = null;
           isDirty = true;
@@ -1340,7 +1385,7 @@ document.getElementById('sb-import-btn').addEventListener('click', () => {
         if (isDirty && items.length > 0) {
           showModal('Importing will replace your current list.<br>Are you sure you want to proceed?', doImport);
         } else { doImport(); }
-      } catch(err) { alert('Could not read the file. Make sure it\'s a valid Vanta JSON export.'); }
+      } catch(err) { alert('Could not import: ' + err.message + '\nYour current list was not changed.'); }
     };
     reader.readAsText(file);
   });
