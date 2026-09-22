@@ -1121,8 +1121,12 @@ undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
 
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); undo(); }
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); }
+  if (e.isComposing || !(e.ctrlKey || e.metaKey)) return;
+  const target = e.target;
+  if (target?.isContentEditable || target?.closest('input, textarea, select')) return;
+  const key = e.key.toLowerCase();
+  if (key === 'y' || (e.shiftKey && key === 'z')) { e.preventDefault(); redo(); }
+  else if (key === 'z') { e.preventDefault(); undo(); }
 });
 
 list.addEventListener('dragover', e => e.preventDefault());
