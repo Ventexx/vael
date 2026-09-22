@@ -2369,6 +2369,72 @@ class ThumbnailCard(QWidget):
         self.edited.emit(self.asset["image_path"])
 
 
+def _focus_section_in_scroll_area(section: QWidget) -> None:
+    """Scroll section's containing QScrollArea so the just-opened folder
+    comfortably occupies the middle of the visible area.
+
+    Used for both the main results canvas (FolderSection inside
+    ResultsPanel) and the Note window (NoteSection inside NotePanel) --
+    both are plain QScrollArea subclasses whose scrolled widget is a
+    QVBoxLayout stack of (possibly nested) sections, so the same geometry
+    math applies to either.
+
+    Behaviour:
+      - Centers the folder (header + body) vertically in the viewport.
+      - If the folder is taller than the viewport, centering it would push
+        its header above the top edge -- so instead we pin the header to
+        the very top of the viewport, which keeps the "open/close" button
+        reachable and shows as much of the folder's contents as possible.
+      - If the panel can't scroll far enough either way (not enough
+        content, or already scrolled as far as it can go), the scrollbar's
+        own clamping means we simply do as much as is possible.
+    """
+    try:
+        scroll_area = section.parentWidget()
+        while scroll_area is not None and not isinstance(scroll_area, QScrollArea):
+            scroll_area = scroll_area.parentWidget()
+        if scroll_area is None:
+            return
+
+        content = scroll_area.widget()
+        if content is None:
+            return
+
+        # Position of the folder's top edge (i.e. its header) in the scrolled
+        # widget's coordinate space -- this is the same space the scrollbar's
+        # value moves through.
+        folder_top = section.mapTo(content, QPoint(0, 0)).y()
+        folder_height = section.height()
+        viewport_height = scroll_area.viewport().height()
+
+        desired = round(folder_top + folder_height / 2 - viewport_height / 2)
+        # If centering would scroll past the folder's own header (i.e. the
+        # header would end up above the top of the viewport), pin the header
+        # to the top of the viewport instead.
+        if desired > folder_top:
+            desired = folder_top
+
+        bar = scroll_area.verticalScrollBar()
+        desired = max(bar.minimum(), min(bar.maximum(), desired))
+        bar.setValue(desired)
+    except RuntimeError:
+        # The section (or one of its ancestors) was deleted between the
+        # folder being opened and this deferred callback running (e.g. the
+        # user triggered another refresh immediately after expanding it).
+        # Nothing to focus any more -- just do nothing.
+        pass
+
+
+def _focus_section_when_settled(section: QWidget) -> None:
+    """Defer the scroll-to-focus until after pending layout work (card
+    reflow, body-visibility geometry updates, etc.) has been processed by
+    the event loop, otherwise section.height() / mapTo(...) would still
+    reflect the collapsed geometry."""
+    QTimer.singleShot(0, lambda: QTimer.singleShot(
+        0, lambda: _focus_section_in_scroll_area(section)
+    ))
+
+
 class FolderSection(QWidget):
     card_deleted = Signal(str)
     card_edited = Signal(str)
@@ -2600,7 +2666,14 @@ class FolderSection(QWidget):
         return super().eventFilter(obj, event)
 
     def _toggle(self) -> None:
-        self._expanded = not self._expanded
+        """Header was clicked: flip expand state and, if now open, focus it."""
+        self._set_expanded(not self._expanded, focus=True)
+
+    def _set_expanded(self, expanded: bool, focus: bool = True) -> None:
+        """Core expand/collapse logic, shared by user clicks and by the
+        programmatic restores (search snapshot, post-refresh re-open) that
+        should NOT jerk the view around -- those pass focus=False."""
+        self._expanded = expanded
         self._body.setVisible(self._expanded)
         self._header.setArrowType(
             Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
@@ -2615,6 +2688,10 @@ class FolderSection(QWidget):
             # Kick off background image loading for every card in this folder
             for card in self._cards:
                 card.request_image()
+        if self._expanded and focus:
+            # Bring the newly-opened folder to the middle of the visible
+            # area -- the user almost certainly wants to interact with it.
+            _focus_section_when_settled(self)
 
     def _on_header_context_menu(self, global_pos) -> None:
         # Context menu only available when folder is expanded
@@ -3077,7 +3154,7 @@ class ResultsPanel(QScrollArea):
                 w = item.widget()
                 if isinstance(w, FolderSection):
                     if w._folder_key in keys and not w._expanded:
-                        w._toggle()
+                        w._set_expanded(True, focus=False)
                     _apply(w._body_lay)
 
         _apply(self._layout)
@@ -3168,7 +3245,7 @@ class ResultsPanel(QScrollArea):
         # Re-open any folder that was expanded before the refresh
         for fk, sec in sections.items():
             if fk in restore_keys:
-                sec._toggle()
+                sec._set_expanded(True, focus=False)
             sec._update_tag_dot()
             yield
 
@@ -6377,7 +6454,14 @@ class NoteSection(QWidget):
             self._relayout_cards()
 
     def _toggle(self) -> None:
-        self._expanded = not self._expanded
+        """Header was clicked: flip expand state and, if now open, focus it."""
+        self._set_expanded(not self._expanded, focus=True)
+
+    def _set_expanded(self, expanded: bool, focus: bool = True) -> None:
+        """Core expand/collapse logic, shared by user clicks and by the
+        programmatic restore-after-reload path, which should NOT jerk the
+        view around -- that path passes focus=False."""
+        self._expanded = expanded
         self._body.setVisible(self._expanded)
         self._header.setArrowType(
             Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
@@ -6388,6 +6472,9 @@ class NoteSection(QWidget):
         if self._expanded and self._cards:
             self._current_cols = 0
             QTimer.singleShot(0, self._relayout_cards)
+        if self._expanded and focus:
+            # Same "focus the folder" behavior as the main results canvas.
+            _focus_section_when_settled(self)
 
 
 # ── Note Panel ─────────────────────────────────────────────────────────────────
@@ -6567,7 +6654,7 @@ class NotePanel(QScrollArea):
                         and w._header.text() in expanded_titles
                     ):
                         if not w._expanded:
-                            w._toggle()
+                            w._set_expanded(True, focus=False)
                         _restore(w._body_lay)
 
             _restore(self._layout)
