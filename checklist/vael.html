@@ -507,6 +507,8 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 
 <script>
 const ALL_THEMES = ['dark', 'white'];
+let hasStorageLock = false;
+let releaseStorageLock = null;
 const storageFailures = new Map();
 const unreadableStorage = new Set();
 function storageError(key, error, unreadable = false) {
@@ -517,8 +519,9 @@ function storageError(key, error, unreadable = false) {
 function updateStorageStatus() {
   const status = document.getElementById('storage-status');
   status.hidden = !storageFailures.size;
+  const saveErrors = [...storageFailures.keys()].some(key => key !== 'editing-lock');
   status.textContent = storageFailures.size
-    ? 'Changes may not be saved. Keep this tab open and export your list before reloading. ' + [...storageFailures.values()].join(' ')
+    ? (saveErrors ? 'Changes may not be saved. Keep this tab open and export your list before reloading. ' : '') + [...storageFailures.values()].join(' ')
     : '';
 }
 function storageRecovered(key) {
@@ -526,6 +529,7 @@ function storageRecovered(key) {
   updateStorageStatus();
 }
 function writeStorage(key, value) {
+  if (!hasStorageLock) return false;
   if (unreadableStorage.has(key)) {
     storageError(key, 'Unreadable saved data was preserved. Repair it before reloading.');
     return false;
@@ -556,7 +560,7 @@ function loadSettingsSync() {
     if (raw) {
       const d = JSON.parse(raw);
       if (!d || !ALL_THEMES.includes(d.theme)) throw new Error('Invalid saved theme settings.');
-      if (localStorage.getItem('vael_settings') === null) writeStorage('vael_settings', d);
+      if (hasStorageLock && localStorage.getItem('vael_settings') === null) writeStorage('vael_settings', d);
       return d;
     }
   } catch(e) { storageError('vael_settings', e, true); }
@@ -648,9 +652,9 @@ function pushHistory(b) {
   autoSaveIfOpen();
 }
 function updateTB() {
-  undoBtn.disabled = !undoStack.length;
-  redoBtn.disabled = !redoStack.length;
-  cleanBtn.disabled = !items.some(n => n.type === 'task' && (n.done || n.rejected));
+  undoBtn.disabled = !hasStorageLock || !undoStack.length;
+  redoBtn.disabled = !hasStorageLock || !redoStack.length;
+  cleanBtn.disabled = !hasStorageLock || !items.some(n => n.type === 'task' && (n.done || n.rejected));
 }
 // If a profile is currently open, persist every change to it automatically
 // so the profile always reflects the latest state without requiring a manual save.
@@ -722,6 +726,7 @@ function render(newId = null) {
   }
   updateCounter();
   updateTB();
+  applyReadOnlyState();
 }
 
 // Context menu shared by tasks (Add Note) and separators (Add/Remove Header)
@@ -1113,6 +1118,7 @@ redoBtn.addEventListener('click', redo);
 
 document.addEventListener('keydown', e => {
   if (e.isComposing || !(e.ctrlKey || e.metaKey)) return;
+  if (!hasStorageLock) return;
   const target = e.target;
   if (target?.isContentEditable || target?.closest('input, textarea, select')) return;
   const key = e.key.toLowerCase();
@@ -1153,6 +1159,7 @@ let isDirty = false;
 const DRAFT_KEY = 'vael_draft';
 let draftSaved = true;
 function persistDraft() {
+  if (!hasStorageLock) return false;
   const draft = { items: cloneItems(), profileId: currentProfileId,
     dirty: isDirty, input: input.value, savedAt: Date.now() };
   // An empty input and a successfully saved profile need no recovery snapshot.
@@ -1184,13 +1191,19 @@ input.addEventListener('input', persistDraft);
 function finishActiveEdit() {
   if (document.activeElement?.isContentEditable) document.activeElement.blur();
 }
-window.addEventListener('pagehide', () => { finishActiveEdit(); persistDraft(); });
+window.addEventListener('pagehide', () => {
+  if (hasStorageLock) { finishActiveEdit(); persistDraft(); }
+  hasStorageLock = false;
+  releaseStorageLock?.();
+});
+window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
 window.addEventListener('beforeunload', event => {
+  if (!hasStorageLock) return;
   finishActiveEdit();
   if (!persistDraft() && (isDirty || input.value)) { event.preventDefault(); event.returnValue = ''; }
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { finishActiveEdit(); persistDraft(); }
+  if (hasStorageLock && document.visibilityState === 'hidden') { finishActiveEdit(); persistDraft(); }
 });
 
 const PROFILES_KEY = 'vael_profiles';
@@ -1221,7 +1234,7 @@ function loadProfiles() {
     if (legacy) {
       const store = validateProfiles(JSON.parse(legacy));
       profilesFallback = JSON.parse(JSON.stringify(store));
-      writeStorage(PROFILES_KEY, store);
+      if (hasStorageLock) writeStorage(PROFILES_KEY, store);
       return store;
     }
     return { profiles: [], counter: 0 };
@@ -1313,6 +1326,7 @@ function renderSidebar() {
     div.appendChild(delBtn);
     sbList.appendChild(div);
   });
+  applyReadOnlyState();
 }
 
 function setStarredProfile(id) {
@@ -1374,6 +1388,7 @@ window.addEventListener('scroll', closeProfileContextMenu, true);
 window.addEventListener('resize', closeProfileContextMenu);
 
 function saveCurrentAsProfile() {
+  if (!hasStorageLock) return false;
   if (!items.length) return;
   const store = loadProfiles();
   store.counter = (store.counter || 0) + 1;
@@ -1389,6 +1404,7 @@ function saveCurrentAsProfile() {
 }
 
 function saveToCurrentProfile() {
+  if (!hasStorageLock) return false;
   if (!currentProfileId) { saveCurrentAsProfile(); return; }
   const store = loadProfiles();
   const idx = store.profiles.findIndex(x => x.id === currentProfileId);
@@ -1423,7 +1439,7 @@ function openProfile(id) {
     sidebar.classList.remove('open');
   }
 
-  if (isDirty || input.value) {
+  if (hasStorageLock && (isDirty || input.value)) {
     showModal('Opening a new profile will discard any unsaved changes to your current list.<br>Are you sure you want to proceed?', doOpen);
   } else {
     doOpen();
@@ -1533,15 +1549,57 @@ document.addEventListener('keydown', e => {
 });
 
 // Init
-(() => {
+function initializeChecklist() {
+  items = []; undoStack = []; redoStack = []; currentProfileId = null; isDirty = false; input.value = '';
   const cached = loadSettingsSync();
   let currentTheme = 'dark';
   if (cached && ALL_THEMES.includes(cached.theme)) currentTheme = cached.theme;
   applyTheme(currentTheme, false);
   renderSidebar();
   if (!restoreDraft()) loadStartupProfile();
-  input.focus();
-})();
+  applyReadOnlyState();
+  if (hasStorageLock) input.focus();
+  document.body.dataset.storageReady = 'true';
+}
+function applyReadOnlyState() {
+  document.body.dataset.readonly = String(!hasStorageLock);
+  document.querySelectorAll('#task-input, #add-btn, #spacer-btn, #sb-new-btn, #sb-import-btn, #sb-restore-btn, .theme-btn, .cb-wrap input, .del-btn, .note-del, .spacer-del, .profile-del')
+    .forEach(control => control.disabled = !hasStorageLock);
+}
+for (const type of ['dblclick', 'contextmenu', 'dragstart']) {
+  document.addEventListener(type, event => {
+    if (!hasStorageLock) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+}
+window.addEventListener('storage', event => {
+  if (hasStorageLock || ![PROFILES_KEY, DRAFT_KEY, 'vael_settings', null].includes(event.key)) return;
+  const selected = currentProfileId;
+  if (selected !== null) {
+    const profile = loadProfiles().profiles.find(profile => profile.id === selected);
+    if (profile) { items = JSON.parse(JSON.stringify(profile.items)); render(); renderSidebar(); return; }
+  }
+  initializeChecklist();
+});
+function holdEditingLock() {
+  const selected = currentProfileId;
+  hasStorageLock = true;
+  storageRecovered('editing-lock');
+  initializeChecklist();
+  if (selected !== null && !isDirty) openProfile(selected);
+  return new Promise(resolve => { releaseStorageLock = resolve; });
+}
+if (navigator.locks) {
+  navigator.locks.request('vael-checklist-editing', { ifAvailable: true }, lock => {
+    if (lock) return holdEditingLock();
+    storageError('editing-lock', 'Another tab is editing this checklist. This tab is view-only and will enable editing when that tab closes.');
+    initializeChecklist();
+    // Keep one writer for the entire session: localStorage has no atomic compare-and-swap.
+    navigator.locks.request('vael-checklist-editing', holdEditingLock).catch(error => storageError('editing-lock', error));
+  }).catch(error => { storageError('editing-lock', error); initializeChecklist(); });
+} else {
+  storageError('editing-lock', 'This browser cannot coordinate safe saving between tabs. This view is read-only; open the file in a browser with Web Locks support.');
+  initializeChecklist();
+}
 </script>
 </body>
 </html>
