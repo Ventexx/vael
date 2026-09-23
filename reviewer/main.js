@@ -71,7 +71,7 @@ function zoomBy(delta) {
 // Window controls
 ipcMain.on('win-minimize', () => win.minimize());
 ipcMain.on('win-maximize', () => win.isMaximized() ? win.unmaximize() : win.maximize());
-ipcMain.on('win-close', () => { win.destroy(); app.quit(); });
+ipcMain.on('win-close', () => win.close());
 
 // ---------------------------------------------------------------------------
 // Config: a flat JSON file in userData holding the list of watched root
