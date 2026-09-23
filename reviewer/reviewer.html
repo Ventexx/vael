@@ -782,26 +782,9 @@ function reconcileImageCache() {
   }
 }
 
-// opts.fullLoad triggers a full-tree pre-load (loadEverythingIntoMemory) after
-// the rescan completes. NOT used on app start or on review-mode switches
-// anymore -- eagerly base64-loading every image across every watched folder
-// (which can easily be 1000+ images) was slow/memory-heavy enough to hang
-// the renderer and show a blank screen. Startup and mode switches now just
-// rescan; each folder's images load lazily (loadAllImagesWithProgress) the
-// moment that folder is actually opened. Deletes and folder edits stay
-// lightweight too and only reconcile membership (added/removed/renamed
-// files), they don't force a full reload.
-//
-// opts.force is the manual "rescan" button's full-from-zero rescan: it
-// throws away every cached image dataUrl and tells main.js to drop its own
-// directory-listing cache before re-scanning, then eagerly reloads every
-// image. This is the only path that catches a file being replaced in place
-// (same name, new bytes) -- membership-based reconcileImageCache can't see
-// that, since the filename on disk never changed, and neither can main.js's
-// mtime-keyed directory cache, since replacing a file's contents without
-// renaming it doesn't bump its parent directory's mtime either.
+// Rescans refresh file metadata and invalidate previews. Only the open folder
+// requests images; a full rescan never preloads the whole watched library.
 async function refreshAll(opts) {
-  const fullLoad = !!(opts && opts.fullLoad);
   const force = !!(opts && opts.force);
   if (force) imageCache = {};
   // Both datasets are fetched every time (not just whichever mode is active)
@@ -823,7 +806,6 @@ async function refreshAll(opts) {
     else renderGroupsCanvas(currentFolder);
   }
   updateStatusbar();
-  if (fullLoad || force) await loadEverythingIntoMemory();
 }
 
 // ---------------------------------------------------------------- REVIEW MODE SWITCH
@@ -1424,86 +1406,6 @@ async function loadAllImagesWithProgress(dir, bases) {
 
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
   if (currentFolder === dir) overlay.classList.add('hidden');
-}
-
-// ---------------------------------------------------------------- LOAD ALL (every folder, current mode)
-// Reads every set's images into imageCache up front, across every folder in
-// every watched root -- this never opens a folder view or any external
-// program, it's purely api.readImage calls landing in the same in-memory
-// imageCache that per-folder loading already uses, so anything loaded here
-// is picked up for free the next time that set's canvas is built.
-//
-// Always sourced from scanResultsAll (not whichever mode is active): it's a
-// strict superset of scanResults (iteration mode only ever hides singleton
-// sets, it never adds anything scanResultsAll doesn't have), so loading
-// against it primes both review modes in one pass regardless of which one
-// you're currently in.
-//
-// Only runs behind the manual "Full rescan" button now (see refreshAll's
-// force/fullLoad options) -- it used to also run automatically on app start
-// and on every review-mode switch, but eagerly loading every image across
-// every watched folder (easily 1000+ images) could hang the renderer long
-// enough to look like a blank-screen crash. The app is intentionally made
-// unresponsive for the duration via a fixed, full-viewport overlay
-// (#loadall-overlay) that sits above everything (topbar, sidebar, modals)
-// and swallows clicks -- there's nothing useful to do until it's done anyway.
-let fullLoadInProgress = false;
-
-function allKnownSets() {
-  const sets = [];
-  for (const f of scanResultsAll) {
-    for (const base in f.groups) sets.push({ dir: f.dir, base });
-  }
-  return sets;
-}
-
-async function loadEverythingIntoMemory() {
-  if (fullLoadInProgress) return;
-  const sets = allKnownSets();
-  if (!sets.length) return;
-
-  fullLoadInProgress = true;
-
-  const overlay = document.getElementById('loadall-overlay');
-  const title = document.getElementById('la-title');
-  const fill = document.getElementById('la-bar-fill');
-  const sub = document.getElementById('la-sub');
-
-  const total = sets.length;
-  title.textContent = 'Loading every folder\u2026';
-  fill.style.width = '0%';
-  sub.textContent = '0 / ' + total + ' sets';
-  overlay.classList.remove('hidden');
-  // Let the overlay paint before the work starts -- same reasoning as the
-  // per-folder loaders: if everything's already cached this would otherwise
-  // resolve synchronously and never actually show.
-  await new Promise(r => requestAnimationFrame(r));
-
-  let done = 0;
-  const CONCURRENCY = 4;
-  let idx = 0;
-  async function worker() {
-    while (idx < sets.length) {
-      const { dir, base } = sets[idx++];
-      await ensureImagesLoaded(dir, base);
-      done++;
-      fill.style.width = Math.round((done / total) * 100) + '%';
-      sub.textContent = done + ' / ' + total + ' sets';
-      await new Promise(r => requestAnimationFrame(r));
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
-
-  overlay.classList.add('hidden');
-  fullLoadInProgress = false;
-
-  // If a folder's already open, re-render it so anything newly cached shows
-  // up immediately. Everything's cached now, so this resolves essentially
-  // instantly -- it's the same "instant revisit" path as normal navigation.
-  if (currentFolder) {
-    if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
-    else renderGroupsCanvas(currentFolder);
-  }
 }
 
 function buildGroupSection(dir, base, entries, renderNow = true) {
