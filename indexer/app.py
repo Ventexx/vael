@@ -2899,11 +2899,8 @@ class FolderSection(QWidget):
 # ── Results Panel ──────────────────────────────────────────────────────────────
 
 
-SEARCH_PAGE_SIZE = 500
-
-
-def _search_page(db, segments, offset=0, limit=SEARCH_PAGE_SIZE, reverse=False, cancel_cb=None):
-    """Count the full OR result once and retain only the requested page."""
+def _search_results(db, segments, reverse=False, cancel_cb=None):
+    """Return every matching asset once, in display order, without a result cap."""
     if DEV_MODE:
         unique = {}
         for segment in segments:
@@ -2914,7 +2911,7 @@ def _search_page(db, segments, offset=0, limit=SEARCH_PAGE_SIZE, reverse=False, 
                 unique[asset["image_path"]] = asset
         rows = sorted(unique.values(), key=lambda a: (_natural_sort_key(a["folder"]),
                       _natural_sort_key(a["name"]), a["image_path"]), reverse=reverse)
-        return rows[offset:offset + limit], len(rows)
+        return rows, len(rows)
 
     def identifier_matches(raw, image_path, query):
         try:
@@ -2945,26 +2942,22 @@ def _search_page(db, segments, offset=0, limit=SEARCH_PAGE_SIZE, reverse=False, 
     order = "DESC" if reverse else "ASC"
     cursor = db._conn.execute(f"SELECT * FROM assets WHERE ({where}) ORDER BY "
         f"folder COLLATE NATURAL_SORT {order}, name COLLATE NATURAL_SORT {order}, image_path {order}", parameters)
-    page, total = [], 0
+    rows = []
     for row in cursor:
         _check_index_cancel(cancel_cb)
-        if offset <= total < offset + limit:
-            page.append(dict(row))
-        total += 1
-    return page, total
+        rows.append(dict(row))
+    return rows, len(rows)
 
 
 class SearchWorker(QThread):
     completed = Signal(int, object, object, int)
     failed = Signal(int, str)
 
-    def __init__(self, db, segments, generation, limit=SEARCH_PAGE_SIZE, offset=0, reverse=False):
+    def __init__(self, db, segments, generation, reverse=False):
         super().__init__()
         self.generation = generation
         self.path = db.path
         self.segments = segments
-        self.limit = limit
-        self.offset = offset
         self.reverse = reverse
         self.members = {name: set(paths) for name, paths in db._temp_members.items()}
         self.dev_assets = [dict(asset) for asset in db._assets] if DEV_MODE else None
@@ -2986,8 +2979,8 @@ class SearchWorker(QThread):
                 db._cancel_cb = self.isInterruptionRequested
                 metadata = {row[0]: row[1] for row in connection.execute("SELECT folder_key, copy_value FROM folder_meta")}
             db._temp_members = self.members
-            assets, total = _search_page(db, self.segments, self.offset, self.limit,
-                                         self.reverse, self.isInterruptionRequested)
+            assets, total = _search_results(db, self.segments,
+                                           self.reverse, self.isInterruptionRequested)
             _check_index_cancel(self.isInterruptionRequested)
             self.completed.emit(self.generation, assets, metadata, total)
         except Exception as exc:
@@ -3033,24 +3026,6 @@ class ResultsPanel(QScrollArea):
 
         # Loading overlay (child of the viewport so it covers the scroll area)
         self._overlay = LoadingOverlay(self.viewport())
-
-        self.setViewportMargins(0, 30, 0, 0)
-        self._page_bar = QWidget(self)
-        page_layout = QHBoxLayout(self._page_bar)
-        page_layout.setContentsMargins(8, 0, 8, 0)
-        self._page_label = QLabel("No results")
-        self._previous_page = QPushButton("Previous")
-        self._next_page = QPushButton("Next")
-        page_layout.addWidget(self._page_label, 1)
-        page_layout.addWidget(self._previous_page)
-        page_layout.addWidget(self._next_page)
-        self._previous_page.clicked.connect(lambda: self._change_page(-1))
-        self._next_page.clicked.connect(lambda: self._change_page(1))
-        self._previous_page.setEnabled(False)
-        self._next_page.setEnabled(False)
-        self._page_offset = 0
-        self._total_matches = 0
-        self._last_segments = []
 
         self._query_generation = 0
         self._query_worker = None
@@ -3125,14 +3100,9 @@ class ResultsPanel(QScrollArea):
     def refresh_multi(self, segments, restore_keys=None, restore_scroll=0) -> None:
         self._request_query(segments, restore_keys, restore_scroll)
 
-    def _request_query(self, segments, restore_keys, restore_scroll, offset=0):
+    def _request_query(self, segments, restore_keys, restore_scroll):
         if self._closing:
             return
-        self._page_offset = offset
-        self._last_segments = segments
-        self._page_label.setText("Searching...")
-        self._previous_page.setEnabled(False)
-        self._next_page.setEnabled(False)
         self._query_generation += 1
         self._render_timer.stop()
         self._render_steps = None
@@ -3150,11 +3120,10 @@ class ResultsPanel(QScrollArea):
         self._pending_query = None
         self._query_restore = (keys, scroll)
         if self._db is None:
-            self._page_label.setText("No results")
             self._folder_metadata = {}
             self._show_and_populate([], keys, scroll)
             return
-        worker = SearchWorker(self._db, segments, generation, offset=self._page_offset, reverse=not self._az_sort)
+        worker = SearchWorker(self._db, segments, generation, reverse=not self._az_sort)
         worker.completed.connect(self._on_query_result)
         worker.failed.connect(self._on_query_failed)
         worker.finished.connect(self._on_query_stopped)
@@ -3164,29 +3133,13 @@ class ResultsPanel(QScrollArea):
     def _on_query_result(self, generation, assets, metadata, total):
         if generation != self._query_generation or self._closing:
             return
-        self._total_matches = total
-        if not total:
-            self._page_offset = 0
-        if total and self._page_offset >= total:
-            self._request_query(self._last_segments, None, 0, ((total - 1) // SEARCH_PAGE_SIZE) * SEARCH_PAGE_SIZE)
-            return
-        first = self._page_offset + 1 if assets else 0
-        self._page_label.setText(f"{first}–{self._page_offset + len(assets)} of {total} matches")
-        self._previous_page.setEnabled(self._page_offset > 0)
-        self._next_page.setEnabled(self._page_offset + len(assets) < total)
         self._folder_metadata = metadata
         keys, scroll = self._query_restore
         self._show_and_populate(assets, keys, scroll)
 
-    def _change_page(self, direction):
-        offset = max(0, self._page_offset + direction * SEARCH_PAGE_SIZE)
-        if offset < self._total_matches:
-            self._request_query(self._last_segments, self._get_expanded_keys(), 0, offset)
-
     def _on_query_failed(self, generation, error):
         if generation != self._query_generation:
             return
-        self._page_label.setText("Search failed")
         self.hide_loading()
         window = self.window()
         if hasattr(window, "_set_status"):
@@ -3261,8 +3214,6 @@ class ResultsPanel(QScrollArea):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if hasattr(self, "_page_bar"):
-            self._page_bar.setGeometry(0, 0, self.width() - self.verticalScrollBar().width(), 30)
         # Keep overlay in sync
         self._overlay.setGeometry(self.viewport().rect())
 

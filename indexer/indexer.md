@@ -13,7 +13,7 @@ A desktop app for browsing, searching, and editing structured data paired with v
 
 - **folder-based indexing** — scans directories for `.png` + `.json` pairs into a SQLite index, organized into collapsible, nested folder sections
 - **incremental indexing** — background scans compare file timestamps and sizes, skip unchanged image/JSON pairs, and refresh folder metadata on every reload
-- **background search**, with name, folder, JSON, identifier, and combined searches; counted pages show up to 500 matches at a time
+- **background search**, with name, folder, JSON, identifier, and combined searches; all matches appear in one continuous view
 - thumbnail grid with lazy-loaded previews and a bounded cache; replaced images refresh when their folder is reopened or results reload
 - in-window image viewer with background decoding and arrow-key / on-screen navigation
 - **drag & drop** — drag a card out of the app to copy the image file itself into another program
@@ -104,7 +104,7 @@ To fully remove the app, delete the project folder along with this data folder. 
 | `portrait;characters f;id-favorites` | Any of the three searches |
 | `portrait;;short hair` | Name matches OR JSON matches |
 
-Combined searches use **OR**. Previous/Next changes the 500-result page, and the counter shows the total matches. A folder can span several pages; the image viewer navigates the cards on the current page. Search and ordering run in a worker, while cards are added in short UI batches. Counting and sorting still take time for large libraries.
+Combined searches use **OR**. All matching images appear in one continuous view without pagination or a result cap. The image viewer navigates the matching cards in its folder. Expanded folders are retained on refresh; clearing a search restores the folders and scroll position from before that search. Search and ordering run in a worker, while cards are added in short UI batches. Large result sets take longer to build and use more memory.
 
 Persistent identifiers live in the asset's `Identifier` JSON field. Temporary memberships live only in the current database session; closing or unloading that database loses them. Converting an identifier to persistent state writes its member sidecars. Rename/remove operations roll back earlier writes if a later sidecar fails, and report any rollback that could not be completed safely.
 

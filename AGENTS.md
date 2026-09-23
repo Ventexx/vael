@@ -112,6 +112,11 @@ and collapsible panels. Preserve the established style when adding controls.
     worker shutdown. The owner's transparent-load fix is retained in `ddb4a5f`.
   - I7 / `7857989`: complete counted search results with 500-item pages instead of
     the UI's silent 2,000-result limit; OR searches deduplicate across terms.
+    Pagination was subsequently removed at the owner's request: all matches now
+    appear in one continuous view without either limit. Background searches,
+    batched card rendering, and existing expanded-folder restoration remain.
+    An offscreen Qt check verified 2,450 cards in one view, OR deduplication,
+    ordering, empty results, folder restoration, and clean worker shutdown.
   - I8 / `59c53c2`, `8a8120b`: run scripts with the current interpreter and no shell,
     show failures, validate saved entries, stop the sequence on failure, and support
     cancellation plus orderly shutdown.
