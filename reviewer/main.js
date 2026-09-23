@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, dialog, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -40,7 +40,7 @@ function createWindow() {
 
   if (saved && saved.isMaximized) win.maximize();
 
-  win.loadFile('reviewer.html');
+  win.loadFile(path.join(__dirname, 'reviewer.html'));
   win.webContents.on('did-finish-load', () => {
     if (saved && saved.zoomFactor) win.webContents.setZoomFactor(saved.zoomFactor);
   });
@@ -49,14 +49,16 @@ function createWindow() {
   win.on('move', scheduleSaveWindowState);
   win.on('close', () => saveWindowStateNow());
 
-  globalShortcut.register('F12', () => win.webContents.toggleDevTools());
+  win.webContents.on('before-input-event', handleWindowShortcut);
+}
 
-  // Content zoom -- there's no menu bar in this frameless window, so these
-  // are the only way to change scale; the factor is remembered across launches.
-  globalShortcut.register('CommandOrControl+=', () => zoomBy(0.1));
-  globalShortcut.register('CommandOrControl+Plus', () => zoomBy(0.1));
-  globalShortcut.register('CommandOrControl+-', () => zoomBy(-0.1));
-  globalShortcut.register('CommandOrControl+0', () => { win.webContents.setZoomFactor(1); scheduleSaveWindowState(); });
+function handleWindowShortcut(event, input) {
+  if (input.type !== 'keyDown') return;
+  if (input.key === 'F12') { event.preventDefault(); win.webContents.toggleDevTools(); return; }
+  if (!(input.control || input.meta) || input.alt) return;
+  if (input.key === '+' || input.key === '=') { event.preventDefault(); zoomBy(0.1); }
+  else if (input.key === '-') { event.preventDefault(); zoomBy(-0.1); }
+  else if (input.key === '0') { event.preventDefault(); win.webContents.setZoomFactor(1); scheduleSaveWindowState(); }
 }
 
 function zoomBy(delta) {

@@ -1862,6 +1862,7 @@ function bindFocusOverlay() {
     if (img) api.startDrag(focusDir, img.name);
   });
   document.addEventListener('keydown', (e) => {
+    if (reviewShortcutBlocked(e)) return;
     if (focusIndex < 0) return;
     if (e.key === 'ArrowLeft') { stepFocus(-1); e.preventDefault(); }
     else if (e.key === 'ArrowRight') { stepFocus(1); e.preventDefault(); }
@@ -1899,10 +1900,19 @@ async function stepFocus(delta) {
 }
 
 // ---------------------------------------------------------------- GLOBAL HOTKEYS (Esc closes any open modal)
+function reviewShortcutBlocked(event) {
+  return event.isComposing || event.ctrlKey || event.metaKey || event.altKey
+    || event.target?.isContentEditable || !!event.target?.closest('input, textarea, select')
+    || !!document.querySelector('.modal-backdrop.open');
+}
 function bindGlobalHotkeys() {
   document.addEventListener('keydown', (e) => {
     const openModal = document.querySelector('.modal-backdrop.open');
-    if (openModal && e.key === 'Escape') openModal.classList.remove('open');
+    if (openModal) {
+      if (e.key === 'Escape') openModal.classList.remove('open');
+      return;
+    }
+    if (reviewShortcutBlocked(e)) return;
 
     // X while hovering a tile in the set/wall views marks it for deletion,
     // same as clicking its mark button -- but only when the zoom overlay
