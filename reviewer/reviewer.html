@@ -673,6 +673,7 @@ let imageCache = {};               // key -> [{name, iter, dataUrl}], loaded laz
 let expandedGroups = new Set();    // keys currently expanded in the canvas list
 let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
 let markedForDeletion = {};        // key -> Set(filenames)
+let deleteInProgress = false;
 let rightClickMarks = false;       // false: right-click flags the set (default) | true: right-click marks that image for deletion
 let letterFilter = '';             // '' = show everything | 'A'/'B'/... = only show sets whose label starts with this letter
 
@@ -876,7 +877,7 @@ function updateMarkedBadge() {
   const n = markedCountTotal();
   const badge = document.getElementById('marked-count');
   const btn = document.getElementById('btn-execute');
-  if (n > 0) { badge.style.display = 'flex'; badge.textContent = n; btn.disabled = false; }
+  if (n > 0) { badge.style.display = 'flex'; badge.textContent = n; btn.disabled = deleteInProgress; }
   else { badge.style.display = 'none'; btn.disabled = true; }
 }
 function updateFlaggedBadge() {
@@ -1704,6 +1705,7 @@ function updateGroupBodyMarks(dir, base) {
 
 // ---------------------------------------------------------------- MARKING / FLAGGING
 async function toggleMark(dir, base, name) {
+  if (deleteInProgress) return;
   const k = key(dir, base);
   const set = markedForDeletion[k] || (markedForDeletion[k] = new Set());
   if (set.has(name)) set.delete(name); else set.add(name);
@@ -1717,6 +1719,7 @@ async function toggleMark(dir, base, name) {
 }
 
 async function markAllForDeletion(dir, base) {
+  if (deleteInProgress) return;
   const k = key(dir, base);
   const images = await ensureImagesLoaded(dir, base);
   if (!images.length) return;
@@ -2058,14 +2061,38 @@ function openUnflagAllConfirm() {
 function closeConfirm() { document.getElementById('modal-confirm').classList.remove('open'); }
 
 async function executeDelete() {
+  if (deleteInProgress) return;
   const items = [];
   for (const k in markedForDeletion) {
     const [dir] = k.split('||');
     for (const name of markedForDeletion[k]) items.push({ dir, name });
   }
+  if (!items.length) return;
   closeConfirm();
-  const results = await api.deleteFiles(items);
-  const failed = results.filter(r => !r.ok);
+  deleteInProgress = true;
+  updateMarkedBadge();
+  let failed = [];
+  try {
+    const results = await api.deleteFiles(items);
+    const byFile = new Map(results.map(result => [JSON.stringify([result.dir, result.name]), result]));
+    for (const item of items) {
+      const result = byFile.get(JSON.stringify([item.dir, item.name]));
+      if (!result?.ok) {
+        failed.push({ ...item, error: result?.error || 'No successful result was returned. Check the file before retrying.' });
+        continue;
+      }
+      for (const k in markedForDeletion) {
+        if (k.split('||')[0] === item.dir) markedForDeletion[k].delete(item.name);
+        if (!markedForDeletion[k].size) delete markedForDeletion[k];
+      }
+    }
+  } catch (error) {
+    failed = items.map(item => ({ ...item, error: 'Outcome not confirmed: ' + error.message }));
+  } finally {
+    deleteInProgress = false;
+    updateMarkedBadge();
+    updateStatusbar();
+  }
 
   // Flags are intentionally left alone here. A flag is a session-level
   // marker the user set explicitly, and it should persist across executes
@@ -2073,15 +2100,14 @@ async function executeDelete() {
   // just text, so there's no cost to keeping it around. Flags only clear
   // when the user unflags manually or the app closes (flags live in main.js
   // memory and are wiped on restart).
-  markedForDeletion = {};
   imageCache = {};
   expandedGroups.clear();
   closeFocus();
-  await refreshAll(); // rescans, so deleted sets disappear and remaining ones reload fresh
-  updateMarkedBadge();
+  try { await refreshAll(); }
+  catch (error) { alert('Trash results were retained, but the folder refresh failed: ' + error.message); }
 
   if (failed.length) {
-    alert(failed.length + ' file' + (failed.length === 1 ? '' : 's') + ' could not be moved to the trash:\n' + failed.map(f => f.name).join('\n'));
+    alert(failed.length + ' file' + (failed.length === 1 ? '' : 's') + ' remain marked for retry:\n' + failed.map(f => f.dir + '/' + f.name + '\n' + f.error).join('\n\n'));
   }
 }
 
