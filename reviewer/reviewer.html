@@ -764,7 +764,7 @@ async function refreshAll(opts) {
     updateStatusbar();
     const status = document.getElementById('status-left');
     status.title = snapshot.warnings.map(entry => entry.path + ': ' + entry.error).join('\n');
-    if (snapshot.warnings.length) status.textContent = snapshot.warnings.length + ' folders could not be scanned — hover for details';
+    if (snapshot.warnings.length) status.textContent = snapshot.warnings.length + ' paths could not be scanned — hover for details';
   } catch (error) {
     if (generation !== scanGeneration) return;
     document.getElementById('status-left').textContent = 'Scan failed: ' + error.message;
@@ -838,6 +838,7 @@ function updateFlaggedBadge() {
 
 // ---------------------------------------------------------------- TOPBAR / WINDOW
 function bindWindowControls() {
+  api.onOperationError(message => { document.getElementById('status-right').textContent = message; });
   document.getElementById('win-min').onclick = () => api.minimize();
   document.getElementById('win-max').onclick = () => api.maximize();
   document.getElementById('win-close').onclick = () => api.close();
