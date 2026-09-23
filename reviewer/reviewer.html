@@ -666,7 +666,7 @@ let focusDir = null, focusBase = null, focusGroupKey = null, focusIndex = -1;
 let focusContext = null, focusContextIndex = -1;
 let hoveredTile = null; // {dir, base, name} of the tile currently under the mouse (set/wall view), so X can mark it without clicking
 
-const key = (dir, base) => dir + '||' + base;
+const key = (dir, base) => JSON.stringify([dir, base]);
 
 // Manual flags (via the flag button) stick even if the user later unmarks
 // some checkboxes -- only auto-flags (from "all marked") clear themselves.
@@ -1042,7 +1042,7 @@ function renderFoldersList() {
 
   const opts = {
     countFn: f => Object.keys(f.groups).length,
-    hasFlag: f => [...flaggedKeys].some(k => k.startsWith(f.dir + '||')),
+    hasFlag: f => [...flaggedKeys].some(k => JSON.parse(k)[0] === f.dir),
     isActive: f => f.dir === currentFolder,
     onOpen: f => renderGroupsCanvas(f.dir),
     rerender: renderFoldersList,
@@ -1928,7 +1928,7 @@ async function executeDelete() {
   if (deleteInProgress) return;
   const items = [];
   for (const k in markedForDeletion) {
-    const [dir] = k.split('||');
+    const [dir] = JSON.parse(k);
     for (const name of markedForDeletion[k]) items.push({ dir, name });
   }
   if (!items.length) return;
@@ -1946,7 +1946,7 @@ async function executeDelete() {
         continue;
       }
       for (const k in markedForDeletion) {
-        if (k.split('||')[0] === item.dir) markedForDeletion[k].delete(item.name);
+        if (JSON.parse(k)[0] === item.dir) markedForDeletion[k].delete(item.name);
         if (!markedForDeletion[k].size) delete markedForDeletion[k];
       }
     }

@@ -282,7 +282,7 @@ ipcMain.handle('delete-files', async (_, items) => {
 // flags remain after trash execution until explicitly cleared or the app closes.
 // ---------------------------------------------------------------------------
 function flagKey(dir, base) {
-  return dir + '\u241F' + base; // unit-separator join char, won't collide with real path/base text
+  return JSON.stringify([dir, base]);
 }
 
 const flags = {}; // flagKey -> { dir, base }
