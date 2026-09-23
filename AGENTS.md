@@ -1,6 +1,6 @@
 # Vael: project context and improvement backlog
 
-Last updated: 2026-09-22.
+Last updated: 2026-09-23.
 
 ## Read this first
 
@@ -133,6 +133,36 @@ and collapsible panels. Preserve the established style when adding controls.
   detached script children may survive cancellation. Usage and limits are in
   `indexer/indexer.md` (`3323c19`).
 
+- Checklist reliability fixes L1-L6, L11, and L12 were implemented and pushed:
+  - L1 / `9ee3adb`: recover unnamed lists and unfinished task input after reload;
+    retain deliberately emptied drafts and warn before discarding unsaved work.
+  - L2 / `61e7d3a`: validate imports before changing the list, assign fresh IDs,
+    and include note IDs when allocating new items.
+  - L3 / `40c923f`: leave text undo to the browser; handle list redo once and
+    recognize Ctrl+Shift+Z correctly.
+  - L4 / `ecf6dfe`, `4bf17cc`: surface failed storage operations, preserve corrupt
+    saved data and unsaved edits, and keep warnings visible above the sidebar.
+  - L5 / `52b3bd7`: clear completed/rejected tasks immediately as one undoable
+    change; no delayed callback can alter a newly opened list.
+  - L6 / `ece0a86`: retain the 20 most recently deleted profiles in browser storage
+    and restore them through the sidebar; deleting the active profile retains a draft.
+  - L11 / `d442160`: use Web Locks to permit one editing tab; other tabs show
+    updates in view-only mode and receive editing access after the writer leaves.
+  - L12 / `f44a6ac`: use an offline system monospace stack instead of Google Fonts.
+- Ten local Checklist checks passed in isolated offscreen Electron/Chromium windows
+  on Windows. They cover actual file-import events, validation/IDs, blocked/full
+  storage, corrupt data, draft reloads, text/list undo, immediate clearing, deletion
+  recovery, two-window updates and editing transfer, offline resources, and layout.
+  Dark and white screenshots were visually inspected. Tests remain outside the repo.
+  Checklist remains a browser app; Electron was only the test runner.
+- Checklist limits: saving requires Web Locks; unsupported environments are view-only.
+  Older app versions do not participate in tab coordination. Undo history is session-only;
+  uncommitted inline text can be lost in an abrupt crash. Browser-data clearing removes
+  drafts and deleted-profile recovery. Export includes only the current committed list,
+  not all profiles/settings or unfinished input. Firefox, Safari, mobile browsers,
+  abrupt power loss, and production-size lists were not verified. Details are in
+  `checklist/checklist.md` (`4cca095`).
+
 ## All remaining optional improvements from the review
 
 IDs refer to the original brainstorming review. None of the following is a blanket
@@ -208,10 +238,8 @@ controls, and C9 has some status distinctions; the remaining parts are listed he
   and settings, with explicit merge versus replace behavior.
 - **L10 — Keyboard operation:** reorder and edit the focused task, insert below
   it, and provide a keyboard alternative to right-click rejection.
-- **L11 — Multiple tabs:** detect updates from another tab and avoid overwriting
-  newer state. This is also a remaining reliability issue.
-- **L12 — Offline fonts:** bundle fonts or choose a deliberate system-font stack
-  so appearance does not depend on Google Fonts being reachable.
+- **L11 — Multiple tabs:** completed as a reliability fix; see above.
+- **L12 — Offline fonts:** completed as a reliability fix; see above.
 
 ### Backup
 
@@ -257,7 +285,8 @@ Test the outcomes the owner relies on:
 - Indexer: local checks now cover incremental metadata refresh, failed/stale writes,
   rollback, background search/paging, script failures/cancellation, previews, and shutdown.
 - Reviewer: partial trash failures and cache freshness.
-- Checklist: import validation, autosave, text/list undo, and profile switching.
+- Checklist: local checks now cover imports, storage errors, draft recovery,
+  text/list undo, clear timing, deleted profiles, and cross-tab coordination.
 - Backup: pending recovery and shared-history behavior across archives.
 
 Follow the owner's test-tracking preference above. Do not claim a mocked test
@@ -271,6 +300,8 @@ Editor's batch/save/cache
 behavior is now documented in `editor/editor.md`; keep it current.
 Cover now has `cover/cover.md`; keep it current. Review backup recovery instructions
 against the actual recovery implementation. Correct outdated names and file paths.
+Checklist's themes, draft recovery, storage, import/export scope, and multi-tab
+behavior are documented in `checklist/checklist.md`; keep it current.
 
 ### 5. Selective shared helpers
 
@@ -290,17 +321,17 @@ specific sequence of clicks and clearly show which files/jobs are being handed o
 
 ## Remaining correctness findings: quick orientation
 
-These were identified in the review and remain after the Cover, Editor, and Indexer work. Verify
+These were identified in the review and remain after the Cover, Editor, Indexer, and Checklist work. Verify
 them against the current implementation before fixing them.
 
 | App | Findings |
 | --- | --- |
 | reviewer | R1 full-memory rescan; R2 unbounded full-resolution cache; R3 blocking scans/reads; R4 failed trash marks cleared; R5 stale replaced-file previews; R6 global shortcuts; R7 overlapping-root duplicates |
-| checklist | L1 unnamed draft loss; L2 unvalidated import; L3 undo intercepts text editing; L4 storage failures; L5 delayed-clear timing race; L6 profile deletion has no recovery; L11 cross-tab overwrites; L12 external fonts |
 | backup | B1 pending recovery writes its JSON wrapper; B2 recovery test misses that bug; B3 shared-history run-ID race; B4 latest comparison not scoped by backup family; B5 verification races archive replacement; B6 failures after publication need accurate outcome reporting |
 
 Editor E1-E7 are complete. E8-E12 remain optional and unapproved.
 Indexer I1-I8 and I12 are complete. I9-I11 and I13 remain optional and unapproved.
+Checklist L1-L6, L11, and L12 are complete. L7-L10 remain optional and unapproved.
 The strongest next correctness candidates are backup B1-B2 and reviewer R4-R5;
 choose the next app with the owner before starting it.
 
