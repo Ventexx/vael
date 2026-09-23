@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scan: (opts) => ipcRenderer.invoke('scan', opts),
   scanSnapshot: () => ipcRenderer.invoke('scan-snapshot'),
   scanAll: (opts) => ipcRenderer.invoke('scan-all', opts),
-  readImage: (dir, name) => ipcRenderer.invoke('read-image', dir, name),
+  readImageBytes: (dir, name, version) => ipcRenderer.invoke('read-image-bytes', dir, name, version),
   deleteFiles: (items) => ipcRenderer.invoke('delete-files', items),
 
   flagGroup: (dir, base) => ipcRenderer.invoke('flag-group', dir, base),

@@ -205,20 +205,6 @@
   .cl-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width .15s ease; }
   .cl-sub { font-size: 10px; color: var(--text-dim); margin-top: 8px; }
 
-  /* LOAD-ALL OVERLAY -- covers the entire app (not just the canvas) while
-     every set in every folder of the current review mode is pre-loaded into
-     memory. Sits above the topbar/sidebar/modals and intercepts all clicks,
-     matching the "app is unresponsive during this" behavior requested --
-     there's nothing useful to interact with until every image is in
-     imageCache anyway. */
-  #loadall-overlay {
-    position: fixed; inset: 0; background: rgba(5,5,5,0.85); backdrop-filter: blur(2px); z-index: 1100;
-    display: flex; align-items: center; justify-content: center;
-  }
-  #loadall-overlay.hidden { display: none; }
-  .la-box { width: 280px; text-align: center; }
-  .la-title { font-size: 12px; color: var(--text-bright); margin-bottom: 12px; font-weight: 700; }
-
   /* GROUP SECTIONS (accordion list, replaces the old draggable canvas) --
      styled to match the simple folder-list pattern: a plain header row,
      with contents shown via indent + a left separator line rather than a
@@ -568,17 +554,6 @@
   </div>
 </div>
 
-<!-- LOAD-ALL OVERLAY -- app-wide block while every folder in the current
-     review mode is pre-loaded into memory. Lives outside #app so it's a
-     fixed full-viewport layer regardless of scroll/layout underneath. -->
-<div id="loadall-overlay" class="hidden">
-  <div class="la-box">
-    <div class="la-title" id="la-title">Loading all folders&hellip;</div>
-    <div class="cl-bar"><div class="cl-bar-fill" id="la-bar-fill"></div></div>
-    <div class="cl-sub" id="la-sub">0 / 0</div>
-  </div>
-</div>
-
 <!-- SETTINGS MODAL -->
 <div class="modal-backdrop" id="modal-settings">
   <div class="modal">
@@ -657,6 +632,7 @@
   </div>
 </div>
 
+<script src="previews.js"></script>
 <script>
 const api = window.electronAPI;
 
@@ -669,8 +645,8 @@ let flaggedList = [];              // [{dir, bases:[...]}]
 let flaggedKeys = new Set();       // `${dir}||${base}`
 
 let currentFolder = null;          // dir of the character currently shown in the canvas
-let imageCache = {};               // key -> [{name, iter, dataUrl}], loaded lazily per set
-let imageGeneration = 0;
+let imageCache = {};               // group metadata only; pixel previews use the bounded thumbnail cache
+let canvasGeneration = 0;
 let expandedGroups = new Set();    // keys currently expanded in the canvas list
 let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
 let markedForDeletion = {};        // key -> Set(filenames)
@@ -761,28 +737,6 @@ async function init() {
 }
 
 
-// Drops anything from imageCache that no longer matches reality: either the
-// whole set is gone (folder unwatched, base deleted entirely) or its file
-// list changed (an image inside it was added/removed/renamed) since it was
-// last read from disk. Checked against scanResultsAll specifically -- unlike
-// scanResults, it lists every set including singletons, so it's a complete
-// picture of what's actually on disk regardless of which review mode is
-// currently active. Runs on every rescan (not just the two big ones below)
-// so nothing lingers in memory once it stops matching disk.
-function reconcileImageCache() {
-  const onDiskFiles = new Map(); // key(dir,base) -> Set(filenames currently on disk)
-  for (const f of scanResultsAll) {
-    for (const base in f.groups) onDiskFiles.set(key(f.dir, base), new Map(f.groups[base].map(e => [e.name, e.version])));
-  }
-  for (const k in imageCache) {
-    const onDisk = onDiskFiles.get(k);
-    if (!onDisk) { delete imageCache[k]; continue; } // set no longer exists at all
-    const cached = imageCache[k];
-    const sameFiles = cached.length === onDisk.size && cached.every(im => onDisk.has(im.name) && onDisk.get(im.name) === im.version);
-    if (!sameFiles) delete imageCache[k]; // membership changed -- reload fresh next time it's needed
-  }
-}
-
 // Rescans refresh file metadata and invalidate previews. Only the open folder
 // requests images; a full rescan never preloads the whole watched library.
 let scanGeneration = 0;
@@ -794,12 +748,11 @@ async function refreshAll(opts) {
   try {
     const [snapshot, flags] = await Promise.all([api.scanSnapshot(), api.getFlags()]);
     if (generation !== scanGeneration) return;
-    imageGeneration++;
     closeFocus();
-    if (opts?.force) imageCache = {};
+    if (opts?.force) clearThumbnails();
+    imageCache = {};
     scanResultsAll = snapshot.all;
     scanResults = snapshot.repeated;
-    reconcileImageCache();
     flaggedList = flags;
     flaggedKeys = new Set(flags.flatMap(folder => folder.bases.map(base => key(folder.dir, base))));
     updateFlaggedBadge();
@@ -837,6 +790,8 @@ function updateModeToggleButton() {
 }
 
 function toggleReviewMode() {
+  resetPreviews();
+  canvasGeneration++;
   reviewMode = reviewMode === 'iteration' ? 'general' : 'iteration';
   currentFolder = null;
   closeFocus();
@@ -1181,6 +1136,10 @@ function populateLetterFilter(allBases) {
 
 // ---------------------------------------------------------------- CANVAS (general review): the image wall
 function renderGeneralCanvas(dir) {
+  resetPreviews();
+  canvasGeneration++;
+  hoveredTile = null;
+  groupSectionEls.clear();
   const isNewFolder = currentFolder !== dir;
   currentFolder = dir;
   const folderData = scanResultsAll.find(f => f.dir === dir);
@@ -1218,48 +1177,14 @@ function renderGeneralCanvas(dir) {
 
 
 async function loadWallImagesWithProgress(dir, order, tintForBase) {
-  const overlay = document.getElementById('canvas-loading');
-  const fill = document.getElementById('cl-bar-fill');
-  const sub = document.getElementById('cl-sub');
-  const bases = [...new Set(order.map(o => o.base))];
-
-  if (bases.length) {
-    overlay.classList.remove('hidden');
-    fill.style.width = '0%';
-    sub.textContent = '0 / ' + bases.length + ' sets';
-    // Let the overlay actually paint before doing the work below -- if every
-    // set here is already cached this would otherwise resolve synchronously
-    // back-to-back and the overlay would never get a chance to show, making
-    // a revisit look like a silent freeze instead of a load.
-    await new Promise(r => requestAnimationFrame(r));
-    if (currentFolder !== dir) return;
-
-    const total = bases.length;
-    let done = 0;
-    const CONCURRENCY = 4;
-    let idx = 0;
-    async function worker() {
-      while (idx < bases.length) {
-        const base = bases[idx++];
-        if (currentFolder !== dir) return; // navigated away mid-load
-        await ensureImagesLoaded(dir, base);
-        done++;
-        fill.style.width = Math.round((done / total) * 100) + '%';
-        sub.textContent = done + ' / ' + total + ' sets';
-        // Yield periodically so the progress bar can actually paint, even
-        // when every set here resolves instantly from cache.
-        await new Promise(r => requestAnimationFrame(r));
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
-    if (currentFolder !== dir) return;
-    overlay.classList.add('hidden');
-  }
-
-  if (currentFolder === dir) renderWallTiles(dir, order, tintForBase);
+  document.getElementById('canvas-loading').classList.add('hidden');
+  for (const base of new Set(order.map(entry => entry.base))) ensureImagesLoaded(dir, base);
+  await renderWallTiles(dir, order, tintForBase);
 }
 
-function renderWallTiles(dir, order, tintForBase) {
+async function renderWallTiles(dir, order, tintForBase) {
+  const generation = canvasGeneration;
+  let rendered = 0;
   const wall = document.getElementById('wall-list');
   wall.innerHTML = '';
   // Flat navigation context shared by every tile in this wall -- lets the
@@ -1267,6 +1192,7 @@ function renderWallTiles(dir, order, tintForBase) {
   // across set boundaries, instead of being stuck inside one duplicate set.
   const wallContext = order.map(o => ({ dir, base: o.base, name: o.name }));
   for (const item of order) {
+    if (rendered++ % 60 === 0) { await new Promise(requestAnimationFrame); if (generation !== canvasGeneration) return; }
     const k = key(dir, item.base);
     const images = imageCache[k] || [];
     const idxInGroup = images.findIndex(im => im.name === item.name);
@@ -1287,7 +1213,7 @@ function renderWallTiles(dir, order, tintForBase) {
     }
 
     tile.innerHTML =
-      '<img src="' + (imgEntry.dataUrl || '') + '">' +
+      '<img>' +
       '<div class="wall-badges">' +
         (flagged ? '<span class="wall-flag-dot" title="Flagged for requeue"></span>' : '') +
         '<div class="tile-iter-badge small" title="' + escapeHtml(item.base) + '">' + escapeHtml(setLabel(item.base)) + '</div>' +
@@ -1295,6 +1221,7 @@ function renderWallTiles(dir, order, tintForBase) {
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
 
+    trackPreview(tile.querySelector('img'), dir, imgEntry);
     tile.querySelector('img').onclick = () => openFocus(dir, item.base, item.name, wallContext);
     // Drag the real file out via the main process instead of letting the
     // browser drag the data: URL -- see main.js's start-drag handler.
@@ -1336,7 +1263,10 @@ function updateWallTileFlag(dir, base) {
 }
 
 // ---------------------------------------------------------------- CANVAS: all sets for a folder, as an accordion list
-function renderGroupsCanvas(dir) {
+async function renderGroupsCanvas(dir) {
+  resetPreviews();
+  const generation = ++canvasGeneration;
+  hoveredTile = null;
   const isNewFolder = currentFolder !== dir;
   currentFolder = dir;
   const folderData = scanResults.find(f => f.dir === dir);
@@ -1346,6 +1276,7 @@ function renderGroupsCanvas(dir) {
   const bases = letterFilter ? allBases.filter(b => baseLetter(b) === letterFilter) : allBases;
 
   document.getElementById('wall-list').classList.remove('active');
+  document.getElementById('wall-list').innerHTML = '';
   document.getElementById('groups-list').style.display = '';
 
   document.getElementById('ch-title').textContent = leafName(dir);
@@ -1355,16 +1286,16 @@ function renderGroupsCanvas(dir) {
   document.getElementById('btn-expand-all').style.display = bases.length ? 'flex' : 'none';
   document.getElementById('btn-collapse-all').style.display = bases.length ? 'flex' : 'none';
 
-  // Every set expands by default. Sections are built here as shells only
-  // (header + placeholder body) -- loadAllImagesWithProgress fills in each
-  // body afterward, behind the loading overlay, whether or not the images
-  // happen to already be cached from a previous visit.
+  // Every set expands by default. Build sections in batches; only nearby
+  // thumbnails request image bytes through the intersection observer.
   expandedGroups = new Set(bases.map(b => key(dir, b)));
 
   groupSectionEls.clear();
   const list = document.getElementById('groups-list');
   list.innerHTML = '';
+  let built = 0;
   for (const base of bases) {
+    if (built++ % 60 === 0) { await new Promise(requestAnimationFrame); if (generation !== canvasGeneration) return; }
     const section = buildGroupSection(dir, base, folderData.groups[base], false);
     list.appendChild(section);
   }
@@ -1373,51 +1304,18 @@ function renderGroupsCanvas(dir) {
   loadAllImagesWithProgress(dir, bases);
 }
 
-// Pre-loads every set's images for the folder just opened, showing a
-// darkened overlay with a progress bar/count while the sets are built.
-// Every base is included in the progress count (not just ones missing from
-// cache) and the loop yields a frame between sets -- otherwise a revisit
-// where everything is already cached renders synchronously in one go, the
-// overlay never gets a chance to paint, and the folder switch looks like an
-// unindicated freeze instead of a load.
+// Build metadata-only tiles in batches. Pixel loading follows viewport visibility.
 async function loadAllImagesWithProgress(dir, bases) {
-  const overlay = document.getElementById('canvas-loading');
-  const fill = document.getElementById('cl-bar-fill');
-  const sub = document.getElementById('cl-sub');
-
-  if (!bases.length) { overlay.classList.add('hidden'); return; }
-
-  overlay.classList.remove('hidden');
-  fill.style.width = '0%';
-  sub.textContent = '0 / ' + bases.length + ' sets';
-  await new Promise(r => requestAnimationFrame(r));
-  if (currentFolder !== dir) return;
-
-  const total = bases.length;
-  let done = 0;
-  const CONCURRENCY = 4;
-  let idx = 0;
-
-  async function worker() {
-    while (idx < bases.length) {
-      const base = bases[idx++];
-      if (currentFolder !== dir) return; // navigated away mid-load
-      await ensureImagesLoaded(dir, base);
-      if (currentFolder !== dir) return;
-      done++;
-      fill.style.width = Math.round((done / total) * 100) + '%';
-      sub.textContent = done + ' / ' + total + ' sets';
-      const k = key(dir, base);
-      const section = groupSectionEls.get(k);
-      if (section && expandedGroups.has(k)) renderGroupBody(dir, base, section.querySelector('.group-section-body'));
-      // Yield periodically so the progress bar can actually paint, even
-      // when every set here resolves instantly from cache.
-      await new Promise(r => requestAnimationFrame(r));
-    }
+  const generation = canvasGeneration;
+  document.getElementById('canvas-loading').classList.add('hidden');
+  let count = 0;
+  for (const base of bases) {
+    if (generation !== canvasGeneration) return;
+    if (count++ % 20 === 0) { await new Promise(requestAnimationFrame); if (generation !== canvasGeneration) return; }
+    ensureImagesLoaded(dir, base);
+    const section = groupSectionEls.get(key(dir, base));
+    if (section && expandedGroups.has(key(dir, base))) await renderGroupBody(dir, base, section.querySelector('.group-section-body'));
   }
-
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
-  if (currentFolder === dir) overlay.classList.add('hidden');
 }
 
 function buildGroupSection(dir, base, entries, renderNow = true) {
@@ -1480,19 +1378,11 @@ function activeFolderData(dir) {
   return arr.find(f => f.dir === dir);
 }
 
-async function ensureImagesLoaded(dir, base) {
+function ensureImagesLoaded(dir, base) {
   const k = key(dir, base);
-  const generation = imageGeneration;
   if (!imageCache[k]) {
     const folderData = activeFolderData(dir);
-    const entries = (folderData && folderData.groups[base]) || [];
-    const images = [];
-    for (const e of entries) {
-      const dataUrl = await api.readImage(dir, e.name);
-      images.push({ name: e.name, iter: e.iter, version: e.version, dataUrl });
-    }
-    if (generation !== imageGeneration) return [];
-    imageCache[k] = images;
+    imageCache[k] = ((folderData && folderData.groups[base]) || []).map(entry => ({...entry}));
   }
   return imageCache[k];
 }
@@ -1504,12 +1394,16 @@ async function populateGroupBody(dir, base, body) {
   renderGroupBody(dir, base, body);
 }
 
-function renderGroupBody(dir, base, body) {
+async function renderGroupBody(dir, base, body) {
+  const generation = canvasGeneration;
+  const bodyGeneration = body._generation = (body._generation || 0) + 1;
+  untrackPreviews(body);
   const k = key(dir, base);
   const images = imageCache[k] || [];
   const marked = markedForDeletion[k] || new Set();
   body.innerHTML = '';
-  images.forEach((img, idx) => {
+  for (const [idx, img] of images.entries()) {
+    if (idx % 60 === 0) { await new Promise(requestAnimationFrame); if (generation !== canvasGeneration || bodyGeneration !== body._generation || !body.isConnected) return; }
     const tile = document.createElement('div');
     tile.className = 'img-tile' + (marked.has(img.name) ? ' marked' : '');
     tile.dataset.name = img.name;
@@ -1517,10 +1411,11 @@ function renderGroupBody(dir, base, body) {
     const imgwrap = document.createElement('div');
     imgwrap.className = 'img-tile-imgwrap';
     imgwrap.innerHTML =
-      '<img src="' + (img.dataUrl || '') + '">' +
+      '<img>' +
       '<div class="tile-iter-badge">' + img.iter + '</div>' +
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
+    trackPreview(imgwrap.querySelector('img'), dir, img);
     imgwrap.querySelector('img').onclick = () => openFocus(dir, base, img.name);
     // Drag the real file out via the main process instead of letting the
     // browser drag the data: URL -- see main.js's start-drag handler.
@@ -1534,7 +1429,7 @@ function renderGroupBody(dir, base, body) {
 
     tile.appendChild(imgwrap);
     body.appendChild(tile);
-  });
+  }
 }
 
 function toggleGroupSection(dir, base) {
@@ -1696,7 +1591,7 @@ async function unflagGroupLocal(dir, base) {
 
 async function syncAutoFlag(dir, base) {
   const k = key(dir, base);
-  const images = imageCache[k] || [];
+  const images = ensureImagesLoaded(dir, base);
   const set = markedForDeletion[k] || new Set();
   const allMarked = images.length > 0 && images.every(i => set.has(i.name));
 
@@ -1718,6 +1613,35 @@ async function syncAutoFlag(dir, base) {
 }
 
 // ---------------------------------------------------------------- FOCUS / ZOOM
+let focusRequest = 0, focusSource = '', focusUrl = null;
+let pendingFocus = null, focusLoading = false;
+function releaseFocusImage() {
+  document.getElementById('focus-img').removeAttribute('src');
+  if (focusUrl) URL.revokeObjectURL(focusUrl);
+  focusUrl = null;
+}
+async function pumpFocusImage() {
+  if (focusLoading) return;
+  focusLoading = true;
+  try {
+    while (pendingFocus) {
+      const request = pendingFocus; pendingFocus = null;
+      try {
+        const result = await api.readImageBytes(request.dir, request.image.name, request.image.version);
+        if (request.token !== focusRequest) continue;
+        focusUrl = URL.createObjectURL(new Blob([result.bytes], {type: result.mime}));
+        const image = document.getElementById('focus-img');
+        image.alt = request.image.name;
+        image.src = focusUrl;
+      } catch (error) {
+        if (request.token === focusRequest) {
+          document.getElementById('focus-img').alt = 'Image unavailable';
+          document.getElementById('focus-name').textContent = request.image.name + ': ' + error.message;
+        }
+      }
+    }
+  } finally { focusLoading = false; }
+}
 function openFocus(dir, base, name, context) {
   focusDir = dir; focusBase = base; focusGroupKey = key(dir, base);
   const images = imageCache[focusGroupKey] || [];
@@ -1728,6 +1652,8 @@ function openFocus(dir, base, name, context) {
   updateFocusView();
 }
 function closeFocus() {
+  focusRequest++; focusSource = ''; pendingFocus = null;
+  releaseFocusImage();
   focusDir = null; focusBase = null; focusGroupKey = null; focusIndex = -1;
   focusContext = null; focusContextIndex = -1;
   document.getElementById('focus-overlay').classList.remove('open');
@@ -1736,7 +1662,14 @@ function updateFocusView() {
   const images = imageCache[focusGroupKey] || [];
   const img = images[focusIndex];
   if (!img) return;
-  document.getElementById('focus-img').src = img.dataUrl || '';
+  const source = JSON.stringify([focusDir, img.name, img.version]);
+  if (source !== focusSource) {
+    focusSource = source;
+    releaseFocusImage();
+    document.getElementById('focus-img').alt = 'Loading image';
+    pendingFocus = {dir: focusDir, image: img, token: ++focusRequest};
+    pumpFocusImage();
+  }
   document.getElementById('focus-name').textContent = img.name;
   // With a flat context (opened from the wall), the counter reflects
   // position across every on-screen image; otherwise it reflects position
@@ -1752,6 +1685,10 @@ function updateFocusView() {
 }
 
 function bindFocusOverlay() {
+  document.getElementById('focus-img').onerror = () => {
+    document.getElementById('focus-name').textContent = 'Could not decode this image. Close it and rescan to retry.';
+    releaseFocusImage();
+  };
   document.getElementById('focus-close').onclick = closeFocus;
   document.getElementById('focus-prev').onclick = () => stepFocus(-1);
   document.getElementById('focus-next').onclick = () => stepFocus(1);
@@ -1800,7 +1737,7 @@ async function stepFocus(delta) {
     focusContextIndex = (focusContextIndex + delta + focusContext.length) % focusContext.length;
     const entry = focusContext[focusContextIndex];
     focusDir = entry.dir; focusBase = entry.base; focusGroupKey = key(entry.dir, entry.base);
-    await ensureImagesLoaded(entry.dir, entry.base); // no-op if already cached
+    ensureImagesLoaded(entry.dir, entry.base);
     const images = imageCache[focusGroupKey] || [];
     focusIndex = images.findIndex(im => im.name === entry.name);
     updateFocusView();

@@ -208,16 +208,26 @@ function naturalCompare(a, b) {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-ipcMain.handle('read-image', async (_, dir, name) => {
+ipcMain.handle('read-image-bytes', async (_, dir, name, expectedVersion) => {
+  const filePath = path.join(dir, name);
+  const handle = await fs.promises.open(filePath, 'r');
+  const version = stat => JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
   try {
-    const filePath = path.join(dir, name);
-    const buf = await fs.promises.readFile(filePath);
-    const ext = path.extname(filePath).slice(1).toLowerCase();
-    const mime = ext === 'jpg' ? 'jpeg' : ext;
-    return `data:image/${mime};base64,${buf.toString('base64')}`;
-  } catch (e) {
-    return null;
-  }
+    const before = await handle.stat();
+    if (!before.isFile() || before.size > 64 * 1024 * 1024) throw new Error('Image must be a file no larger than 64 MiB.');
+    if (expectedVersion && version(before) !== expectedVersion) throw new Error('Image changed; rescan to load its new version.');
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!bytesRead) throw new Error('Image changed while reading.');
+      offset += bytesRead;
+    }
+    if (version(await handle.stat()) !== version(before)
+        || version(await fs.promises.stat(filePath)) !== version(before)) throw new Error('Image changed while reading; rescan and retry.');
+    const ext = path.extname(name).slice(1).toLowerCase();
+    return { bytes: new Uint8Array(bytes), mime: 'image/' + (ext === 'jpg' ? 'jpeg' : ext) };
+  } finally { await handle.close(); }
 });
 
 // ---------------------------------------------------------------------------
@@ -269,9 +279,7 @@ ipcMain.handle('delete-files', async (_, items) => {
 // temporary session markers, not something that needs to survive a restart,
 // so there's no reason to persist them to disk at all. A flag disappears
 // when the app closes, when the user explicitly unflags a set, or
-// automatically once that set is fully executed/deleted (handled in the
-// renderer's executeDelete, which calls unflag-group for any group whose
-// images were entirely trashed).
+// flags remain after trash execution until explicitly cleared or the app closes.
 // ---------------------------------------------------------------------------
 function flagKey(dir, base) {
   return dir + '\u241F' + base; // unit-separator join char, won't collide with real path/base text

@@ -13,7 +13,7 @@
   "build": {
     "appId": "com.vael.reviewer",
     "productName": "reviewer.",
-    "files": ["reviewer.html", "main.js", "preload.js", "scanner.js", "icon.ico", "icon.png"],
+    "files": ["reviewer.html", "main.js", "preload.js", "scanner.js", "preview-worker.js", "previews.js", "icon.ico", "icon.png"],
     "win": {
       "target": "nsis",
       "icon": "icon.ico"
