@@ -784,28 +784,37 @@ function reconcileImageCache() {
 
 // Rescans refresh file metadata and invalidate previews. Only the open folder
 // requests images; a full rescan never preloads the whole watched library.
+let scanGeneration = 0;
 async function refreshAll(opts) {
-  const force = !!(opts && opts.force);
-  if (force) imageCache = {};
-  // Both datasets are fetched every time (not just whichever mode is active)
-  // so scanResultsAll is always fresh enough to reconcile the cache against,
-  // and so switching modes never shows stale data from before the last time
-  // that mode happened to be active. Cheap in practice on a normal (non-
-  // force) rescan: main.js caches each directory's listing by its own
-  // mtime, so an unchanged subtree costs one stat call instead of a full
-  // re-read.
-  [scanResultsAll, scanResults] = await Promise.all([api.scanAll({ force }), api.scan({ force })]);
-  reconcileImageCache();
-  flaggedList = await api.getFlags();
-  flaggedKeys = new Set();
-  for (const f of flaggedList) for (const b of f.bases) flaggedKeys.add(key(f.dir, b));
-  updateFlaggedBadge();
-  renderFoldersList();
-  if (currentFolder) {
-    if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
-    else renderGroupsCanvas(currentFolder);
+  const generation = ++scanGeneration;
+  const buttons = ['btn-rescan', 'settings-rescan'].map(id => document.getElementById(id));
+  buttons.forEach(button => button.disabled = true);
+  document.getElementById('status-left').textContent = 'Scanning folders...';
+  try {
+    const [snapshot, flags] = await Promise.all([api.scanSnapshot(), api.getFlags()]);
+    if (generation !== scanGeneration) return;
+    if (opts?.force) imageCache = {};
+    scanResultsAll = snapshot.all;
+    scanResults = snapshot.repeated;
+    reconcileImageCache();
+    flaggedList = flags;
+    flaggedKeys = new Set(flags.flatMap(folder => folder.bases.map(base => key(folder.dir, base))));
+    updateFlaggedBadge();
+    renderFoldersList();
+    if (currentFolder) {
+      if (reviewMode === 'general') renderGeneralCanvas(currentFolder);
+      else renderGroupsCanvas(currentFolder);
+    }
+    updateStatusbar();
+    const status = document.getElementById('status-left');
+    status.title = snapshot.warnings.map(entry => entry.path + ': ' + entry.error).join('\n');
+    if (snapshot.warnings.length) status.textContent = snapshot.warnings.length + ' folders could not be scanned — hover for details';
+  } catch (error) {
+    if (generation !== scanGeneration) return;
+    document.getElementById('status-left').textContent = 'Scan failed: ' + error.message;
+  } finally {
+    if (generation === scanGeneration) buttons.forEach(button => button.disabled = false);
   }
-  updateStatusbar();
 }
 
 // ---------------------------------------------------------------- REVIEW MODE SWITCH

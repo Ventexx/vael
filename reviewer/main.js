@@ -185,202 +185,33 @@ ipcMain.handle('toggle-folder-hidden', (_, folder) => {
 // that ComfyUI appends — and keeps only groups with more than one file,
 // since those are the only ones that need a human decision.
 // ---------------------------------------------------------------------------
-const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
-// e.g. "base_B_7_00001_.png" -> base "base_B_7", iteration 1
-const ITER_RE = /^(.+)_(\d{3,})_?\.(png|jpe?g|webp|bmp|gif)$/i;
-
-// Plain .sort() on base names is lexicographic, so "B10" ends up before
-// "B2" (character-by-character, '1' < '2'). The trailing run of digits in a
-// base name is meant to be read as one number, so use locale-aware numeric
-// comparison instead -- this puts "B2" before "B10" like a human would.
+const { Worker } = require('node:worker_threads');
+const scanJobs = new Set();
+function scanSnapshot() {
+  const config = loadConfig();
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, 'scanner.js'), { workerData: config });
+    scanJobs.add(worker);
+    let delivered = false;
+    worker.once('message', result => { delivered = true; resolve(result); });
+    worker.once('error', reject);
+    worker.once('exit', code => {
+      scanJobs.delete(worker);
+      if (!delivered) reject(new Error('Folder scan stopped before returning results (exit ' + code + ').'));
+    });
+  });
+}
+ipcMain.handle('scan-snapshot', scanSnapshot);
+ipcMain.handle('scan', async () => (await scanSnapshot()).repeated);
+ipcMain.handle('scan-all', async () => (await scanSnapshot()).all);
 function naturalCompare(a, b) {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
 }
 
-function shouldIgnoreDir(name) {
-  return name.startsWith('.') || name.startsWith('!');
-}
-
-// ---------------------------------------------------------------------------
-// Directory-listing cache: keyed by absolute directory path, holds the last
-// fs.readdirSync result plus the directory's own mtime at the time it was
-// read. A directory's mtime changes whenever an entry is added, removed, or
-// renamed inside it (true on both Windows/NTFS and POSIX filesystems), so
-// checking that one stat lets a rescan skip re-reading (and re-grouping) any
-// subtree that hasn't actually changed, instead of doing a full
-// fs.readdirSync + regex-group pass on every folder on every rescan --
-// which matters now that rescans happen automatically rather than only when
-// the user asks for one. Editing an existing file's *contents* without
-// renaming it doesn't bump the parent directory's mtime, but that's fine
-// here: grouping only cares about which filenames exist, not their bytes.
-const dirListCache = new Map(); // dir -> { mtimeMs, entries }
-
-function directoryKey(dir) {
-  const resolved = path.resolve(dir);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-function canonicalRoot(dir) {
-  try { return fs.realpathSync.native(dir); }
-  catch { return path.resolve(dir); }
-}
-function listDirCached(dir, seen) {
-  const cacheKey = directoryKey(dir);
-  if (seen) seen.add(cacheKey);
-  let stat;
-  try {
-    stat = fs.statSync(dir);
-  } catch (e) {
-    return null;
-  }
-  const cached = dirListCache.get(cacheKey);
-  if (cached && cached.mtimeMs === stat.mtimeMs) return cached.entries;
-  let entries;
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    return null;
-  }
-  dirListCache.set(cacheKey, { mtimeMs: stat.mtimeMs, entries });
-  return entries;
-}
-
-// Drops cache entries for directories that weren't visited in the scan pass
-// that just finished -- folders that got deleted, renamed, or unwatched --
-// so the cache can't grow without bound as folder trees get restructured
-// over a long-running session.
-function pruneDirListCache(seen) {
-  for (const dir of dirListCache.keys()) {
-    if (!seen.has(dir)) dirListCache.delete(dir);
-  }
-}
-
-function scanDir(dir, out, seen, hidden) {
-  if (seen.has(directoryKey(dir)) || hidden.has(directoryKey(dir))) return;
-  const entries = listDirCached(dir, seen);
-  if (!entries) return;
-
-  const files = [];
-  for (const e of entries) {
-    if (e.isDirectory()) {
-      if (shouldIgnoreDir(e.name)) continue;
-      scanDir(path.join(dir, e.name), out, seen, hidden);
-    } else if (e.isFile()) {
-      if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
-    }
-  }
-  if (!files.length) return;
-
-  const groups = {};
-  for (const name of files) {
-    const m = name.match(ITER_RE);
-    if (!m) continue;
-    const base = m[1];
-    const iter = parseInt(m[2], 10);
-    (groups[base] = groups[base] || []).push({ name, iter });
-  }
-
-  const multi = {};
-  for (const base in groups) {
-    if (groups[base].length > 1) {
-      groups[base].sort((a, b) => a.iter - b.iter);
-      multi[base] = groups[base];
-    }
-  }
-  if (Object.keys(multi).length) out.push({ dir, groups: multi });
-}
-
-ipcMain.handle('scan', async (_, opts) => {
-  // force: true means "throw the directory-listing cache away and re-read
-  // everything from disk", used by the renderer's manual full rescan. The
-  // cache is keyed by each directory's own mtime, which doesn't change when
-  // a file inside it is edited/replaced in place without being renamed --
-  // so a targeted invalidation can't catch that case; wiping it entirely is
-  // the only way to guarantee a from-scratch scan actually re-reads.
-  if (opts && opts.force) dirListCache.clear();
-  const cfg = loadConfig();
-  const out = [];
-  const seen = new Set();
-  const hidden = new Set(cfg.hiddenFolders.map(folder => directoryKey(canonicalRoot(folder))));
-  for (const root of cfg.folders) {
-    scanDir(canonicalRoot(root), out, seen, hidden);
-  }
-  pruneDirListCache(seen);
-  out.sort((a, b) => a.dir.localeCompare(b.dir));
-  return out;
-});
-
-// ---------------------------------------------------------------------------
-// General-review scan. Same recursion/exclusion rules as scanDir above, but
-// this one is for browsing *everything* rather than just what needs a
-// requeue decision: every folder that contains at least one image is
-// included, and every base name becomes a group -- singletons (no iteration
-// suffix, or only one file) included -- instead of only groups with 2+
-// files. Files that don't match the iteration-suffix pattern at all fall
-// back to using their own filename (minus extension) as the base, so they
-// still show up as their own one-image "set".
-//
-// Also returns `order`: the same files flattened into a single flat list,
-// sorted by base then by iteration number, so the renderer can lay out a
-// folder's whole image wall with every set's iterations kept contiguous
-// (needed for the "scroll to this set" behavior in general review).
-// ---------------------------------------------------------------------------
-function scanAllDir(dir, out, seen, hidden) {
-  if (seen.has(directoryKey(dir)) || hidden.has(directoryKey(dir))) return;
-  const entries = listDirCached(dir, seen);
-  if (!entries) return;
-
-  const files = [];
-  for (const e of entries) {
-    if (e.isDirectory()) {
-      if (shouldIgnoreDir(e.name)) continue;
-      scanAllDir(path.join(dir, e.name), out, seen, hidden);
-    } else if (e.isFile()) {
-      if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
-    }
-  }
-  if (!files.length) return;
-
-  const groups = {};
-  for (const name of files) {
-    const m = name.match(ITER_RE);
-    let base, iter;
-    if (m) {
-      base = m[1];
-      iter = parseInt(m[2], 10);
-    } else {
-      base = name.replace(/\.[^.]+$/, '');
-      iter = 1;
-    }
-    (groups[base] = groups[base] || []).push({ name, iter });
-  }
-
-  const order = [];
-  for (const base of Object.keys(groups).sort(naturalCompare)) {
-    groups[base].sort((a, b) => a.iter - b.iter);
-    for (const entry of groups[base]) order.push({ base, name: entry.name, iter: entry.iter });
-  }
-
-  out.push({ dir, groups, order });
-}
-
-ipcMain.handle('scan-all', async (_, opts) => {
-  if (opts && opts.force) dirListCache.clear();
-  const cfg = loadConfig();
-  const out = [];
-  const seen = new Set();
-  const hidden = new Set(cfg.hiddenFolders.map(folder => directoryKey(canonicalRoot(folder))));
-  for (const root of cfg.folders) {
-    scanAllDir(canonicalRoot(root), out, seen, hidden);
-  }
-  pruneDirListCache(seen);
-  out.sort((a, b) => a.dir.localeCompare(b.dir));
-  return out;
-});
-
 ipcMain.handle('read-image', async (_, dir, name) => {
   try {
     const filePath = path.join(dir, name);
-    const buf = fs.readFileSync(filePath);
+    const buf = await fs.promises.readFile(filePath);
     const ext = path.extname(filePath).slice(1).toLowerCase();
     const mime = ext === 'jpg' ? 'jpeg' : ext;
     return `data:image/${mime};base64,${buf.toString('base64')}`;
@@ -403,32 +234,15 @@ ipcMain.handle('read-image', async (_, dir, name) => {
 // original filename. The renderer calls this from an image's `dragstart`
 // after calling preventDefault() to suppress the default HTML5 drag.
 // ---------------------------------------------------------------------------
-ipcMain.on('start-drag', (event, dir, name) => {
+ipcMain.on('start-drag', async (event, dir, name) => {
   try {
     const filePath = path.join(dir, name);
-    if (!fs.existsSync(filePath)) return;
-
-    // Use the image itself as the drag icon when possible (nicer UX, and
-    // avoids depending on the packaged app icons existing under every
-    // platform); fall back to the app icon, then to an empty icon, since
-    // startDrag requires an `icon` to be passed.
-    let icon = nativeImage.createFromPath(filePath);
-    if (!icon.isEmpty()) {
-      const size = icon.getSize();
-      const maxDim = 200;
-      if (size.width > maxDim || size.height > maxDim) {
-        const scale = maxDim / Math.max(size.width, size.height);
-        icon = icon.resize({ width: Math.round(size.width * scale), height: Math.round(size.height * scale) });
-      }
-    } else {
-      const fallbackIconPath = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
-      icon = fs.existsSync(fallbackIconPath) ? nativeImage.createFromPath(fallbackIconPath) : nativeImage.createEmpty();
-    }
-
-    event.sender.startDrag({ file: filePath, icon });
-  } catch (e) {
-    // Non-fatal -- worst case the drag silently does nothing and the user
-    // tries again, same as any other transient drag/OS hiccup.
+    await fs.promises.access(filePath);
+    const iconPath = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+    const icon = nativeImage.createFromPath(iconPath);
+    if (!event.sender.isDestroyed()) event.sender.startDrag({ file: filePath, icon });
+  } catch (error) {
+    if (!event.sender.isDestroyed()) event.sender.send('operation-error', 'Could not drag ' + name + ': ' + error.message);
   }
 });
 
@@ -495,7 +309,8 @@ app.on('window-all-closed', () => {
   // directory-listing cache has no reason to hold onto anything once
   // there's no window around to ask for a rescan.
   for (const k in flags) delete flags[k];
-  dirListCache.clear();
+  for (const worker of scanJobs) worker.terminate();
+  scanJobs.clear();
   if (process.platform !== 'darwin') app.quit();
 });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

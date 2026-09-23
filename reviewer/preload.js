@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleFolderHidden: (folder) => ipcRenderer.invoke('toggle-folder-hidden', folder),
 
   scan: (opts) => ipcRenderer.invoke('scan', opts),
+  scanSnapshot: () => ipcRenderer.invoke('scan-snapshot'),
   scanAll: (opts) => ipcRenderer.invoke('scan-all', opts),
   readImage: (dir, name) => ipcRenderer.invoke('read-image', dir, name),
   deleteFiles: (items) => ipcRenderer.invoke('delete-files', items),
