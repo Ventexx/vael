@@ -670,6 +670,7 @@ let flaggedKeys = new Set();       // `${dir}||${base}`
 
 let currentFolder = null;          // dir of the character currently shown in the canvas
 let imageCache = {};               // key -> [{name, iter, dataUrl}], loaded lazily per set
+let imageGeneration = 0;
 let expandedGroups = new Set();    // keys currently expanded in the canvas list
 let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
 let markedForDeletion = {};        // key -> Set(filenames)
@@ -771,13 +772,13 @@ async function init() {
 function reconcileImageCache() {
   const onDiskFiles = new Map(); // key(dir,base) -> Set(filenames currently on disk)
   for (const f of scanResultsAll) {
-    for (const base in f.groups) onDiskFiles.set(key(f.dir, base), new Set(f.groups[base].map(e => e.name)));
+    for (const base in f.groups) onDiskFiles.set(key(f.dir, base), new Map(f.groups[base].map(e => [e.name, e.version])));
   }
   for (const k in imageCache) {
     const onDisk = onDiskFiles.get(k);
     if (!onDisk) { delete imageCache[k]; continue; } // set no longer exists at all
     const cached = imageCache[k];
-    const sameFiles = cached.length === onDisk.size && cached.every(im => onDisk.has(im.name));
+    const sameFiles = cached.length === onDisk.size && cached.every(im => onDisk.has(im.name) && onDisk.get(im.name) === im.version);
     if (!sameFiles) delete imageCache[k]; // membership changed -- reload fresh next time it's needed
   }
 }
@@ -793,6 +794,8 @@ async function refreshAll(opts) {
   try {
     const [snapshot, flags] = await Promise.all([api.scanSnapshot(), api.getFlags()]);
     if (generation !== scanGeneration) return;
+    imageGeneration++;
+    closeFocus();
     if (opts?.force) imageCache = {};
     scanResultsAll = snapshot.all;
     scanResults = snapshot.repeated;
@@ -1479,14 +1482,16 @@ function activeFolderData(dir) {
 
 async function ensureImagesLoaded(dir, base) {
   const k = key(dir, base);
+  const generation = imageGeneration;
   if (!imageCache[k]) {
     const folderData = activeFolderData(dir);
     const entries = (folderData && folderData.groups[base]) || [];
     const images = [];
     for (const e of entries) {
       const dataUrl = await api.readImage(dir, e.name);
-      images.push({ name: e.name, iter: e.iter, dataUrl });
+      images.push({ name: e.name, iter: e.iter, version: e.version, dataUrl });
     }
+    if (generation !== imageGeneration) return [];
     imageCache[k] = images;
   }
   return imageCache[k];

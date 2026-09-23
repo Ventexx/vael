@@ -29,7 +29,11 @@ function scanLibrary(config) {
       } else if (entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase())) {
         const match = entry.name.match(iteration);
         const base = match ? match[1] : entry.name.replace(/\.[^.]+$/, '');
-        (groups[base] ||= []).push({ name: entry.name, iter: match ? Number(match[2]) : 1, iteration: !!match });
+        try {
+          const stat = fs.statSync(path.join(dir, entry.name));
+          const version = JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
+          (groups[base] ||= []).push({ name: entry.name, iter: match ? Number(match[2]) : 1, iteration: !!match, version });
+        } catch (error) { warnings.push({ path: path.join(dir, entry.name), error: error.message }); }
       }
     }
     const order = [];
