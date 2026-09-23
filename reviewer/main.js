@@ -215,15 +215,24 @@ function shouldIgnoreDir(name) {
 // here: grouping only cares about which filenames exist, not their bytes.
 const dirListCache = new Map(); // dir -> { mtimeMs, entries }
 
+function directoryKey(dir) {
+  const resolved = path.resolve(dir);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+function canonicalRoot(dir) {
+  try { return fs.realpathSync.native(dir); }
+  catch { return path.resolve(dir); }
+}
 function listDirCached(dir, seen) {
-  if (seen) seen.add(dir);
+  const cacheKey = directoryKey(dir);
+  if (seen) seen.add(cacheKey);
   let stat;
   try {
     stat = fs.statSync(dir);
   } catch (e) {
     return null;
   }
-  const cached = dirListCache.get(dir);
+  const cached = dirListCache.get(cacheKey);
   if (cached && cached.mtimeMs === stat.mtimeMs) return cached.entries;
   let entries;
   try {
@@ -231,7 +240,7 @@ function listDirCached(dir, seen) {
   } catch (e) {
     return null;
   }
-  dirListCache.set(dir, { mtimeMs: stat.mtimeMs, entries });
+  dirListCache.set(cacheKey, { mtimeMs: stat.mtimeMs, entries });
   return entries;
 }
 
@@ -245,7 +254,8 @@ function pruneDirListCache(seen) {
   }
 }
 
-function scanDir(dir, out, seen) {
+function scanDir(dir, out, seen, hidden) {
+  if (seen.has(directoryKey(dir)) || hidden.has(directoryKey(dir))) return;
   const entries = listDirCached(dir, seen);
   if (!entries) return;
 
@@ -253,7 +263,7 @@ function scanDir(dir, out, seen) {
   for (const e of entries) {
     if (e.isDirectory()) {
       if (shouldIgnoreDir(e.name)) continue;
-      scanDir(path.join(dir, e.name), out, seen);
+      scanDir(path.join(dir, e.name), out, seen, hidden);
     } else if (e.isFile()) {
       if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
     }
@@ -290,9 +300,9 @@ ipcMain.handle('scan', async (_, opts) => {
   const cfg = loadConfig();
   const out = [];
   const seen = new Set();
+  const hidden = new Set(cfg.hiddenFolders.map(folder => directoryKey(canonicalRoot(folder))));
   for (const root of cfg.folders) {
-    if (cfg.hiddenFolders.includes(root)) continue;
-    scanDir(root, out, seen);
+    scanDir(canonicalRoot(root), out, seen, hidden);
   }
   pruneDirListCache(seen);
   out.sort((a, b) => a.dir.localeCompare(b.dir));
@@ -314,7 +324,8 @@ ipcMain.handle('scan', async (_, opts) => {
 // folder's whole image wall with every set's iterations kept contiguous
 // (needed for the "scroll to this set" behavior in general review).
 // ---------------------------------------------------------------------------
-function scanAllDir(dir, out, seen) {
+function scanAllDir(dir, out, seen, hidden) {
+  if (seen.has(directoryKey(dir)) || hidden.has(directoryKey(dir))) return;
   const entries = listDirCached(dir, seen);
   if (!entries) return;
 
@@ -322,7 +333,7 @@ function scanAllDir(dir, out, seen) {
   for (const e of entries) {
     if (e.isDirectory()) {
       if (shouldIgnoreDir(e.name)) continue;
-      scanAllDir(path.join(dir, e.name), out, seen);
+      scanAllDir(path.join(dir, e.name), out, seen, hidden);
     } else if (e.isFile()) {
       if (IMG_EXT.has(path.extname(e.name).toLowerCase())) files.push(e.name);
     }
@@ -357,9 +368,9 @@ ipcMain.handle('scan-all', async (_, opts) => {
   const cfg = loadConfig();
   const out = [];
   const seen = new Set();
+  const hidden = new Set(cfg.hiddenFolders.map(folder => directoryKey(canonicalRoot(folder))));
   for (const root of cfg.folders) {
-    if (cfg.hiddenFolders.includes(root)) continue;
-    scanAllDir(root, out, seen);
+    scanAllDir(canonicalRoot(root), out, seen, hidden);
   }
   pruneDirListCache(seen);
   out.sort((a, b) => a.dir.localeCompare(b.dir));
