@@ -118,6 +118,10 @@ and collapsible panels. Preserve the established style when adding controls.
   - I12 / `d933402`: version-aware, 32 MiB / 1,024-entry decoded-image cache;
     background QImage decoding; GUI-thread QPixmap conversion; stale requests
     discarded; viewer previews capped at 2,048 pixels per side.
+- Fixed the startup-script dependency regression: Indexer's requirements now include
+  Pillow (`PIL`), needed by the owner's metadata extractor in Indexer's environment.
+  Verified the PIL import and extractor `--help` through the actual ScriptRunner;
+  the owner's image library was not processed during this check.
 - The owner's tested folder-focus feature was included separately in `14e082a`.
   Expanded results and note sections scroll into view; state restoration does not
   trigger focus scrolling. User Cover edits present during this work were left intact.

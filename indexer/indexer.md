@@ -118,6 +118,8 @@ Persistent identifiers live in the asset's `Identifier` JSON field. Temporary me
 
 ## startup scripts
 
+Indexer setup includes Pillow (the `PIL` module) for the metadata extractor. If you maintain the environment manually, reinstall `requirements.txt` after updating.
+
 Scripts run sequentially with the **same Python interpreter as Indexer**, using each script's parent folder as its working directory. Install their dependencies in that environment. Arguments are passed directly, without a command shell; quote paths containing spaces. Shell operators, environment-variable expansion, and redirection are not interpreted.
 
 A failure stops the sequence and shows the filename, exit code, and up to the last 16 KiB of captured output. Automatic indexing does not continue after failure or cancellation. Fix the script and retry **Reload Database → with Scripts**, or choose a database/reload without scripts when you want to proceed independently.
