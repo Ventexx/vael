@@ -2638,6 +2638,7 @@ async function importFolderAsCategory(folderName, images) {
   selectImage(startAt);
   if (state.galleryState === 'hidden') setGalleryState('side');
   setStatus(`Imported ${ok.length} image${ok.length === 1 ? '' : 's'} into "${folderName}"`, true);
+  return categoryId;
 }
 // Auto-incrementing default name so a batch-import can be confirmed by
 // hitting Enter without ever having to type anything.
@@ -3741,10 +3742,21 @@ async function onDrop(e) {
       const dirPaths = new Set(inspected.filter(r => r.isDirectory).map(r => r.path));
       if (dirPaths.size) {
         const looseFiles = files.filter(f => !f.path || !dirPaths.has(f.path));
+        let importedCategories = 0;
         for (const dir of inspected.filter(r => r.isDirectory)) {
-          await importFolderAsCategory(dir.name, dir.images);
+          const categoryId = await importFolderAsCategory(dir.name, dir.images);
+          if (categoryId != null) importedCategories++;
         }
         if (looseFiles.length) await addImages(looseFiles);
+        if (importedCategories > 1) {
+          // Begin the same top-to-bottom order used by auto-next after saving.
+          const firstCategory = state.categories.find(cat =>
+            state.images.some(img => img.categoryId === cat.id));
+          if (firstCategory) {
+            selectImage(state.images.findIndex(img => img.categoryId === firstCategory.id));
+            $('filmstrip-track').scrollLeft = 0;
+          }
+        }
         return;
       }
     }

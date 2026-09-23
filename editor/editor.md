@@ -34,6 +34,8 @@ to be expanded
 
 Launch the app, then either drag images/folders onto the canvas or use the open-file / open-folder buttons in the top bar. Pick a tool, make a selection, apply a filter from the left toolbar, and save.
 
+When one drop creates multiple folder categories, import finishes by selecting the first image in the topmost nonempty category and returning its filmstrip to the beginning, ready for top-to-bottom auto-advance.
+
 There is a full list of hotkeys (including any custom preset hotkeys you've assigned) available in-app via the hotkey guide button in the toolbar.
 
 ---
