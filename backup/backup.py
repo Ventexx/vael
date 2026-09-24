@@ -1561,16 +1561,45 @@ class HistoryManager:
             "history write failed after %d attempts (%s); writing durable pending record instead",
             HISTORY_RETRY_ATTEMPTS, last_exc,
         )
-        pending_path = self.history_dir / f".{HISTORY_FILENAME}.pending.{meta.get('run_id', uuid.uuid4().hex)}.json"
-        pending_path.write_text(json.dumps({"entry_text": entry_text, "meta": meta}), encoding="utf-8")
+        pending_path = self.history_dir / f".{HISTORY_FILENAME}.pending.{meta.get('run_id', 'unknown')}.{uuid.uuid4().hex}.json"
+        tmp = pending_path.with_suffix(".tmp")
+        with open(tmp, "x", encoding="utf-8") as fh:
+            json.dump({"entry_text": entry_text, "meta": meta}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, pending_path)
         return False
 
     def next_run_id(self) -> int:
-        """One higher than the highest run_id seen in history so far, or
-        1 if there's no history yet — run IDs are monotonically
-        increasing, never reused."""
-        entries = self.read_entries()
-        return (max((e.run_id for e in entries), default=0)) + 1
+        """Reserve a shared run ID before work starts. Gaps after failed
+        or interrupted runs are intentional; IDs must never be reused."""
+        counter = self.history_dir / f".{HISTORY_FILENAME}.sequence"
+        with _CrossPlatformLock(self.lock_path):
+            highest = max((e.run_id for e in self.read_entries()), default=0)
+            if counter.exists():
+                try:
+                    reserved = int(counter.read_text(encoding="utf-8"))
+                    if reserved < 0:
+                        raise ValueError("negative sequence")
+                except ValueError as exc:
+                    raise BackupError(f"Invalid history run sequence: {counter}") from exc
+                highest = max(highest, reserved)
+            for pending in self._pending_paths():
+                try:
+                    payload = json.loads(pending.read_text(encoding="utf-8"))
+                    pending_id = payload["meta"]["run_id"]
+                    if type(pending_id) is int:
+                        highest = max(highest, pending_id)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+            run_id = highest + 1
+            tmp = counter.with_name(counter.name + f".{uuid.uuid4().hex}.tmp")
+            with open(tmp, "x", encoding="utf-8") as fh:
+                fh.write(str(run_id))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, counter)
+            return run_id
 
     # -- reading -----------------------------------------------------
 

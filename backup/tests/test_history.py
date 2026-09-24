@@ -80,6 +80,45 @@ def test_next_run_id_starts_at_one_when_empty(tmp_path):
     assert mgr.next_run_id() == 1
 
 
+def test_run_ids_reserved_before_history_is_written(tmp_path):
+    assert HistoryManager(tmp_path).next_run_id() == 1
+    assert HistoryManager(tmp_path).next_run_id() == 2
+
+
+def test_run_ids_include_unrecovered_pending_records(tmp_path):
+    pending = tmp_path / f".{HISTORY_FILENAME}.pending.42.json"
+    pending.write_text(json.dumps({"entry_text": "pending", "meta": {"run_id": 42}}))
+    assert HistoryManager(tmp_path).next_run_id() == 43
+
+
+def test_separate_processes_reserve_distinct_ids(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = "from backup import HistoryManager; from pathlib import Path; import sys; print(HistoryManager(Path(sys.argv[1])).next_run_id())"
+    processes = [subprocess.Popen([sys.executable, "-c", script, str(tmp_path)],
+                                 cwd=Path(__file__).resolve().parents[1],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for _ in range(6)]
+    ids = []
+    for process in processes:
+        out, err = process.communicate(timeout=30)
+        assert process.returncode == 0, err
+        ids.append(int(out))
+    assert sorted(ids) == list(range(1, 7))
+
+
+def test_pending_records_cannot_overwrite_each_other(tmp_path, monkeypatch):
+    import backup
+    monkeypatch.setattr(backup, "HISTORY_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(backup, "HISTORY_RETRY_BACKOFF_SECONDS", ())
+    mgr = HistoryManager(tmp_path)
+    monkeypatch.setattr(mgr, "_prepend_raw", lambda text: (_ for _ in ()).throw(OSError("blocked")))
+    assert mgr.record("first\n", {"run_id": 1}) is False
+    assert mgr.record("second\n", {"run_id": 1}) is False
+    assert len(mgr._pending_paths()) == 2
+
+
 def test_latest_successful_requires_sha256(tmp_path):
     m1 = {"run_id": 1, "status": "SUCCESS", "operation": "NEW", "archive": "a",
           "backup_uuid": None, "backup_version": 1, "sha256": None, "start": "", "completed": ""}
