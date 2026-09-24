@@ -1507,10 +1507,18 @@ class HistoryManager:
         with _CrossPlatformLock(self.lock_path):
             for p in pending:
                 try:
-                    text = p.read_text(encoding="utf-8")
-                    self._prepend_raw(text)
+                    payload = json.loads(p.read_text(encoding="utf-8"))
+                    text = payload["entry_text"]
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("missing history entry text")
+                    # A crash after publication but before unlink must not
+                    # duplicate the record on the next recovery attempt.
+                    old = self.history_path.read_text(encoding="utf-8") if self.history_path.exists() else ""
+                    if text not in old:
+                        self._prepend_raw(text)
                     p.unlink()
-                except OSError:
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    logger.warning("Could not recover pending history %s: %s", p, exc)
                     continue  # leave for a future run
 
     # -- writing ---------------------------------------------------------

@@ -122,8 +122,31 @@ def test_record_writes_and_prepends(tmp_path):
 def test_reconcile_pending_merges_orphaned_pending_files(tmp_path):
     mgr = HistoryManager(tmp_path)
     pending_path = tmp_path / f".{HISTORY_FILENAME}.pending.99.json"
-    pending_path.write_text(json.dumps({"entry_text": "RECOVERED\n", "meta": {"run_id": 99}}), encoding="utf-8")
+    meta = {"run_id": 99, "status": "SUCCESS", "operation": "NEW",
+            "backup_uuid": "recovered-family", "backup_version": 3, "sha256": "recovered-sha"}
+    text = "RECOVERED\n[BACKUP_META] " + json.dumps(meta) + "\n"
+    pending_path.write_text(json.dumps({"entry_text": text, "meta": {"run_id": 99}}), encoding="utf-8")
     mgr.reconcile_pending()
     assert not pending_path.exists()
     content = (tmp_path / HISTORY_FILENAME).read_text()
-    assert "RECOVERED" in content
+    assert content == text
+    assert mgr.find_by_sha256("recovered-sha").backup_version == 3
+    assert mgr.next_run_id() == 100
+
+
+def test_recovery_preserves_damaged_pending_record(tmp_path):
+    pending = tmp_path / f".{HISTORY_FILENAME}.pending.bad.json"
+    pending.write_text('{broken', encoding="utf-8")
+    HistoryManager(tmp_path).reconcile_pending()
+    assert pending.read_text(encoding="utf-8") == '{broken'
+    assert not (tmp_path / HISTORY_FILENAME).exists()
+
+
+def test_recovery_after_publication_does_not_duplicate(tmp_path):
+    text = 'RECOVERED\n[BACKUP_META] {"run_id": 7}\n'
+    write_history(tmp_path, text)
+    pending = tmp_path / f".{HISTORY_FILENAME}.pending.7.json"
+    pending.write_text(json.dumps({"entry_text": text}), encoding="utf-8")
+    HistoryManager(tmp_path).reconcile_pending()
+    assert (tmp_path / HISTORY_FILENAME).read_text(encoding="utf-8") == text
+    assert not pending.exists()
