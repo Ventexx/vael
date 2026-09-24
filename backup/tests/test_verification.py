@@ -47,3 +47,70 @@ def test_unrelated_family_cannot_supply_checksum_match(tmp_path):
     result = make_verifier().verify(archive, history)
     assert result.match is None
     assert "UNKNOWN HISTORY" in result.summary
+
+
+def test_busy_archive_is_not_verified(tmp_path):
+    from backup import _CrossPlatformLock
+    archive = tmp_path / "a.7z"
+    archive.write_bytes(b"a")
+    verifier = make_verifier()
+    verifier.runner.test = lambda path: (_ for _ in ()).throw(AssertionError("must not read"))
+    with _CrossPlatformLock(tmp_path / ".a.7z.lock", blocking=False):
+        result = verifier.verify(archive, None)
+    assert not result.ok
+    assert result.integrity_pass is None
+    assert "busy" in result.summary
+
+
+def test_verification_holds_writer_lock_through_all_reads(tmp_path):
+    import pytest
+    from backup import _CrossPlatformLock, LockBusyError
+    archive = tmp_path / "a.7z"
+    archive.write_bytes(b"a")
+    verifier = make_verifier()
+    def test(path):
+        with pytest.raises(LockBusyError):
+            with _CrossPlatformLock(tmp_path / ".a.7z.lock", blocking=False):
+                pass
+        return SimpleNamespace(ok=True)
+    verifier.runner.test = test
+    assert verifier.verify(archive, None).ok
+    with _CrossPlatformLock(tmp_path / ".a.7z.lock", blocking=False):
+        pass
+
+
+def test_external_replacement_cannot_report_success(tmp_path):
+    import os
+    archive = tmp_path / "a.7z"
+    archive.write_bytes(b"old")
+    verifier = make_verifier()
+    def test(path):
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"new content")
+        os.replace(replacement, path)
+        return SimpleNamespace(ok=True)
+    verifier.runner.test = test
+    result = verifier.verify(archive, None)
+    assert not result.ok
+    assert "changed during verification" in result.summary
+
+
+def test_missing_manifest_is_not_success(tmp_path):
+    archive = tmp_path / "a.7z"
+    archive.write_bytes(b"a")
+    verifier = make_verifier()
+    verifier.manifest_mgr.read_from_archive = lambda *args: None
+    result = verifier.verify(archive, None)
+    assert result.integrity_pass is True
+    assert not result.ok
+    assert "MANIFEST" in result.summary
+
+
+def test_read_error_returns_incomplete_result(tmp_path):
+    archive = tmp_path / "a.7z"
+    archive.write_bytes(b"a")
+    verifier = make_verifier()
+    verifier.runner.test = lambda path: (_ for _ in ()).throw(OSError("read denied"))
+    result = verifier.verify(archive, None)
+    assert not result.ok
+    assert "read denied" in result.summary

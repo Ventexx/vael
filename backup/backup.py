@@ -1841,14 +1841,17 @@ class VerificationResult:
     history_available: bool
     summary: str
 
+    @property
+    def ok(self) -> bool:
+        return self.integrity_pass is True and self.manifest_ok
+
 
 class VerificationManager:
     """Implements `--verify`: checks an archive's 7-Zip integrity
     (`7z t`), confirms it contains a valid `manifest.json`, computes its
     SHA-256, and — if a history file is available — compares that
-    checksum against the most recent recorded SUCCESS entry. Read-only:
-    never modifies the archive, and safe to run concurrently with a
-    `--new`/`--update` against the same archive (see EXIT_CODES.md).
+    checksum against the latest SUCCESS in its backup family. Holds the
+    same archive lock as writers so all checks inspect one generation.
     """
 
     def __init__(self, runner: SevenZipRunner, manifest_mgr: ManifestManager):
@@ -1858,6 +1861,28 @@ class VerificationManager:
         self.manifest_mgr = manifest_mgr
 
     def verify(self, archive: Path, history: Optional[HistoryManager]) -> VerificationResult:
+        archive = archive.resolve()
+        try:
+            with _CrossPlatformLock(archive.parent / f".{archive.name}.lock", blocking=False):
+                before = archive.stat()
+                if history:
+                    history.reconcile_pending()
+                result = self._verify_locked(archive, history)
+                after = archive.stat()
+                fingerprint = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                if fingerprint(before) != fingerprint(after):
+                    raise BackupError("Archive changed during verification; retry after the writer finishes.")
+                return result
+        except LockBusyError:
+            reason = "Archive is busy with another backup or verification; retry when it finishes."
+        except (OSError, BackupError) as exc:
+            reason = str(exc)
+        logger.error("verify incomplete: %s (%s)", reason, archive)
+        return VerificationResult(archive.exists(), None, False, None, None, False,
+                                  bool(history and history.history_path.exists()),
+                                  f"VERIFICATION INCOMPLETE: {reason}")
+
+    def _verify_locked(self, archive: Path, history: Optional[HistoryManager]) -> VerificationResult:
         """Run the full read-only verification: 7-Zip integrity test,
         manifest presence/validity, SHA-256 computation, and (if
         `history` is provided and has a prior SUCCESS entry) a checksum
@@ -1887,6 +1912,8 @@ class VerificationManager:
 
         if not integrity_pass:
             summary = "ARCHIVE INTEGRITY FAILURE"
+        elif not manifest_ok:
+            summary = "BACKUP MANIFEST MISSING OR INVALID"
         elif not history_available:
             summary = "ARCHIVE VERIFIED, HISTORICAL COMPARISON UNAVAILABLE"
         elif match and is_latest:
@@ -2445,7 +2472,7 @@ def _print_verification(result: VerificationResult) -> None:
     if not result.archive_exists:
         print(result.summary)
         return
-    print(f"7-Zip integrity: {'PASS' if result.integrity_pass else 'FAIL'}")
+    print(f"7-Zip integrity: {'NOT COMPLETED' if result.integrity_pass is None else 'PASS' if result.integrity_pass else 'FAIL'}")
     print(f"Manifest:        {'PASS' if result.manifest_ok else 'FAIL/MISSING'}")
     print(f"SHA-256:         {result.sha256}")
     print(f"History:         {'available' if result.history_available else 'UNAVAILABLE'}")
@@ -2525,7 +2552,7 @@ def _interactive_menu(app_dir: Path) -> int:
         history = HistoryManager(history_dir)
         result = verifier.verify(archive, history)
         _print_verification(result)
-        return 0 if result.integrity_pass else 4
+        return 0 if result.ok else 4
     else:
         print("Goodbye.")
         return 0
@@ -2621,7 +2648,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             history = HistoryManager(history_dir)
             result = verifier.verify(Path(args.verify), history)
             _print_verification(result)
-            return 0 if result.integrity_pass else 4
+            return 0 if result.ok else 4
 
         # No command given -> interactive mode (Section 29).
         return _interactive_menu(app_dir)
