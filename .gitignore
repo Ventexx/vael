@@ -26,9 +26,6 @@ builder-effective-config.yaml
 .metadata_cache.json
 **/.pytest_cache/
 
-# Local Cover regression checks
-cover/tests/
-
 # app-generated logs
 **/logs/
 *.log
