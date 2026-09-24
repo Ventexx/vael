@@ -1,70 +1,70 @@
 # cover
 
-A desktop front end for running ComfyUI workflows with local image inputs.
+<!-- cover -->
+<img src="./icon.png" alt="cover icon" width="128">
 
-## Start
+---
 
-Run `start.bat` on Windows or `start.sh` on Linux from this folder. For an
-existing Python environment, install `requirements.txt` and run `python app.py`.
+A desktop companion for ComfyUI. Browse your image folders, assign inputs to saved workflows, and run individual jobs or a queue from one compact workspace.
 
-In Settings, choose the ComfyUI server and the local output folder. Add a
-workflow saved in ComfyUI's API format, assign its image inputs in the roster,
-and select **Run** or **Add to Queue**. The workflow's Save Image node determines
-where ComfyUI actually writes its results; Cover's output folder is a local
-folder to browse, not a remote download destination.
+---
 
-## Queue and reconnecting
+## features
 
-- **Run Queue** processes waiting jobs once, in order. A failed job stays in
-  the list and does not block later jobs. Hover over it to read the error.
-- **Retry Failed** explicitly retries failed jobs. It does not resubmit jobs
-  whose outcome is still unknown.
-- **Check Pending** reconnects to submitted jobs using their existing ComfyUI
-  prompt IDs. A monitoring timeout does not mean the server stopped the job.
-- If a submission response is lost before Cover receives a prompt ID, the
-  queue shows **Submission unknown**. Check ComfyUI before clearing that entry
-  and creating another run.
-- For an individual run, press **Run** again after a monitoring timeout to check
-  the existing job. If the submission response was lost, Cover asks before
-  allowing a new submission.
-- Repeated Run clicks or shortcuts cannot start a second execution while the
-  current worker is still active.
+- keep several ComfyUI workflows available and switch between them
+- browse local image folders with thumbnails and a larger image viewer
+- assign images to workflow input slots through the Input Roster
+- adjust exposed workflow parameters before running
+- run one workflow or process queued jobs in order
+- retry failed jobs and check jobs whose server status is still pending
+- reconnect to submitted jobs without automatically submitting duplicates
+- browse generated PNGs in a chosen local output folder
+- move selected output files, or all PNGs in that folder, to the system trash
+- background output scanning and thumbnail loading
+- keyboard shortcuts for workflows, folders, queue actions, and sidebars
+- save workflow settings and the window layout between launches
 
-Closing during an active run asks for confirmation. Cover stops local monitoring,
-waits for the current network request and worker cleanup, then closes. Already
-submitted jobs can continue on the server. Closing does not cancel ComfyUI jobs.
+---
 
-## Outputs
+## installation & removal
 
-The Outputs panel lists PNGs directly inside the configured local output folder.
-Refresh scans in the background, retains unchanged previews and selection, and
-reloads previews when a file's modification time or size changes. Only nearby
-visible thumbnails are decoded, with at most 128 thumbnails retained.
+**Install**
 
-Use Ctrl/Shift selection and **Trash Selected**, or **Trash All PNGs**. The
-confirmation names the folder and file count. These actions cover the chosen
-files regardless of which app created them. Failed trash operations are reported
-and never fall back to permanent deletion.
+1. Install [Python](https://www.python.org/downloads/). Enable **Add Python to PATH** if the installer offers it.
+2. Download Vael using **Code → Download ZIP** on GitHub, then extract it.
+3. Open the `cover` folder. On Windows, double-click `start.bat`. On Linux, open a terminal in this folder and run `bash start.sh`.
+4. Wait while the launcher creates a local `venv` folder, downloads the required packages, and opens the app.
 
-## Local state
+Use the same launcher each time. Internet access is needed when it installs or updates packages. The `start_silent` variants are alternate launchers without the normal console output.
 
-`workflows_config.json` beside the app stores settings, workflow definitions,
-parameter values, and layout. Queue items, prompt IDs, and assigned input images
-are session-only. They are not restored after restarting Cover.
+ComfyUI must be installed and running separately. In Cover's Settings, enter its server address and choose the local output folder to browse. Add workflows exported in ComfyUI's **API format**; Cover does not install the models or extra nodes they require.
 
-## Local regression checks
+**Uninstall**
 
-The development checks in `cover/tests/` are kept locally and excluded from Git.
-They are not included in a fresh checkout. If that local test directory is present,
-run the checks as follows.
+Close Cover and delete its `cover` folder, including `venv`. Move any workflow files or output images you have kept inside that folder somewhere safe first. ComfyUI and image folders elsewhere are separate from this installation.
 
-From the repository root:
+---
+
+## local data
+
+- `workflows_config.json`, beside `app.py`, stores settings, workflow references, parameter values, and layout.
+- Workflow JSON files and input images stay wherever you put them; the app remembers their locations.
+- Generated images are saved by ComfyUI. Cover's output-folder setting selects a local folder to browse; it does not change where ComfyUI saves or download remote results.
+- Queue entries, submitted-job IDs, and assigned input images last only for the current session.
+
+Closing Cover stops its local monitoring. Jobs already submitted can continue on ComfyUI.
+
+---
+
+## file structure
 
 ```text
-python -B -m unittest discover -s cover/tests -v
+app.py                       — the desktop app
+requirements.txt             — packages needed by the app
+start.bat / start.sh          — Windows / Linux setup and launch
+start_silent.bat / .sh        — alternate launchers
+cover.md                     — this guide
+icon.png / .ico               — app icons
+workflows_config.json        — your saved settings; created locally
+venv/                        — downloaded Python packages; created by the launcher
 ```
-
-The checks use mocked ComfyUI requests, temporary files, and an offscreen Qt
-window. They do not load your configuration, submit real jobs, or trash your
-images. Real-server integration and OS trash behavior still need verification
-on the intended environment.
