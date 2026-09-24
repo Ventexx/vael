@@ -34,7 +34,11 @@ to be expanded
 
 Launch the app, then either drag images/folders onto the canvas or use the open-file / open-folder buttons in the top bar. Pick a tool, make a selection, apply a filter from the left toolbar, and save.
 
-When one drop creates multiple folder categories, import finishes by selecting the first image in the topmost nonempty category and returning its filmstrip to the beginning, ready for top-to-bottom auto-advance.
+Folder imports discover filenames first and show their categories before generating previews. When one drop creates multiple categories, Editor selects the first image in the topmost nonempty category and returns its filmstrip to the beginning, ready for top-to-bottom auto-advance.
+
+Two background workers load previews, prioritizing the category currently shown in the filmstrip. The status bar shows overall preview progress and a failure count. You can edit immediately while the remaining previews load, including when the window is minimized. Completing previews does not change your current image or overwrite edited thumbnails. Unreadable images stay listed; selecting one attempts to open the original and reports failure if it cannot be read.
+
+Folder scope is unchanged: direct images plus images in immediate subfolders, grouped into one category per dropped folder. Full editing pixels are loaded on selection. Thumbnail decoding uses at most two concurrent jobs, but large source images still require temporary decoder memory; this is not a total-process memory cap.
 
 There is a full list of hotkeys (including any custom preset hotkeys you've assigned) available in-app via the hotkey guide button in the toolbar.
 

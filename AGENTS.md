@@ -97,6 +97,17 @@ and collapsible panels. Preserve the established style when adding controls.
   retention is not general metadata preservation. Final file-version checks are
   not a cross-application lock. Linux, production-scale peak RAM, and power-loss
   durability were not verified. See `editor/editor.md` for the detailed limits.
+- Owner-approved Editor folder loading improvement: asynchronous filename discovery
+  shows categories before previews; two background thumbnail workers prioritize the
+  visible category. Imports continue in hidden/minimized windows with overall
+  preview progress and failure counts. Multi-folder imports start at the topmost
+  nonempty category; finishing previews does not interrupt editing or navigation.
+  Late previews cannot replace edited thumbnails, and removed images are skipped.
+  Direct images plus one subfolder level remain the import scope. Worker files are
+  included in packaged builds. A local hidden Electron check passed with 30 folders
+  of 80 generated images, category priority, edit preservation, unreadable/missing
+  files, removed entries, folder scope/order, shutdown, and minimum-width layout.
+  Synthetic small images establish behavior, not production-scale speed or RAM.
 
 - Indexer reliability fixes I1-I8 and I12 were implemented and pushed:
   - I1 / `35013e1`: folder metadata refreshes even with no changed image/JSON pairs.

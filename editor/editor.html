@@ -721,6 +721,7 @@
     <div id="sb-progress-track"><div id="sb-progress-fill"></div></div>
     <span id="sb-file" onclick="openMetaPanel()" title="Click for image info">—</span>
     <span id="sb-status">Ready</span>
+    <span id="sb-import" role="status" style="color:var(--text-dim); white-space:nowrap"></span>
     <input id="sb-zoom" type="text" value="" onchange="setZoomInput(this.value)" title="Zoom %">
   </div>
 
@@ -789,6 +790,7 @@
 <!-- CATEGORY CONTEXT MENU: right-click a category pill -->
 <div id="context-menu"></div>
 
+<script src="thumbnail-queue.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════
 // STATE
@@ -2325,6 +2327,10 @@ async function hydrateImage(img) {
     if (cached) img.mask = cached.mask;
     updateUnsaved(img);
     img._lazy = false;
+    updateThumbCanvas(img);
+    if (img._thumbWrap) {
+      img._thumbWrap.style.width = `${Math.max(22, Math.min(160, Math.round(FS_THUMB_H * w / h)))}px`;
+    }
     await touchHydrated(img);
   })();
   try { return await img._hydrating; } finally { img._hydrating = null; }
@@ -2420,7 +2426,7 @@ function fitImage(animate = true) {
   if (!state.images.length || state.activeIdx < 0) return;
   const cw = wrap.clientWidth, ch = wrap.clientHeight;
   const img = state.images[state.activeIdx];
-  if (!img) return;
+  if (!img || !img.w || !img.h) return;
   state.zoom = Math.min((cw - 40) / img.w, (ch - 40) / img.h, 1);
   state.panX = (cw - img.w * state.zoom) / 2;
   state.panY = (ch - img.h * state.zoom) / 2;
@@ -2512,27 +2518,45 @@ function loadImageFile(file) {
     reader.readAsDataURL(file);
   });
 }
-// Builds a lazy stub for a folder-imported image. Unlike loadImageFromSrc,
-// there's no full-res data at all here yet — main.js only sent back a small
-// pre-made thumbnail (via nativeImage) plus the real dimensions, so this is
-// essentially free even for thousands of images at once. The full pixels get
-// fetched from disk (electronAPI.readImageFull) only once this image is
-// actually opened, edited, or exported (see hydrateImage).
+// Folder discovery returns filenames only. Keep lightweight entries immediately
+// usable while the background queue fills their thumbnails.
 function makeLazyStub(item) {
-  return new Promise(resolve => {
-    const stub = {
-      name: item.name, path: item.path, unsaved: false, w: item.w || 0, h: item.h || 0,
-      canvas: null, ctx: null, src: null, _fullSrcDirty: false,
-      mask: null, categoryId: null,
-      history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
-    };
-    if (!item.thumbDataUrl) { resolve(stub); return; }
-    const t = new Image();
-    t.onload = () => { updateThumbCanvas(stub, t); resolve(stub); };
-    t.onerror = () => resolve(stub); // missing thumbnail isn't fatal, just shows an empty box
-    t.src = item.thumbDataUrl;
-  });
+  return {
+    name: item.name, path: item.path, unsaved: false, w: 0, h: 0,
+    canvas: null, ctx: null, src: null, _fullSrcDirty: false,
+    mask: null, categoryId: null,
+    history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
+  };
 }
+let thumbnailProgress = { total: 0, done: 0, failed: 0 };
+function updateImportProgressDisplay() {
+  const { total, done, failed } = thumbnailProgress;
+  const pending = done < total;
+  const label = $('sb-import');
+  label.textContent = total ? (pending ? `Previews ${done}/${total}` : `Previews complete: ${done}/${total}`) +
+    (failed ? ` (${failed} failed)` : '') : '';
+  label.title = failed ? 'Some previews could not load. Select an affected image to retry opening its original.' :
+    'Images can be edited while previews load in the background.';
+  const count = state._importTotal || total;
+  const complete = state._importTotal ? state._importDone : done;
+  $('sb-progress-fill').style.width = count && complete < count ? `${Math.round(complete / count * 100)}%` : '0%';
+}
+const thumbnailQueue = new ThumbnailQueue({
+  read: path => window.electronAPI.readThumbnailSource(path),
+  priority: img => img.categoryId === state.categoryFilter,
+  apply: (img, result) => {
+    // An edit, hydration, or saved session copy is newer than this disk preview.
+    if (!img._lazy || img._hydrating || img._sessionKey || img.canvas) return;
+    img.w = result.w; img.h = result.h;
+    updateThumbCanvas(img, result.bitmap);
+    if (img._thumbWrap) {
+      img._thumbWrap.style.width = `${Math.max(22, Math.min(160, Math.round(FS_THUMB_H * img.w / img.h)))}px`;
+    }
+  },
+  progress: value => { thumbnailProgress = value; updateImportProgressDisplay(); },
+});
+window.addEventListener('beforeunload', () => thumbnailQueue.close());
+
 // ────────────────────────────────────────────────────────────────────
 // BACKGROUND IMPORT PROGRESS
 // A folder or multi-file drop can be hundreds/thousands of images. Each one
@@ -2540,25 +2564,25 @@ function makeLazyStub(item) {
 // back-to-back with nothing yielding to the browser is exactly what makes
 // the whole UI lock up mid-import. loadImagesWithProgress() below loads in
 // small concurrent batches and hands control back to the browser
-// (via requestAnimationFrame) between batches, so the UI keeps painting —
+// (via a timer) between batches, without waiting for a visible window —
 // and updates the status bar + progress line after every batch so the
 // person can see it's working instead of wondering if it's frozen.
 function beginImportProgress(total) {
   state._importTotal = total;
   state._importDone = 0;
-  $('sb-progress-fill').style.width = '0%';
+  updateImportProgressDisplay();
   setStatus(`Importing images [0/${total}]`, true);
 }
 function bumpImportProgress(justFinished) {
   state._importDone += justFinished;
   const { _importDone: done, _importTotal: total } = state;
-  $('sb-progress-fill').style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+  updateImportProgressDisplay();
   setStatus(`Importing images [${done}/${total}]`, true);
 }
 function endImportProgress() {
   state._importTotal = 0;
   state._importDone = 0;
-  $('sb-progress-fill').style.width = '0%';
+  updateImportProgressDisplay();
 }
 const IMPORT_BATCH_SIZE = 6;
 async function loadImagesWithProgress(items, loaderFn) {
@@ -2574,7 +2598,7 @@ async function loadImagesWithProgress(items, loaderFn) {
       // Yield to the browser so it can paint the updated status/progress bar
       // and stay responsive to input, instead of running every batch back
       // to back in one uninterrupted stretch of synchronous work.
-      await new Promise(resolve => requestAnimationFrame(resolve));
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   } finally {
     endImportProgress();
@@ -2595,7 +2619,7 @@ async function addImages(files) {
   if (newImgs.length > 1) promptNameCategory(startAt, newImgs.length);
 }
 // Whole-folder open (Electron only): main process reads the directory and
-// hands back {name, path, dataUrl} for every image so the renderer never
+// hands back {name, path} for every image so the renderer never
 // needs raw filesystem access. This is the primary way to start a shoot —
 // one dialog instead of manually multi-selecting files. A folder always
 // becomes its own category named after the folder — no naming prompt, since
@@ -2612,33 +2636,37 @@ async function triggerOpenFolder() {
   }
   if (!result) { setStatus('Open folder cancelled', false); return; }
   const folderName = result.dir.split(/[\\/]/).pop() || result.dir;
-  await importFolderAsCategory(folderName, result.images);
+  importFolders([{ name: folderName, images: result.images }]);
 }
-// Loads a whole folder's worth of images (from either the Open Folder dialog
-// or a folder dropped from the OS) and files them straight into a brand-new
-// category named after the folder. Deliberately skip-the-prompt: with
-// hundreds or thousands of images, asking "which category?" per import is
-// exactly the friction this is meant to remove, and dumping them into the
-// Unsorted bucket would make that bucket unusable at scale.
-async function importFolderAsCategory(folderName, images) {
-  if (!images || !images.length) { setStatus(`No images found in "${folderName}"`, false); return; }
-  const startAt = state.images.length;
-  const loaded = await loadImagesWithProgress(images, makeLazyStub);
-  const ok = loaded.filter(Boolean);
-  if (!ok.length) { setStatus(`Failed to load images from "${folderName}"`, false); return; }
-  ok.forEach(img => state.images.push(img));
-  const categoryId = addCategory(folderName);
-  assignImagesToCategory(Array.from({ length: ok.length }, (_, k) => startAt + k), categoryId);
-  // Focus the filmstrip on the category we just created — without this the
-  // filmstrip filter stayed on whatever it was before (usually "unsorted"),
-  // so a freshly imported folder/batch would file correctly into its new
-  // category but never actually show up until the person went and clicked
-  // that category's pill themselves.
-  state.categoryFilter = categoryId;
-  selectImage(startAt);
+// Register all discovered folders before any preview decoding. Focus once,
+// rather than opening a full-resolution image from every folder in turn.
+function importFolders(folders) {
+  const imported = [];
+  let categoryCount = 0;
+  for (const folder of folders) {
+    if (!folder.images?.length) continue;
+    const categoryId = addCategory(folder.name);
+    for (const item of folder.images) {
+      const img = makeLazyStub(item);
+      img.categoryId = categoryId;
+      state.images.push(img);
+      imported.push(img);
+    }
+    categoryCount++;
+  }
+  if (!imported.length) { setStatus('No images found in the selected folders', false); return 0; }
   if (state.galleryState === 'hidden') setGalleryState('side');
-  setStatus(`Imported ${ok.length} image${ok.length === 1 ? '' : 's'} into "${folderName}"`, true);
-  return categoryId;
+  if (categoryCount > 1) focusFirstCategory();
+  else selectImage(state.images.indexOf(imported[0]));
+  thumbnailQueue.add(imported);
+  return categoryCount;
+}
+function focusFirstCategory() {
+  const firstCategory = state.categories.find(cat => state.images.some(img => img.categoryId === cat.id));
+  if (firstCategory) {
+    selectImage(state.images.findIndex(img => img.categoryId === firstCategory.id));
+    $('filmstrip-track').scrollLeft = 0;
+  }
 }
 // Auto-incrementing default name so a batch-import can be confirmed by
 // hitting Enter without ever having to type anything.
@@ -2677,7 +2705,7 @@ function categoryPromptAction(action) {
   const name = $('category-prompt-new-input').value.trim() || nextDefaultImportName();
   const categoryId = addCategory(name);
   assignImagesToCategory(indices, categoryId);
-  // Same fix as importFolderAsCategory: jump the filmstrip filter to the
+  // Like folder imports, jump the filmstrip filter to the
   // category these images just got filed into, instead of leaving it on
   // whatever it was showing before (typically "unsorted", where none of
   // these newly-categorized images appear anymore).
@@ -2785,7 +2813,7 @@ function removeImage(idx) {
 // categories behind on next launch.
 // ════════════════════════════════════════════════════════════════════
 function addCategory(name) {
-  const id = 'cat' + Date.now() + Math.floor(Math.random() * 1000);
+  const id = 'cat' + crypto.randomUUID();
   const trimmed = (name || '').trim();
   state.categories.push({ id, name: trimmed || null, customName: !!trimmed });
   return id;
@@ -3116,7 +3144,7 @@ function renderFilmstrip() {
   indices.forEach(i => {
     const img = state.images[i];
     const thumb = ensureThumbWrap(img);
-    thumb.title = img.name;
+    thumb.title = img.name + (img._thumbnailError ? ` — Preview unavailable: ${img._thumbnailError}` : '');
     // Real aspect ratio, not a forced 16:9 (or any other) box — a vertical
     // shot shows up as a tall sliver, a panorama as a wide strip.
     const ratio = img.w && img.h ? img.w / img.h : 1;
@@ -3736,26 +3764,17 @@ async function onDrop(e) {
   if (window.electronAPI?.inspectDroppedPaths && withPaths.length) {
     let inspected = null;
     try {
+      setStatus('Discovering folders…', true);
       inspected = await window.electronAPI.inspectDroppedPaths(withPaths.map(f => f.path));
     } catch (e) { inspected = null; }
     if (inspected) {
       const dirPaths = new Set(inspected.filter(r => r.isDirectory).map(r => r.path));
       if (dirPaths.size) {
         const looseFiles = files.filter(f => !f.path || !dirPaths.has(f.path));
-        let importedCategories = 0;
-        for (const dir of inspected.filter(r => r.isDirectory)) {
-          const categoryId = await importFolderAsCategory(dir.name, dir.images);
-          if (categoryId != null) importedCategories++;
-        }
-        if (looseFiles.length) await addImages(looseFiles);
-        if (importedCategories > 1) {
-          // Begin the same top-to-bottom order used by auto-next after saving.
-          const firstCategory = state.categories.find(cat =>
-            state.images.some(img => img.categoryId === cat.id));
-          if (firstCategory) {
-            selectImage(state.images.findIndex(img => img.categoryId === firstCategory.id));
-            $('filmstrip-track').scrollLeft = 0;
-          }
+        const importedCategories = importFolders(inspected.filter(r => r.isDirectory));
+        if (looseFiles.length) {
+          await addImages(looseFiles);
+          if (importedCategories > 1) focusFirstCategory();
         }
         return;
       }

@@ -39,6 +39,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false, // Finish imports even while minimized.
       preload: path.join(__dirname, 'preload.js'),
     },
   });
@@ -62,65 +63,20 @@ ipcMain.on('win-close',    () => { win.destroy(); app.quit(); });
 // Open a whole folder of images at once (core workflow: batch-pixelate a shoot)
 const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 
-// How big (long edge, px) the thumbnails we hand back to the renderer are.
-// This only needs to comfortably cover the filmstrip thumbnail's max on-screen
-// size (~160x60 CSS px at up to 2x devicePixelRatio == ~320px) — it does NOT
-// need to be anywhere near full resolution, because the renderer no longer
-// keeps every opened image's full-size pixels in memory (see editor.html's
-// lazy-load/eviction code). Keeping this small is what makes it possible to
-// import thousands of images without stalling or exhausting memory.
-const THUMB_MAX_PX = 480;
-
-// Used to keep the main process responsive (it also owns the window/dialogs)
-// while walking a folder with hundreds or thousands of files: after this many
-// files we yield back to the event loop for a tick before continuing.
-const YIELD_EVERY = 25;
-function yieldToEventLoop() {
-  return new Promise(resolve => setImmediate(resolve));
-}
-
-// Reads every image directly inside `dir` — one directory, non-recursive —
-// and returns lightweight entries — {name, path, w, h, thumbDataUrl} —
-// instead of the full-resolution file bytes.
-//
-// This used to fs.readFileSync + base64-encode the FULL file for every image
-// up front, all in one synchronous pass, and hand the entire batch back to
-// the renderer in a single IPC message. That's fine for a couple dozen
-// photos; for 10 folders totaling 1-2k images it means gigabytes of base64
-// built up in memory and one enormous IPC payload — which is exactly what
-// was crashing (or freezing, then getting killed as unresponsive) the app.
-// Now we only ever produce small thumbnails here (via Electron's native
-// nativeImage decoder/resizer, so no giant intermediate buffers), and the
-// renderer fetches a given image's real bytes lazily, one at a time, only
-// once it's actually opened or edited (see 'read-image-full' below).
+// Discover paths first; thumbnails are requested separately by renderer workers.
+// No image decoding or synchronous filesystem walk on the window's main thread.
 async function readImagesInSingleDir(dir) {
   let entries;
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    return null;
-  }
-  const names = entries
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
+  catch { return null; }
+  return entries
     .filter(e => e.isFile() && IMG_EXT.has(path.extname(e.name).toLowerCase()))
     .map(e => e.name)
-    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-  const images = [];
-  for (let i = 0; i < names.length; i++) {
-    const name = names[i];
-    const filePath = path.join(dir, name);
-    try {
-      const full = nativeImage.createFromPath(filePath);
-      const { width, height } = full.getSize();
-      if (!width || !height) continue; // unreadable/corrupt image, skip it
-      const thumb = width > THUMB_MAX_PX || height > THUMB_MAX_PX
-        ? full.resize(width >= height ? { width: THUMB_MAX_PX } : { height: THUMB_MAX_PX })
-        : full;
-      images.push({ name, path: filePath, w: width, h: height, thumbDataUrl: thumb.toDataURL() });
-    } catch (e) { /* skip unreadable file */ }
-    if (i % YIELD_EVERY === 0) await yieldToEventLoop();
-  }
-  return images;
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    .map(name => ({ name, path: path.join(dir, name) }));
 }
+
+ipcMain.handle('read-thumbnail-source', (_, filePath) => fs.promises.readFile(filePath));
 
 // Shared by the dialog-based "Open Folder" button and by drag-and-drop of a
 // folder from the OS file explorer. Reads images out of `dir` two layers
@@ -140,7 +96,7 @@ async function readImagesFromDir(dir) {
 
   let subdirNames;
   try {
-    subdirNames = fs.readdirSync(dir, { withFileTypes: true })
+    subdirNames = (await fs.promises.readdir(dir, { withFileTypes: true }))
       .filter(e => e.isDirectory())
       .map(e => e.name)
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
@@ -174,14 +130,13 @@ ipcMain.handle('open-folder', async () => {
 // hands them here; we stat each one and, for directories, read their images
 // the same way "Open Folder" does, so a dropped folder becomes its own
 // category with no further prompting. Multiple folders dropped at once
-// (e.g. 10 at a time) are handled fine now since each only produces
-// thumbnails, not full image data.
+// return paths only, so categories appear before thumbnail decoding starts.
 ipcMain.handle('inspect-dropped-paths', async (_, paths) => {
   const results = [];
   for (const p of paths || []) {
     let stat;
     try {
-      stat = fs.statSync(p);
+      stat = await fs.promises.stat(p);
     } catch (e) {
       results.push({ path: p, isDirectory: false });
       continue;
