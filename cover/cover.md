@@ -45,6 +45,31 @@ Close Cover and delete its `cover` folder, including `venv`. Move any workflow f
 
 ---
 
+## usage
+
+### prepare a compatible workflow
+
+Cover is designed around **ComfyUI workflows that take one or more image inputs and produce a single final image per run**. Prepare and try the workflow in ComfyUI first, with its models and custom nodes installed on the server.
+
+- Export the workflow as **API-format JSON**, not the ordinary editor-layout JSON. Cover needs the executable node information.
+- Use the standard **Load Image** (`LoadImage`) or **Load Image Mask** (`LoadImageMask`) nodes for inputs you want to assign in Cover. These become the Input Roster's slots; custom image-loading nodes are not automatically recognized.
+- Connect the workflow to a **Save Image** node to keep the result on disk. A preview alone does not put a saved image in Cover's output folder.
+- Keep the workflow focused on the intended single-image result. Cover checks that ComfyUI produced an image, but it does not enforce exactly one output or choose among multiple outputs for you.
+
+### load and run
+
+1. Start ComfyUI. In Cover's **Settings**, enter that server's address and select the local output folder you want to browse.
+2. Create a workflow entry and choose its exported API JSON file.
+3. If needed, enter one node's **ID or title** in the optional extra-fields setting. Cover exposes that node's plain text and number values; connected inputs and on/off values are not editable through these controls.
+4. Assign an image to every detected input slot in the **Input Roster**. Cover uploads those images to ComfyUI when submitting the job.
+5. Choose **Run**, or **Add to Queue** and then **Run Queue** for several prepared jobs.
+
+ComfyUI's Save Image node controls where results are written. Cover's Outputs panel browses PNGs directly inside the configured local folder; choose a matching folder and refresh it to see results. A remote ComfyUI server's output needs to be accessible locally, such as through a mounted shared folder—Cover does not download it automatically.
+
+Use **Retry Failed** for failed queue jobs and **Check Pending** to reconnect to submitted jobs. If a submission is marked **unknown**, check ComfyUI before submitting it again: the server may already be running it.
+
+---
+
 ## local data
 
 - `workflows_config.json`, beside `app.py`, stores settings, workflow references, parameter values, and layout.
