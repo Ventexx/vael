@@ -1642,23 +1642,25 @@ class HistoryManager:
                 )
         return entries
 
-    def latest_successful(self) -> Optional[HistoryEntry]:
+    def latest_successful(self, backup_uuid: Optional[str] = None) -> Optional[HistoryEntry]:
         """Most recent entry with status SUCCESS and a recorded SHA-256 —
         used by `--verify` as the known-good checksum to compare the
         current archive against. Returns None if there's no history yet
         or no successful run has ever completed.
         """
-        for e in self.read_entries():
-            if e.status == "SUCCESS" and e.sha256:
-                return e
-        return None
+        entries = [e for e in self.read_entries()
+                   if e.status == "SUCCESS" and e.sha256
+                   and (backup_uuid is None or e.backup_uuid == backup_uuid)]
+        if backup_uuid is not None:
+            return max(entries, key=lambda e: (e.backup_version or 0, e.run_id), default=None)
+        return entries[0] if entries else None
 
-    def find_by_sha256(self, sha256: str) -> Optional[HistoryEntry]:
+    def find_by_sha256(self, sha256: str, backup_uuid: Optional[str] = None) -> Optional[HistoryEntry]:
         """The most recent SUCCESS entry whose recorded checksum matches
         `sha256`, if any — used by `--verify` to confirm the current
         archive corresponds to a known-good prior run."""
         for e in self.read_entries():
-            if e.status == "SUCCESS" and e.sha256 == sha256:
+            if e.status == "SUCCESS" and e.sha256 == sha256 and (backup_uuid is None or e.backup_uuid == backup_uuid):
                 return e
         return None
 
@@ -1879,9 +1881,9 @@ class VerificationManager:
         manifest_ok = manifest is not None
 
         history_available = history is not None and history.history_path.exists()
-        match = history.find_by_sha256(sha) if (history and history_available) else None
-        latest = history.latest_successful() if (history and history_available) else None
-        is_latest = bool(match and latest and match.run_id == latest.run_id)
+        match = history.find_by_sha256(sha, manifest.backup_uuid) if (history and history_available and manifest) else None
+        latest = history.latest_successful(manifest.backup_uuid) if (history and history_available and manifest) else None
+        is_latest = bool(match and latest and match.backup_version == latest.backup_version and match.sha256 == latest.sha256)
 
         if not integrity_pass:
             summary = "ARCHIVE INTEGRITY FAILURE"
