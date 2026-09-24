@@ -1,6 +1,6 @@
 # Vael: project context and improvement backlog
 
-Last updated: 2026-09-23.
+Last updated: 2026-09-24.
 
 ## Read this first
 
@@ -172,6 +172,40 @@ and collapsible panels. Preserve the established style when adding controls.
   abrupt power loss, and production-size lists were not verified. Details are in
   `checklist/checklist.md` (`4cca095`).
 
+- Reviewer reliability fixes R1-R7 were implemented and pushed individually:
+  - R1 / `61e9ff9`: rescans no longer preload the full image library.
+  - R2 / `c1280fe`: visible-area thumbnail loading, background decoding, 384-pixel
+    previews, and a 32 MiB / 512-entry retained cache. Focus loads asynchronously,
+    discards stale navigation results, and releases old image URLs. Reads reject
+    encoded files over 64 MiB; card rendering is batched across frames.
+  - R3 / `2ca5719`: background worker scans produce one snapshot for both modes;
+    asynchronous image reads, scan warnings, failure recovery, and stale-result
+    suppression keep the main process responsive.
+  - R4 / `3d61932`: only successful trash results clear marks; failed/unconfirmed
+    files retain retry marks and report per-file errors. Flags survive execution.
+  - R5 / `0bebec1`: file-size and timestamp versions invalidate replaced previews
+    during ordinary rescans; image reads reject stale versions.
+  - R6 / `fa513d2`: shortcuts stay inside Reviewer; review keys leave text fields
+    and open dialogs alone. Startup resolves the UI relative to the app directory.
+  - R7 / `bf42822`: canonical paths deduplicate overlapping roots and aliases;
+    explicitly hidden descendants remain excluded when a parent is watched.
+- Reviewer follow-ups: title-bar close saves window state (`2d100f7`), failed drag
+  operations report their path (`2ab1b08`), and structured mark/flag keys preserve
+  exact paths containing delimiter characters (`605c4d3`). Usage notes and limits
+  are documented in `reviewer/reviewer.md` (`9454606`).
+- Twelve local Reviewer checks passed in actual offscreen Electron on Windows:
+  partial trash failures, shortcut scope, overlapping roots, background scans,
+  stale scan results, replacement previews, cache bounds/coalescing, visible-only
+  loading, focus cleanup, window-state saving, drag errors, and exact trash paths.
+  A General review screenshot was inspected. Tests remain outside the repository.
+  Trash outcomes were mocked; actual OS trash and successful external drag delivery
+  were not verified. The delimiter-path check mocked a Linux-valid path on Windows.
+- Reviewer limits: marks and flags remain session-only. Freshness uses file stats,
+  requires rescan, and is not a cross-application lock. Cache estimates are not a
+  total-process RAM limit; original focus images and transient decoding can use
+  substantial memory. Linux/macOS, network drives, packaged installers, and
+  production-scale peak memory were not verified.
+
 ## All remaining optional improvements from the review
 
 IDs refer to the original brainstorming review. None of the following is a blanket
@@ -293,7 +327,8 @@ Test the outcomes the owner relies on:
   output refresh/trash behavior. Existing local checks cover these with mocks.
 - Indexer: local checks now cover incremental metadata refresh, failed/stale writes,
   rollback, background search/paging, script failures/cancellation, previews, and shutdown.
-- Reviewer: partial trash failures and cache freshness.
+- Reviewer: local checks now cover partial trash failures, cache freshness/bounds,
+  background scans, root deduplication, shortcut scope, focus, and window-state saving.
 - Checklist: local checks now cover imports, storage errors, draft recovery,
   text/list undo, clear timing, deleted profiles, and cross-tab coordination.
 - Backup: pending recovery and shared-history behavior across archives.
@@ -304,7 +339,8 @@ establishes real-server or OS integration behavior.
 ### 4. Accurate documentation
 
 Indexer documentation now covers its renamed data directory, identifiers, OR search,
-paging, persistence, scripts, and preview limits. Reviewer's flags still need review.
+persistence, scripts, and preview limits. Reviewer's flags, scans, trash retries,
+and preview limits are documented in `reviewer/reviewer.md`; keep it current.
 Editor's batch/save/cache
 behavior is now documented in `editor/editor.md`; keep it current.
 Cover now has `cover/cover.md`; keep it current. Review backup recovery instructions
@@ -330,19 +366,20 @@ specific sequence of clicks and clearly show which files/jobs are being handed o
 
 ## Remaining correctness findings: quick orientation
 
-These were identified in the review and remain after the Cover, Editor, Indexer, and Checklist work. Verify
+These were identified in the review and remain after the Cover, Editor, Indexer,
+Checklist, and Reviewer work. Verify
 them against the current implementation before fixing them.
 
 | App | Findings |
 | --- | --- |
-| reviewer | R1 full-memory rescan; R2 unbounded full-resolution cache; R3 blocking scans/reads; R4 failed trash marks cleared; R5 stale replaced-file previews; R6 global shortcuts; R7 overlapping-root duplicates |
 | backup | B1 pending recovery writes its JSON wrapper; B2 recovery test misses that bug; B3 shared-history run-ID race; B4 latest comparison not scoped by backup family; B5 verification races archive replacement; B6 failures after publication need accurate outcome reporting |
 
 Editor E1-E7 are complete. E8-E12 remain optional and unapproved.
 Indexer I1-I8 and I12 are complete. I9-I11 and I13 remain optional and unapproved.
 Checklist L1-L6, L11, and L12 are complete. L7-L10 remain optional and unapproved.
-The strongest next correctness candidates are backup B1-B2 and reviewer R4-R5;
-choose the next app with the owner before starting it.
+Reviewer R1-R7 are complete. R8-R12 remain optional and unapproved.
+Backup B1-B6 are the remaining correctness findings, with B1-B2 the strongest
+starting candidates. Confirm the next app with the owner before starting it.
 
 ## New feature candidates for owner review
 
