@@ -217,6 +217,46 @@ and collapsible panels. Preserve the established style when adding controls.
   substantial memory. Linux/macOS, network drives, packaged installers, and
   production-scale peak memory were not verified.
 
+- Backup reliability fixes B1-B6 were implemented and pushed:
+  - B1-B2 / `dd9150a`: pending recovery extracts the actual history entry from
+    its JSON wrapper; tests assert exact content, readable checksum/version data,
+    run-ID continuity, damaged-record preservation, and repeat recovery without
+    duplicate entries after a publication/unlink interruption.
+  - B3 / `ffc7ae1`: reserve IDs atomically under the shared history lock using
+    `.backup_history.txt.sequence`; include outstanding pending IDs and retain
+    intentional gaps after interruption. Pending filenames are unique and written
+    through flushed temporary files, preventing concurrent record overwrites.
+  - B4 / `40c24f9`: verification selects history by manifest backup UUID and
+    version, so unrelated archives and recovered older entries cannot change the
+    latest-version result; moved archives keep their family identity.
+  - B5 / `89d9fd8`: verification holds the archive writer lock through integrity,
+    hash, and manifest checks; file identity/timestamp changes reject inconsistent
+    reads. Busy/read failures return incomplete verification; missing manifests
+    no longer produce a successful verification exit code.
+  - B6 / `7fcf8c2`: prepare history details before publication and distinguish
+    published archive outcomes from pre-publication failures. Exit 5 means a
+    pending recovery record was saved; new exit 6 means publication succeeded
+    but history and its recovery record could not be saved. The result includes
+    the archive path, version, and checksum. Failed-run history errors retain the
+    original failure instead of replacing it with a traceback.
+- A related concurrent-archive bug was fixed in `b0c77b3`: each manifest write
+  uses its own temporary directory, preventing separate archives from embedding
+  each other's metadata. Recovery and exit-code documentation was updated in
+  `backup/docs/` (`bc5f8d5` and `7fcf8c2`).
+- Backup's complete tracked regression suite passed: 98 passed, 2 skipped on
+  Windows with Python 3.14 and NanaZip 7.0 (2609.2), using its real 7-Zip-compatible
+  CLI on disposable source trees and archives. Checks include six-process run-ID
+  reservation, concurrent manifest isolation, new/update/verify, byte-preserving
+  publication failures, real archive extraction after injected history failures,
+  and recovery of successful records. Existing Backup tests remain tracked.
+  The two skipped checks require Linux root/runuser/testuser permission fixtures.
+- Backup limits: no power-loss or network-filesystem guarantees were established;
+  Linux/macOS were not exercised in this pass. Locks coordinate this utility's
+  processes; file fingerprints are not protection from arbitrary external writers.
+  Live source folders are not snapshots. Keep the sequence file with history;
+  preserve console output/logs after exit 6 because automatic history recovery is
+  not assured. Operational logging itself depends on writable storage.
+
 ## All remaining optional improvements from the review
 
 IDs refer to the original brainstorming review. None of the following is a blanket
@@ -342,7 +382,8 @@ Test the outcomes the owner relies on:
   background scans, root deduplication, shortcut scope, focus, and window-state saving.
 - Checklist: local checks now cover imports, storage errors, draft recovery,
   text/list undo, clear timing, deleted profiles, and cross-tab coordination.
-- Backup: pending recovery and shared-history behavior across archives.
+- Backup: tracked checks now cover pending recovery, shared-history ID reservation,
+  family comparisons, verification locks, publication outcomes, and manifest isolation.
 
 Follow the owner's test-tracking preference above. Do not claim a mocked test
 establishes real-server or OS integration behavior.
@@ -354,8 +395,8 @@ persistence, scripts, and preview limits. Reviewer's flags, scans, trash retries
 and preview limits are documented in `reviewer/reviewer.md`; keep it current.
 Editor's batch/save/cache
 behavior is now documented in `editor/editor.md`; keep it current.
-Cover now has `cover/cover.md`; keep it current. Review backup recovery instructions
-against the actual recovery implementation. Correct outdated names and file paths.
+Cover now has `cover/cover.md`; keep it current. Backup recovery instructions and
+exit codes in `backup/docs/` now reflect the implementation; keep them current.
 Checklist's themes, draft recovery, storage, import/export scope, and multi-tab
 behavior are documented in `checklist/checklist.md`; keep it current.
 
@@ -377,20 +418,18 @@ specific sequence of clicks and clearly show which files/jobs are being handed o
 
 ## Remaining correctness findings: quick orientation
 
-These were identified in the review and remain after the Cover, Editor, Indexer,
-Checklist, and Reviewer work. Verify
-them against the current implementation before fixing them.
+All recorded correctness findings from the original review are completed across
+Cover, Editor, Indexer, Checklist, Reviewer, and Backup. This records the reviewed
+scope and its test evidence, not a guarantee that no other bugs exist. Chess was
+outside this reliability pass. Optional improvements and cross-app proposals
+remain unapproved; obtain the owner's selection before implementing them.
 
-| App | Findings |
-| --- | --- |
-| backup | B1 pending recovery writes its JSON wrapper; B2 recovery test misses that bug; B3 shared-history run-ID race; B4 latest comparison not scoped by backup family; B5 verification races archive replacement; B6 failures after publication need accurate outcome reporting |
-
+Cover C1-C6 are complete. C7-C12 remain optional and unapproved.
 Editor E1-E7 are complete. E8-E12 remain optional and unapproved.
 Indexer I1-I8 and I12 are complete. I9-I11 and I13 remain optional and unapproved.
 Checklist L1-L6, L11, and L12 are complete. L7-L10 remain optional and unapproved.
 Reviewer R1-R7 are complete. R8-R12 remain optional and unapproved.
-Backup B1-B6 are the remaining correctness findings, with B1-B2 the strongest
-starting candidates. Confirm the next app with the owner before starting it.
+Backup B1-B6 are complete. B7-B12 remain optional and unapproved.
 
 ## New feature candidates for owner review
 
