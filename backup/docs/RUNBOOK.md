@@ -207,27 +207,10 @@ plain text. Redact paths first if you don't want that shared.
 
 ---
 
-## Test suite environment notes
+## Operational limits
 
-`tests/test_permissions.py` needs to run as root with a passwordless
-`testuser` account and `runuser` available — root bypasses permission bits
-entirely, so there's no way to test permission-denied behavior while running
-as root. If these tests are skipping and you expected them to run:
-```
-useradd -m -s /bin/bash testuser
-which runuser
-```
-
-`tests/test_integration.py` needs a real `7z`/`7za`/`7zr` on `PATH`. If those
-are skipping, install 7-Zip (`apt-get install p7zip-full` on Debian/Ubuntu,
-or the Windows/macOS equivalent).
-
-The September 2026 reliability pass passed 98 tests with 2 Linux-only permission
-checks skipped. It uses real Windows archives through NanaZip 7.0's 7-Zip-compatible
-CLI in temporary
-directories, plus injected storage failures. It covers recovery, concurrent run-ID
-reservation, family comparison, archive locking, external replacement detection,
-and publication/history outcomes. It does not establish power-loss durability,
-network-filesystem locking semantics, or a consistent snapshot of changing source
-files. The Linux permission tests are skipped on Windows. Optional restore/version
-retention features remain proposals in the root project backlog.
+Power-loss durability and network-filesystem locking behavior are not guaranteed.
+Live source folders are not consistent snapshots: files can change while a backup
+is being made. The archive lock coordinates this utility's processes, not arbitrary
+external writers. See `EXIT_CODES.md` for interpreting incomplete verification and
+history-persistence failures.

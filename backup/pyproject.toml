@@ -5,9 +5,6 @@ description = "Single-file 7-Zip-based backup utility"
 requires-python = ">=3.9"
 dependencies = []
 
-[project.optional-dependencies]
-dev = ["pytest>=8"]
-
 # Python version
 # The code uses `from __future__ import annotations`. Tested on 3.12 and 3.14.
 
