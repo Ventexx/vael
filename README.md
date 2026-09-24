@@ -5,28 +5,43 @@
 
 ---
 
-A small collection of minimal, single-purpose desktop tools. 
+A small collection of minimal, focused apps for everyday workflows.
 These apps are primarily built for myself to solve specific workflow challenges.
 
 ---
 
 ## the tools
 
+### [backup ›](./backup/README.md)
+<img src="./backup/icon.png" alt="backup icon" width="128">
+
+A local backup tool for keeping selected folders together in a compressed archive. Create or update backups, check their integrity, and keep a readable history of each run.
+
 ### [checklist ›](./checklist/checklist.md)
 ![checklist cover](./checklist/cover.png)
-A minimal to-do app for managing tasks with ease. Add, edit, reorder, and organize your tasks in a clean, distraction-free interface.
+A minimal browser-based to-do app for tasks, notes, and reusable lists. Organize work into sections, switch between saved profiles, and pick up unfinished drafts in a clean, distraction-free interface.
+
+### [chess ›](./chess/chess.md)
+<img src="./chess/icon.png" alt="chess icon" width="128">
+
+A desktop chess board for exploring positions and reviewing games. Connect a local analysis engine, step through moves, or mirror a board from a selected area of your screen.
+
+### [cover ›](./cover/cover.md)
+<img src="./cover/icon.png" alt="cover icon" width="128">
+
+A desktop companion for ComfyUI. Browse image folders, assign inputs to saved workflows, and run individual jobs or a queue from one compact workspace.
 
 ### [editor ›](./editor/editor.md)
 ![editor cover](./editor/cover.png)
-A dark, workflow-specific image editor built for one job: pixelating or blurring parts of a large batch of images, fast.
+A dark desktop image editor built for one job: pixelating or blurring parts of a large batch of images, fast. Organize images into categories, reuse filter presets, and save in PNG, JPEG, or WebP.
 
 ### [indexer ›](./indexer/indexer.md)
 ![indexer cover](./indexer/cover.png)
-A desktop app for browsing, searching, and editing structured data paired with visual assets — built for scanning folders of image + JSON pairs (e.g. AI-generated images with their prompt/tag metadata) into a fast, searchable visual library. Windows and Linux, with partial Wayland support.
+A desktop library for images and their accompanying information. Turn folders of image + JSON pairs into a searchable visual collection, with tags, identifiers, reusable notes, and quick access to the original files.
 
 ### [reviewer ›](./reviewer/reviewer.md)
 ![reviewer cover](./reviewer/cover.png)
-An image reviewer built to find and resolve requeued ComfyUI image sets. Point it at your output folders and it groups regenerated iterations of the same image together so you can quickly decide what to keep and what to trash.
+A desktop image reviewer for sorting through generated variations. Group repeated versions of an image, compare them, and decide what to keep, move to the trash, or flag for another run.
 
 ---
 
