@@ -7,6 +7,28 @@ def mgr():
     return ManifestManager()
 
 
+def test_concurrent_archives_use_independent_manifest_files(tmp_path):
+    import json
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from backup import ArchiveManager
+
+    barrier = threading.Barrier(2)
+    class Runner:
+        def add_files(self, archive, files, cwd, compression_level):
+            barrier.wait(timeout=5)
+            return json.loads((cwd / "manifest.json").read_text(encoding="utf-8"))["backup_uuid"]
+
+    manager = ArchiveManager(Runner())
+    manifests = [mgr().create([]), mgr().create([])]
+    scratch = tmp_path / "scratch"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [pool.submit(manager.write_manifest, tmp_path / f"{i}.7z", manifest, scratch)
+                for i, manifest in enumerate(manifests)]
+        assert [job.result() for job in jobs] == [m.backup_uuid for m in manifests]
+    assert list(scratch.iterdir()) == []
+
+
 def old_items(*pairs):
     # Simulates what a previously-written manifest.json would contain:
     # the *stringified* Path, not a raw literal. The real code always

@@ -78,6 +78,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1351,13 +1352,14 @@ class ArchiveManager:
     def write_manifest(self, archive: Path, manifest: Manifest, scratch_dir: Path) -> SevenZipResult:
         """Write `manifest.json` into `archive`'s root, via a scratch
         copy on disk (7-Zip adds files by path, not from an in-memory
-        string) — `scratch_dir` is created if needed and the manifest
-        file is written there first, then added at compression level 1
+        string) — each invocation gets a private directory beneath
+        `scratch_dir`, then adds its manifest at compression level 1
         (metadata; not worth compressing harder)."""
         scratch_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = scratch_dir / MANIFEST_FILENAME
-        manifest_path.write_text(manifest.to_json(), encoding="utf-8")
-        return self.runner.add_files(archive, [Path(MANIFEST_FILENAME)], cwd=scratch_dir, compression_level=1)
+        with tempfile.TemporaryDirectory(prefix="manifest-", dir=scratch_dir) as private:
+            work_dir = Path(private)
+            (work_dir / MANIFEST_FILENAME).write_text(manifest.to_json(), encoding="utf-8")
+            return self.runner.add_files(archive, [Path(MANIFEST_FILENAME)], cwd=work_dir, compression_level=1)
 
 
 # ======================================================================
