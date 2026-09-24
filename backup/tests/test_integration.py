@@ -459,3 +459,64 @@ def test_history_dir_override_used_by_new_and_update(tmp_path):
     history_text = (history_dir / "backup_history.txt").read_text(encoding="utf-8")
     assert "SUCCESS" in history_text
     assert history_text.count("[BACKUP_META]") == 2  # one entry per run, newest first
+
+
+@requires_7z
+@pytest.mark.parametrize("operation", ["new", "update"])
+@pytest.mark.parametrize("failure", ["publication", "history", "pending"])
+def test_publication_outcomes_remain_accurate(tmp_path, monkeypatch, operation, failure):
+    import backup
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    src = tmp_path / "Documents"
+    _make_tree(src, {"a.txt": "original"})
+    manager = BackupManager(app_dir)
+    items = [BackupItem("Documents", src)]
+    archive = app_dir / "Backup.7z"
+    if operation == "update":
+        assert manager.new_backup(items).exit_code == 0
+        original = archive.read_bytes()
+        (src / "a.txt").write_text("updated contents")
+    monkeypatch.setattr(backup, "HISTORY_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(backup, "HISTORY_RETRY_BACKOFF_SECONDS", ())
+
+    def denied(*args, **kwargs):
+        raise OSError("injected write failure")
+
+    if failure == "publication":
+        monkeypatch.setattr(manager.txn_mgr, "publish", denied)
+    else:
+        monkeypatch.setattr(manager.history, "_prepend_raw", denied)
+        if failure == "pending":
+            original_replace = backup.os.replace
+            def replace(source, destination):
+                if ".pending." in str(destination):
+                    raise OSError("pending publication denied")
+                return original_replace(source, destination)
+            monkeypatch.setattr(backup.os, "replace", replace)
+
+    result = (manager.new_backup(items) if operation == "new" else
+              manager.update_backup(archive, items, accept_config_changes=False))
+    if failure == "publication":
+        assert result.exit_code == 1 and not result.ok
+        if operation == "update":
+            assert archive.read_bytes() == original
+        else:
+            assert not archive.exists()
+    else:
+        assert result.ok
+        assert result.exit_code == (5 if failure == "history" else 6)
+        assert "published" in result.message
+        assert backup.sha256_of_file(archive) in result.message
+        assert manager.runner.test(archive).ok
+        assert manager.runner.extract_to_string(archive, "Documents/a.txt") == (
+            "updated contents" if operation == "update" else "original")
+        if failure == "history":
+            assert len(manager.history._pending_paths()) == 1
+            monkeypatch.undo()
+            manager.history.reconcile_pending()
+            recovered = manager.history.find_by_sha256(backup.sha256_of_file(archive))
+            assert recovered.status == "SUCCESS"
+        else:
+            assert manager.history._pending_paths() == []
+            assert "NOT saved" in result.message

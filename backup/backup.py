@@ -1544,7 +1544,10 @@ class HistoryManager:
         written instead (Section 18A.3/18A.4) — caller must map this to
         exit code 5 rather than treating it as a backup failure.
         """
-        self.reconcile_pending()
+        try:
+            self.reconcile_pending()
+        except OSError as exc:
+            logger.warning("Pending history recovery unavailable: %s", exc)
         delays = list(HISTORY_RETRY_BACKOFF_SECONDS)
         last_exc: Optional[Exception] = None
         for attempt in range(HISTORY_RETRY_ATTEMPTS):
@@ -2007,6 +2010,35 @@ class BackupManager:
         regardless of which HistoryManager instance backs `self.history`."""
         return self.history.record(entry_text, meta)
 
+    def _publish_and_record(self, txn_archive: Path, archive: Path, entry_text: str,
+                            run_id: int, version: int, sha: str) -> ProcessResult:
+        # Everything needed to format the audit entry is prepared before the
+        # commit point. Once replace succeeds, never report an unchanged archive.
+        self.txn_mgr.publish(txn_archive, archive)
+        message = f"Backup published at {archive}. Version {version}. SHA-256: {sha}"
+        try:
+            persisted = self._write_history(entry_text, {"run_id": run_id})
+        except (OSError, BackupError) as exc:
+            logger.error("%s History and pending-record persistence failed: %s\n%s", message, exc, entry_text)
+            return ProcessResult(True, 6, message + f" History was NOT saved, including its pending record: {exc}. Preserve this output and inspect backup.log.")
+        if not persisted:
+            return ProcessResult(True, 5, message + " History persistence pending; recovery record saved.")
+        logger.info("run #%s: %s", run_id, message)
+        return ProcessResult(True, 0, message)
+
+    def _record_failure(self, run_id: int, operation: str, archive: Path,
+                        start: _dt.datetime, exc: Exception) -> ProcessResult:
+        message = str(exc)
+        logger.error("run #%s: %s FAILED: %s", run_id, operation, exc)
+        entry = format_history_entry(run_id, "FAILED", operation, archive, start, now_utc(), errors=[message])
+        try:
+            if not self._write_history(entry, {"run_id": run_id}):
+                message += " Failure history is pending recovery."
+        except (OSError, BackupError) as history_exc:
+            logger.error("Could not record failed run: %s", history_exc)
+            message += f" Failure history could not be saved: {history_exc}"
+        return ProcessResult(False, 1, message)
+
     def _leftover_transaction_warnings(self, archive: Path) -> list[str]:
         """Section 33.8 — report (never auto-promote) abandoned .new files
         left behind by a previous interrupted run targeting this archive."""
@@ -2035,19 +2067,20 @@ class BackupManager:
             with _CrossPlatformLock(lock_path, blocking=False):
                 return run_body()
         except LockBusyError:
-            run_id = self.history.next_run_id()
             now = now_utc()
             msg = (
                 f"Another backup process appears to already be running against {archive} "
                 f"(could not acquire {lock_path.name} without waiting). Concurrent invocation "
                 "against the same archive is not supported — wait for the other run to finish. "
-                "If you're confident no backup.py process is actually running, the lock file is "
-                "stale and safe to delete (see RUNBOOK.md)."
+                "The holder may also be verifying the archive. Do not delete an active lock file."
             )
-            logger.error("run #%s: %s", run_id, msg)
-            entry_text = format_history_entry(run_id, "FAILED", operation_label, archive, now, now, errors=[msg])
-            self._write_history(entry_text, {"run_id": run_id})
-            return ProcessResult(False, 1, msg)
+            try:
+                run_id = self.history.next_run_id()
+            except (OSError, BackupError) as exc:
+                return ProcessResult(False, 1, msg + f" Failure history unavailable: {exc}")
+            return self._record_failure(run_id, operation_label, archive, now, BackupError(msg))
+        except (OSError, BackupError) as exc:
+            return ProcessResult(False, 1, f"Backup could not start or complete before publication: {exc}")
 
     # -- New -------------------------------------------------------------
 
@@ -2118,32 +2151,20 @@ class BackupManager:
                 raise BackupError("New archive failed validation:\n" + "\n".join(problems))
 
             sha = sha256_of_file(txn_archive)
-            self.txn_mgr.publish(txn_archive, archive)
-
             end = now_utc()
             stats = ChangeStats(added=sum(1 for e in source_inventory.entries.values() if not e.is_dir),
                                  added_dirs=sum(1 for e in source_inventory.entries.values() if e.is_dir))
             entry_text = format_history_entry(
                 run_id, "SUCCESS", "NEW", archive, start, end,
                 backup_uuid=manifest.backup_uuid, backup_version=manifest.backup_version, sha256=sha,
-                sources=items, change_stats=stats, archive_size=archive.stat().st_size,
+                sources=items, change_stats=stats, archive_size=txn_archive.stat().st_size,
                 source_size=estimated,
                 warnings=[f"{s.source_path}: {s.reason}" for s in source_inventory.skipped] + leftover_warnings,
             )
-            persisted = self._write_history(entry_text, {"run_id": run_id})
+            return self._publish_and_record(txn_archive, archive, entry_text, run_id, manifest.backup_version, sha)
 
-            if not persisted:
-                logger.warning("run #%s: NEW backup succeeded but history persistence is pending (exit 5)", run_id)
-                return ProcessResult(True, 5, f"Backup created (version {manifest.backup_version}); history persistence pending.")
-            logger.info("run #%s: NEW backup SUCCESS, version %s, sha256=%s", run_id, manifest.backup_version, sha)
-            return ProcessResult(True, 0, f"Backup created successfully. Version {manifest.backup_version}. SHA-256: {sha}")
-
-        except BackupError as exc:
-            end = now_utc()
-            logger.error("run #%s: NEW backup FAILED: %s", run_id, exc)
-            entry_text = format_history_entry(run_id, "FAILED", "NEW", archive, start, end, errors=[str(exc)])
-            self._write_history(entry_text, {"run_id": run_id})
-            return ProcessResult(False, 1, str(exc))
+        except (BackupError, OSError) as exc:
+            return self._record_failure(run_id, "NEW", archive, start, exc)
 
     # -- Dry run -------------------------------------------------------
 
@@ -2347,31 +2368,19 @@ class BackupManager:
                 raise BackupError("New archive failed post-update validation:\n" + "\n".join(problems))
 
             sha = sha256_of_file(txn_archive)
-            self.txn_mgr.publish(txn_archive, archive)
-
             end = now_utc()
             entry_text = format_history_entry(
                 run_id, "SUCCESS", "UPDATE", archive, start, end,
                 backup_uuid=manifest.backup_uuid, backup_version=manifest.backup_version, sha256=sha,
-                sources=items, change_stats=change_stats, archive_size=archive.stat().st_size,
+                sources=items, change_stats=change_stats, archive_size=txn_archive.stat().st_size,
                 warnings=[f"{s.source_path}: {s.reason}" for s in source_inventory.skipped]
                 + ([f"Configuration change applied: {plan}"] if plan["has_changes"] else [])
                 + leftover_warnings,
             )
-            persisted = self._write_history(entry_text, {"run_id": run_id})
+            return self._publish_and_record(txn_archive, archive, entry_text, run_id, manifest.backup_version, sha)
 
-            if not persisted:
-                logger.warning("run #%s: UPDATE succeeded but history persistence is pending (exit 5)", run_id)
-                return ProcessResult(True, 5, f"Backup updated (version {manifest.backup_version}); history persistence pending.")
-            logger.info("run #%s: UPDATE SUCCESS, version %s, sha256=%s", run_id, manifest.backup_version, sha)
-            return ProcessResult(True, 0, f"Backup updated successfully. Version {manifest.backup_version}. SHA-256: {sha}")
-
-        except BackupError as exc:
-            end = now_utc()
-            logger.error("run #%s: UPDATE FAILED: %s", run_id, exc)
-            entry_text = format_history_entry(run_id, "FAILED", "UPDATE", archive, start, end, errors=[str(exc)])
-            self._write_history(entry_text, {"run_id": run_id})
-            return ProcessResult(False, 1, str(exc))
+        except (BackupError, OSError) as exc:
+            return self._record_failure(run_id, "UPDATE", archive, start, exc)
 
     @staticmethod
     def _dir_size(path: Path) -> int:
@@ -2586,7 +2595,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.epilog = (
         "Exit codes: 0 success | 1 backup/operation error | 2 configuration error | "
         "3 missing 7-Zip dependency | 4 verification failed | 5 backup succeeded, "
-        "history persistence pending (see EXIT_CODES.md)."
+        "history persistence pending | 6 backup published, history recovery record unavailable (see EXIT_CODES.md)."
     )
     return parser
 
