@@ -33,16 +33,19 @@ same day, mainly because it's using disk space.
 
 ---
 
-## A `.backup_history.pending.<run_id>.json` file
+## A `.backup_history.txt.pending.<run_id>.<unique-id>.json` file
 
-**What it is:** A record of a backup run that succeeded, but whose entry
-couldn't be written to `backup_history.txt`. This is exit code 5.
+**What it is:** A run's history entry that could not be written to
+`backup_history.txt`. A successful backup with this artifact returns code 5;
+a failed backup can also have pending failure history and still returns code 1.
+The older `.backup_history.pending.*.json` naming pattern is also recognized.
 
-**Is the backup OK?** Yes — this file is only created after the archive was
-already published. Only the audit-log write is pending.
+**Is the backup OK?** Check the entry's status and the command's result. A
+SUCCESS entry records a published backup; a FAILED entry records a failed attempt.
 
-**How long can it sit there?** Every later run (`--new`, `--update`,
-interactive menu) automatically reconciles it and deletes the file. Worth
+**How long can it sit there?** Later backup and verification runs (including
+through the interactive menu) attempt recovery and remove successfully merged
+records. Damaged records remain in place with a warning. Worth
 checking by hand only if:
 - No other run is scheduled soon, or
 - More than one of these has piled up — meaning whatever's blocking
@@ -57,31 +60,51 @@ from backup import HistoryManager
 HistoryManager(Path('.')).reconcile_pending()   # run from the directory containing backup_history.txt
 "
 ```
-Safe to run any time — no-op if nothing is pending.
+Run with the Backup directory importable and pass the actual history directory.
+Safe to repeat: recovery extracts `entry_text`, never the JSON wrapper, and skips
+an exact entry already present after a crash between publication and sidecar deletion.
 
 **If reconciliation keeps failing:** open the `.json` file (plain JSON —
 `{"entry_text": "...", "meta": {"run_id": N}}`). `entry_text` is the exact
 entry that should have been written. You can prepend it to
 `backup_history.txt` yourself. Only delete the `.pending.*.json` file after
-confirming `entry_text` is actually in `backup_history.txt`.
+confirming `entry_text` is actually in `backup_history.txt`. Stop other backup and
+verification processes before manually editing history. Do not paste the JSON
+wrapper into the log; its escaped metadata line cannot be parsed as a run.
+
+## Exit code 6: archive published, history not saved
+
+The archive passed validation and was published, but saving both history and its
+pending recovery record failed. Preserve the printed path, version, and checksum,
+and the SUCCESS entry from `backup.log` if that log was writable. Fix permissions
+or storage space before another run. There may be an incomplete `.pending.*.tmp`
+file, but it is not automatically recovered and must not be assumed complete.
+Verify the archive; an unknown history state is expected until its entry is
+recovered. Do not treat code 6 as evidence that the archive was left unchanged.
+
+## A `.backup_history.txt.sequence` file
+
+This is the last reserved run ID, shared by archives using the same history
+directory. Keep it with the history file. Gaps are normal after interrupted runs;
+do not reset it to remove gaps. A malformed sequence stops the backup before
+publication. Restore it from a known-good copy or reconcile its value against
+history, pending records, and logs with all writers stopped.
 
 ---
 
-## A stale `backup_history.txt.lock` file
+## A `backup_history.txt.lock` file
 
 **What it is:** The lock file used to serialize writes to
 `backup_history.txt`. Normally just sits there, briefly locked during an
 actual write.
 
-**When it's a real problem:** only if a process holding it was killed
-without releasing it, and every run since has been failing to acquire it
-(repeated exit code 5, or `WARNING` lines about history writes in
-`backup.log`).
+The file normally persists when unlocked. The operating system releases the
+lock when the owning process exits; the file's existence does not mean a lock
+is held. It protects run-ID reservation as well as history writes/recovery.
 
-**What to do:** Confirm no `backup.py` process is running
-(`ps aux | grep backup.py` / Task Manager). If nothing is running and you're
-still seeing failures, delete `backup_history.txt.lock` — it's a lock file,
-not the history itself. Do **not** delete `backup_history.txt`.
+**What to do:** Check for running processes and inspect the reported storage or
+permission error. Never delete a lock file while a process might hold it: on some
+filesystems another process could then lock a different file at the same path.
 
 ---
 
@@ -89,7 +112,7 @@ not the history itself. Do **not** delete `backup_history.txt`.
 
 **What it is:** The per-archive lock (`.Backup.7z.lock`, next to the
 archive). A second `--new`/`--update` found the lock held and refused to
-proceed.
+proceed. Verification holds this lock too; a busy `--verify` returns code 4.
 
 **Is the archive OK?** Yes — this check runs before any transaction archive
 is touched.
@@ -102,8 +125,8 @@ it after the other run should have finished.
 **What to do:**
 1. Check if `backup.py` is actually running (`ps aux | grep backup.py` /
    Task Manager). If yes, wait for it.
-2. If nothing is running and you're still getting this, the lock file is
-   stale. Delete `.Backup.7z.lock` (or `.<archive-name>.lock`) and retry.
+2. The lock file can remain after normal exit; that alone is harmless. Check
+   for a verification process too. Do not delete a potentially active lock file.
 3. If this keeps happening with nothing running, investigate as a
    scheduling problem (e.g. a double-firing scheduler), not a one-off.
 
@@ -126,21 +149,29 @@ then delete it. It's a plain list of paths, one per line, UTF-8.
 
 ## `--verify` fails
 
-**What it is:** `7z t` failed — genuine corruption, or the file isn't a
-valid 7-Zip archive.
+**What it is:** Read the result. Code 4 can mean failed archive integrity, an
+invalid/missing backup manifest, a busy archive, an unreadable file, or a file
+that changed during verification. Busy/incomplete checks do not establish corruption.
 
-**What this means:** This is the one case here that's a real, current
-problem with the archive itself, not a leftover artifact. Exit code 4.
+For busy/incomplete checks, resolve the stated condition and retry. For an actual
+integrity failure, follow the steps below.
 
 **What to do:**
 1. Don't run `--update` on it yet.
 2. Check if a `.new` transaction file exists alongside it (see above) — the
    corrupt file might actually be a stray transaction, not the real archive.
-3. Check the most recent successful SHA-256 in `backup_history.txt`
+3. Check the latest successful SHA-256 for this archive's `backup_uuid` in `backup_history.txt`
    (`[BACKUP_META]` `sha256` field) against any other copies you have.
 4. If you have no known-good copy, `7z t -slt` or your file manager's
    archive tool may still partially list/extract uncorrupted members. Last
    resort, not a guarantee.
+
+History comparisons follow the manifest's backup UUID, so moving an archive does
+not change its family. Recovered records do not make an older version the latest.
+An intact archive with no matching checksum is reported as unknown history, not
+as a known latest backup. Locks coordinate this utility's own processes; file
+identity/timestamp checks additionally detect ordinary external replacement,
+but cannot lock out arbitrary external writers.
 
 ---
 
@@ -190,3 +221,13 @@ which runuser
 `tests/test_integration.py` needs a real `7z`/`7za`/`7zr` on `PATH`. If those
 are skipping, install 7-Zip (`apt-get install p7zip-full` on Debian/Ubuntu,
 or the Windows/macOS equivalent).
+
+The September 2026 reliability pass passed 98 tests with 2 Linux-only permission
+checks skipped. It uses real Windows archives through NanaZip 7.0's 7-Zip-compatible
+CLI in temporary
+directories, plus injected storage failures. It covers recovery, concurrent run-ID
+reservation, family comparison, archive locking, external replacement detection,
+and publication/history outcomes. It does not establish power-loss durability,
+network-filesystem locking semantics, or a consistent snapshot of changing source
+files. The Linux permission tests are skipped on Windows. Optional restore/version
+retention features remain proposals in the root project backlog.
