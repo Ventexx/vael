@@ -1,23 +1,18 @@
+// Keep rendered previews for the entire folder visit, regardless of size.
+// Canvas pixels stay resident when Chromium drops off-screen image decodes.
 class ThumbnailCache {
-  constructor(budget = 32 * 1024 * 1024) { this.budget = budget; this.bytes = 0; this.entries = new Map(); }
-  get(key) {
-    const value = this.entries.get(key);
-    if (value) { this.entries.delete(key); this.entries.set(key, value); }
-    return value;
-  }
-  put(key, value) {
-    if (this.entries.has(key)) { this.bytes -= this.entries.get(key).bytes; this.entries.delete(key); }
-    if (value.bytes > this.budget) return;
-    while (this.entries.size && (this.bytes + value.bytes > this.budget || this.entries.size >= 512)) {
-      const oldest = this.entries.keys().next().value;
-      this.bytes -= this.entries.get(oldest).bytes;
-      this.entries.delete(oldest);
-    }
-    this.entries.set(key, value); this.bytes += value.bytes;
-  }
-  clear() { this.entries.clear(); this.bytes = 0; }
+  constructor() { this.entries = new Map(); }
+  get(key) { return this.entries.get(key); }
+  put(key, value) { this.entries.set(key, value); }
+  clear() { this.entries.clear(); }
 }
 const thumbnailCache = new ThumbnailCache();
+let previewFolder = null;
+function beginPreviewFolder(dir) {
+  if (dir === previewFolder) return;
+  clearThumbnails();
+  previewFolder = dir;
+}
 const thumbnailRequests = new Map();
 let thumbnailEpoch = 0, decoder = null, decodeId = 0;
 const decodeJobs = new Map();
@@ -52,7 +47,17 @@ function getThumbnail(dir, entry) {
   if (thumbnailRequests.has(requestKey)) return thumbnailRequests.get(requestKey);
   const pending = window.electronAPI.readImageBytes(dir, entry.name, entry.version)
     .then(({bytes, mime}) => decodeThumbnail(bytes, mime))
-    .then(result => { if (epoch === thumbnailEpoch) thumbnailCache.put(key, result); return result; })
+    .then(async result => {
+      const image = new Image();
+      image.src = result.dataUrl;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = result.width; canvas.height = result.height;
+      canvas.getContext('2d').drawImage(image, 0, 0);
+      const preview = { canvas, width: result.width, height: result.height };
+      if (epoch === thumbnailEpoch) thumbnailCache.put(key, preview);
+      return preview;
+    })
     .finally(() => thumbnailRequests.delete(requestKey));
   thumbnailRequests.set(requestKey, pending);
   return pending;
@@ -61,47 +66,50 @@ function clearThumbnails() { thumbnailEpoch++; thumbnailCache.clear(); }
 
 const trackedPreviews = new Set(), previewQueue = new Map();
 let activePreviews = 0;
-const previewObserver = new IntersectionObserver(entries => {
-  for (const {target, isIntersecting} of entries) {
-    target._previewVisible = isIntersecting;
-    target._previewToken = (target._previewToken || 0) + 1;
-    if (isIntersecting) previewQueue.set(target, target._previewToken);
-    else { previewQueue.delete(target); target.removeAttribute('src'); }
-  }
-  pumpPreviews();
-}, {rootMargin: '250px'});
 function trackPreview(element, dir, entry) {
   element._previewFile = {dir, entry};
+  element._previewVisible = true;
+  element._previewToken = 1;
+  element._previewReady = new Promise(resolve => { element._previewDone = resolve; });
   element.alt = 'Loading preview';
-  trackedPreviews.add(element); previewObserver.observe(element);
+  trackedPreviews.add(element);
+  previewQueue.set(element, element._previewToken);
+  // Callers append the tile synchronously after registering it.
+  queueMicrotask(pumpPreviews);
 }
 function untrackPreviews(container) {
-  for (const image of container.querySelectorAll('img')) {
-    previewObserver.unobserve(image); trackedPreviews.delete(image); previewQueue.delete(image);
-    image._previewVisible = false; image._previewToken++; image.removeAttribute('src');
+  for (const image of container.querySelectorAll('canvas')) {
+    trackedPreviews.delete(image); previewQueue.delete(image);
+    image._previewVisible = false; image._previewToken++; image.width = image.height = 0;
+    image._previewDone?.();
   }
 }
 function resetPreviews() {
-  previewObserver.disconnect(); previewQueue.clear();
-  for (const image of trackedPreviews) { image._previewVisible = false; image._previewToken++; image.removeAttribute('src'); }
+  previewQueue.clear();
+  for (const image of trackedPreviews) {
+    image._previewVisible = false; image._previewToken++; image.width = image.height = 0; image._previewDone?.();
+  }
   trackedPreviews.clear();
 }
 function pumpPreviews() {
   while (activePreviews < 2 && previewQueue.size) {
     const [image, token] = previewQueue.entries().next().value;
     previewQueue.delete(image);
-    if (!image.isConnected || !image._previewVisible) continue;
+    if (!image.isConnected || !image._previewVisible) { image._previewDone?.(); continue; }
     const {dir, entry} = image._previewFile;
     activePreviews++;
-    getThumbnail(dir, entry).then(result => {
+    getThumbnail(dir, entry).then(async result => {
       if (image.isConnected && image._previewVisible && image._previewToken === token) {
-        image.src = result.dataUrl; image.alt = entry.name; image.title = '';
+        image.title = entry.name;
+        image.width = result.width; image.height = result.height;
+        image.getContext('2d').drawImage(result.canvas, 0, 0);
       }
     }).catch(error => {
       if (image.isConnected && image._previewToken === token) {
-        image.removeAttribute('src'); image.alt = 'Preview unavailable'; image.title = dir + '/' + entry.name + ': ' + error.message;
+        image.width = image.height = 0; image.alt = 'Preview unavailable'; image.title = dir + '/' + entry.name + ': ' + error.message;
+        image.width = 160; image.height = 160;
       }
-    }).finally(() => { activePreviews--; pumpPreviews(); });
+    }).finally(() => { image._previewDone?.(); activePreviews--; pumpPreviews(); });
   }
 }
 window.addEventListener('beforeunload', () => { resetPreviews(); clearThumbnails(); stopDecoder(); });

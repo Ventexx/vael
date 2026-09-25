@@ -65,15 +65,20 @@ const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 
 // Discover paths first; thumbnails are requested separately by renderer workers.
 // No image decoding or synchronous filesystem walk on the window's main thread.
-async function readImagesInSingleDir(dir) {
+async function readImagesInSingleDir(dir, strict = false) {
   let entries;
   try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
-  catch { return null; }
-  return entries
+  catch (error) { if (strict) throw error; return null; }
+  const images = entries
     .filter(e => e.isFile() && IMG_EXT.has(path.extname(e.name).toLowerCase()))
     .map(e => e.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
     .map(name => ({ name, path: path.join(dir, name) }));
+  for (const image of images) {
+    const stat = await fs.promises.stat(image.path);
+    image.diskVersion = JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
+  }
+  return images;
 }
 
 ipcMain.handle('read-thumbnail-source', (_, filePath) => fs.promises.readFile(filePath));
@@ -90,8 +95,8 @@ ipcMain.handle('read-thumbnail-source', (_, filePath) => fs.promises.readFile(fi
 // original absolute `path` on disk (from readImagesInSingleDir), so saving
 // later writes back to wherever the file actually lives — the merging here
 // is purely an in-app grouping and never moves anything on disk.
-async function readImagesFromDir(dir) {
-  const firstLayer = await readImagesInSingleDir(dir);
+async function readImagesFromDir(dir, strict = false) {
+  const firstLayer = await readImagesInSingleDir(dir, strict);
   if (firstLayer === null) return null; // dir itself unreadable/missing
 
   let subdirNames;
@@ -101,16 +106,22 @@ async function readImagesFromDir(dir) {
       .map(e => e.name)
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
   } catch (e) {
+    if (strict) throw e;
     subdirNames = [];
   }
 
   let images = firstLayer;
   for (const subName of subdirNames) {
-    const subImages = await readImagesInSingleDir(path.join(dir, subName));
+    const subImages = await readImagesInSingleDir(path.join(dir, subName), strict);
     if (subImages && subImages.length) images = images.concat(subImages);
   }
   return images;
 }
+
+ipcMain.handle('reload-folder', async (_, dir) => {
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) throw new Error('Invalid folder path.');
+  return readImagesFromDir(dir, true);
+});
 
 ipcMain.handle('open-folder', async () => {
   const { filePaths, canceled } = await dialog.showOpenDialog(win, {

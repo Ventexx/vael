@@ -14,7 +14,9 @@ A dark desktop image editor built for one job: pixelating or blurring parts of a
 - pixelate and bokeh blur with adjustable strength and saved presets
 - rectangle, ellipse, and lasso selections, with add/remove selection controls
 - import individual images or folders and organize them into categories
+- reload folder categories with their ↻ button or “Reload from folder” menu item; pick up disk changes while keeping unsaved edits
 - background folder previews, with priority given to the visible category
+- prepare up to eight full-resolution images ahead and two behind, following filmstrip and category order within a bounded memory buffer
 - drag thumbnails between categories
 - apply filters to selected images and save an entire category
 - per-image undo/redo, retained while moving between open images

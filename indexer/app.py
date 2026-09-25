@@ -5403,6 +5403,7 @@ class MainWindow(QMainWindow):
         # snapping and Win+Arrow keep working.
         self.setMinimumSize(560, 460)
         self.resize(1000, 720)
+        self._pending_window_size = None
         # ── Restore last window geometry from prefs ────────────────────────
         #
         # We store plain x/y/width/height ints rather than Qt's own
@@ -5429,6 +5430,7 @@ class MainWindow(QMainWindow):
                     w = max(560, w)
                     h = max(460, h)
                     self.resize(w, h)
+                    self._pending_window_size = self.size()
                     self.move(x, y)
             # Guard against the window landing off-screen (e.g. a second
             # monitor that is no longer connected).  We require at least
@@ -6006,6 +6008,14 @@ class MainWindow(QMainWindow):
         self._do_search()
 
     # ── Windows: native hit-testing so the OS drives move/resize/snap ─────
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        size = self._pending_window_size
+        self._pending_window_size = None
+        if size is not None:
+            # Restore after native frame creation has settled client margins.
+            QTimer.singleShot(0, lambda: self.resize(size) if not self.isMaximized() else None)
 
     def nativeEvent(self, eventType, message):
         if self._is_windows and eventType in ("windows_generic_MSG", b"windows_generic_MSG"):

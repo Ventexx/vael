@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   save:     (filePath, src, expectedVersion, metadata) => ipcRenderer.invoke('save', filePath, src, expectedVersion, metadata),
   chooseSavePath: (name) => ipcRenderer.invoke('choose-save-path', name),
   openFolder: () => ipcRenderer.invoke('open-folder'),
+  reloadFolder: dir => ipcRenderer.invoke('reload-folder', dir),
   inspectDroppedPaths: (paths) => ipcRenderer.invoke('inspect-dropped-paths', paths),
   readThumbnailSource: filePath => ipcRenderer.invoke('read-thumbnail-source', filePath),
   readImageFull: (filePath) => ipcRenderer.invoke('read-image-full', filePath),

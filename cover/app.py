@@ -977,8 +977,8 @@ HOTKEYS = [
     ("Ctrl+Tab", "Next workflow"),
     ("Ctrl+Shift+Tab", "Previous workflow"),
     ("Ctrl+1 \u2013 Ctrl+9, Ctrl+0", "Jump to workflow 1-10 (in sidebar order)"),
-    ("Ctrl+Up", "Close current folder, open the one above"),
-    ("Ctrl+Down", "Close current folder, open the one below"),
+    ("Ctrl+Up", "Close the current folder, open its sibling above (wraps around)"),
+    ("Ctrl+Down", "Close the current folder, open its sibling below (wraps around)"),
     ("Ctrl+W", "Open/close the Workflows sidebar"),
     ("Ctrl+S", "Open/close the Outputs / Queue sidebar"),
     ("Ctrl+O", "Open the outputs folder on disk"),
@@ -1536,15 +1536,16 @@ _NATSORT_SPLIT_RE = _re.compile(r"(\d+)")
 
 
 def _natural_sort_key(path_str):
-    """Case-insensitive 'natural' sort key: splits the string on runs of
-    digits and compares numeric runs by value rather than character-by-
-    character, so 'img2.png' sorts before 'img10.png' the way a person
-    (and Explorer/Finder) expects, instead of plain lexicographic order
-    putting 'img10' before 'img2'. Applied to the full path, which is
-    equivalent to sorting by filename since every entry in one scan
-    shares the same parent directory prefix."""
-    name = str(path_str).lower()
-    return [int(part) if part.isdigit() else part for part in _NATSORT_SPLIT_RE.split(name)]
+    """Case-insensitive filename ordering: symbols, numbers, then letters.
+
+    Numeric runs compare by value, so img2 appears before img10.
+    """
+    name = Path(path_str).name.casefold()
+    # Explicit character groups keep punctuation (including '_' and '[')
+    # ahead of digits, then letters; numeric runs still sort naturally.
+    return [(1, int(part)) if part.isdecimal() else
+            (2 if part.isalnum() else 0, part)
+            for part in _re.findall(r'\d+|[^\d]', name)]
 
 # 2:3 portrait thumbnail, identical crop-to-fill sizing to vael. indexer.
 THUMB_W = 106
@@ -2248,6 +2249,10 @@ class FolderSection(QWidget):
         self._child_sections = []
         self._current_cols = 0
         self._selected = False
+        # Set to the FolderSection that created this one as a child (see
+        # _materialize); stays None for depth-0 (tab-root) sections. Lets
+        # Ctrl+Up/Down walk siblings under the same parent only.
+        self.parent_section = None
 
         browser.register_section(self)
 
@@ -2443,6 +2448,13 @@ class FolderSection(QWidget):
                         card.request_image()
         if persist:
             self.browser.note_expanded(self.path, expanded)
+        if expanded and persist:
+            # Universal "focus this folder" behavior: applies the same
+            # whether it was opened by a mouse click (toggle() -> here with
+            # persist=True) or by the Ctrl+Up/Down hotkeys (which also call
+            # set_expanded(True) directly) -- but not to the programmatic
+            # persist=False restores done on tab load/reload.
+            self.browser.focus_folder_section(self)
 
     def is_expanded(self):
         return self._expanded
@@ -2551,6 +2563,7 @@ class FolderSection(QWidget):
 
         for sub_path in self._pending_subdirs:
             child = FolderSection(self.browser, sub_path, depth=self.depth + 1)
+            child.parent_section = self
             self.children_lay.addWidget(child)
             self._child_sections.append(child)
             if sub_path in self.browser.saved_expanded_paths:
@@ -3002,6 +3015,12 @@ class ImageBrowser(QWidget):
         self._saved_active_tab = None
         self._top_sections = []   # top-level FolderSection per tab index, in tab order
 
+        # The folder most recently opened by the user (click or the
+        # Ctrl+Up/Down hotkeys) -- what "current folder" means for
+        # navigate_sibling_folder(), and what gets auto-scrolled to the top
+        # of the viewport. See FolderSection.set_expanded / focus_folder_section.
+        self._focused_path = None
+
         # -- multi-select folders (ctrl+click / rubber-band drag) + bulk
         # "Load Selected Folders" background loading -----------------------
         self._sections_by_path = {}       # path -> FolderSection, every depth, current tabs only
@@ -3101,6 +3120,77 @@ class ImageBrowser(QWidget):
 
     def section_for_path(self, path):
         return self._sections_by_path.get(path)
+
+    # -- "current folder" focus (Ctrl+Up/Down + auto-scroll-into-view) -----
+    def focus_folder_section(self, section):
+        """Called by FolderSection.set_expanded() whenever a folder is
+        opened by the user, whether via a mouse click or the Ctrl+Up/Down
+        hotkeys. Remembers it as the "current" folder for
+        navigate_sibling_folder(), and scrolls the active tab so the
+        folder's header lands at the very top of the viewport, since the
+        user almost certainly wants to interact with what they just
+        opened. Deferred one event-loop tick because expanding a folder
+        changes the layout (new cards/children appear) after this call
+        returns, and the scroll target needs the settled geometry."""
+        self._focused_path = section.path
+        QTimer.singleShot(0, lambda s=section: self._scroll_section_into_view(s))
+
+    def _scroll_section_into_view(self, section):
+        scroll = self.tabs.currentWidget()
+        if not isinstance(scroll, QScrollArea):
+            return
+        if not scroll.isAncestorOf(section):
+            return
+        container = scroll.widget()
+        if container is None:
+            return
+        top_left = section.header.mapTo(container, QPoint(0, 0))
+        bar = scroll.verticalScrollBar()
+        bar.setValue(max(0, min(top_left.y(), bar.maximum())))
+
+    def _is_in_active_tab(self, section):
+        scroll = self.tabs.currentWidget()
+        return scroll is not None and scroll.isAncestorOf(section)
+
+    def _active_tab_root_section(self):
+        idx = self.tabs.currentIndex()
+        if 0 <= idx < len(self._top_sections):
+            return self._top_sections[idx]
+        return None
+
+    def navigate_sibling_folder(self, direction):
+        """Ctrl+Up (direction=-1) / Ctrl+Down (direction=+1): close the
+        current folder and open its sibling above/below it -- the other
+        folder at the same depth, under the same parent, in the active
+        tab. Wraps around at either end of that sibling group; never
+        crosses into folders that share a different parent, even if
+        they're at the same depth."""
+        section = None
+        if self._focused_path:
+            candidate = self._sections_by_path.get(self._focused_path)
+            if (
+                candidate is not None
+                and candidate.is_expanded()
+                and self._is_in_active_tab(candidate)
+            ):
+                section = candidate
+        if section is None:
+            # Nothing explicitly focused yet this session -- fall back to
+            # the active tab's root folder, if it's open.
+            root = self._active_tab_root_section()
+            if root is not None and root.is_expanded():
+                section = root
+        if section is None:
+            return
+
+        parent = section.parent_section
+        siblings = parent._child_sections if parent is not None else [section]
+        if section not in siblings or len(siblings) < 2:
+            return
+        idx = siblings.index(section)
+        target = siblings[(idx + direction) % len(siblings)]
+        section.set_expanded(False)
+        target.set_expanded(True)
 
     # -- multi-select (ctrl+click / rubber-band drag) -----------------------
     def selected_folder_paths(self):
@@ -5427,6 +5517,7 @@ class MainWindow(QMainWindow):
 
         self.setMinimumSize(720, 520)
         self.resize(1280, 840)
+        self._pending_window_size = None
 
         self.config_data = load_config()
         # No longer a supported key (the explorer never remembers its last
@@ -5452,6 +5543,7 @@ class MainWindow(QMainWindow):
             x, y, w, h = _geo.get("x"), _geo.get("y"), _geo.get("width"), _geo.get("height")
             if all(isinstance(v, int) for v in (x, y, w, h)):
                 self.resize(max(720, w), max(520, h))
+                self._pending_window_size = self.size()
                 self.move(x, y)
             available = QGuiApplication.primaryScreen().virtualGeometry()
             title_bar_rect = self.frameGeometry()
@@ -5935,6 +6027,15 @@ class MainWindow(QMainWindow):
             self._config_save_failing = False
 
     # -- frameless window chrome (copied from vael. indexer) ───────────────
+    def showEvent(self, event):
+        super().showEvent(event)
+        size = self._pending_window_size
+        self._pending_window_size = None
+        if size is not None:
+            # Native frame creation changes client margins on Windows.
+            # Apply the saved client size once those margins have settled.
+            QTimer.singleShot(0, lambda: self.resize(size) if not self.isMaximized() else None)
+
     def nativeEvent(self, eventType, message):
         if self._is_windows and eventType in ("windows_generic_MSG", b"windows_generic_MSG"):
             msg = wintypes.MSG.from_address(int(message))
@@ -6182,9 +6283,11 @@ class MainWindow(QMainWindow):
             index = 9 if digit == "0" else int(digit) - 1
             bind(f"Ctrl+{digit}", lambda idx=index: self._hk_select_workflow(idx))
 
-        # Folder tabs in the center Image Browser panel.
-        bind("Ctrl+Up", self._hk_prev_folder_tab)
-        bind("Ctrl+Down", self._hk_next_folder_tab)
+        # Folder-tree navigation in the center Image Browser panel: close
+        # the current folder, open its sibling above/below (see
+        # ImageBrowser.navigate_sibling_folder).
+        bind("Ctrl+Up", self._hk_prev_sibling_folder)
+        bind("Ctrl+Down", self._hk_next_sibling_folder)
 
         bind("Ctrl+W", self._toggle_workflow_sidebar)
         bind("Ctrl+S", self._toggle_sidebar)
@@ -6217,17 +6320,11 @@ class MainWindow(QMainWindow):
         if 0 <= index < lw.count():
             lw.setCurrentRow(index)
 
-    def _hk_prev_folder_tab(self):
-        tabs = self.image_browser.tabs
-        n = tabs.count()
-        if n:
-            tabs.setCurrentIndex((tabs.currentIndex() - 1) % n)
+    def _hk_prev_sibling_folder(self):
+        self.image_browser.navigate_sibling_folder(-1)
 
-    def _hk_next_folder_tab(self):
-        tabs = self.image_browser.tabs
-        n = tabs.count()
-        if n:
-            tabs.setCurrentIndex((tabs.currentIndex() + 1) % n)
+    def _hk_next_sibling_folder(self):
+        self.image_browser.navigate_sibling_folder(1)
 
 
 def apply_style(app: QApplication) -> None:

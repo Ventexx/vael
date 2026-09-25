@@ -393,6 +393,8 @@
     border-radius: 3px; padding: 1px 6px; min-width: 16px; text-align: center;
   }
   .cat-pill.filter-active .cat-pill-count { color: var(--accent); }
+  .cat-reload { border: 0; background: transparent; color: var(--text-dim); cursor: pointer; padding: 0 3px; }
+  .cat-reload:hover { color: var(--accent); }
   .cat-rename-input {
     background: var(--bg4); border: 1px solid var(--accent-dim); color: var(--text-bright);
     border-radius: 3px; padding: 2px 5px; font-family: var(--font); font-size: 10.5px; width: 100%;
@@ -722,6 +724,7 @@
     <span id="sb-file" onclick="openMetaPanel()" title="Click for image info">—</span>
     <span id="sb-status">Ready</span>
     <span id="sb-import" role="status" style="color:var(--text-dim); white-space:nowrap"></span>
+    <span id="sb-read-ahead" role="status" style="color:var(--text-dim); white-space:nowrap" title="Full-resolution images prepared ahead of your position"></span>
     <input id="sb-zoom" type="text" value="" onchange="setZoomInput(this.value)" title="Zoom %">
   </div>
 
@@ -791,6 +794,7 @@
 <div id="context-menu"></div>
 
 <script src="thumbnail-queue.js"></script>
+<script src="read-ahead.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════
 // STATE
@@ -2154,11 +2158,35 @@ function markDirty(img) {
 // Account for dimensions, shared history buffers, masks, encoded sources,
 // and thumbnails. This is a working-data budget, not a process-RAM guarantee:
 // Chromium, codecs and workers also need temporary allocations.
-const IMAGE_MEMORY_BUDGET = 256 * 1024 * 1024;
+const IMAGE_MEMORY_BUDGET = 512 * 1024 * 1024;
 const OPERATION_MEMORY_LIMIT = 1024 * 1024 * 1024;
 state._hydratedLRU = [];
 let memoryPass = Promise.resolve();
 let memoryTimer;
+function estimatedWorkingBytes(img) {
+  return img.w && img.h ? img.w * img.h * 12 + 1024 * 1024 : 32 * 1024 * 1024;
+}
+function plannedReadAhead() {
+  return readAheadPlan(workflowImages(state.images, state.categories), state.images[state.activeIdx],
+    state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET, estimatedWorkingBytes);
+}
+const imageReadAhead = new ImageReadAhead({
+  plan: plannedReadAhead,
+  ready: img => !img._lazy && !img._hydrating && !img._evicting && !!img.canvas,
+  paused: () => {
+    const active = state.images[state.activeIdx];
+    return !!active && ((active._lazy && !active._loadFailed) || active._hydrating || active._evicting || state.filterBusy || state.saveBusy || state.historyBusy);
+  },
+  prepare: async img => {
+    await enforceMemoryBudget(estimatedWorkingBytes(img));
+    if (img._disposed || !plannedReadAhead().includes(img)) return;
+    await hydrateImage(img);
+  },
+  progress: (ready, total) => {
+    $('sb-read-ahead').textContent = total ? `Ready nearby ${ready}/${total}` : '';
+  },
+});
+window.addEventListener('beforeunload', () => imageReadAhead.close());
 function residentImageBytes() {
   let bytes = 0;
   const seen = new Set();
@@ -2191,17 +2219,34 @@ async function pruneImageCache(img) {
     }
   }
 }
+function canReuseOriginalCache(img) {
+  return img._originalKey && !img.unsaved && !img.mask && img.history?.length === 1 &&
+    img.history[0].revision === currentRevision(img);
+}
 function enforceMemoryBudget(reserve = 0) {
   const pass = memoryPass.then(async () => {
     const budget = Math.max(0, (state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET) - reserve);
     const lru = state._hydratedLRU = state._hydratedLRU.filter(img => state.images.includes(img));
-    for (const img of [...lru]) {
+    const ahead = plannedReadAhead();
+    // Old images go first, then the far end of the buffer. Keep the next
+    // few images ready even when a recent image has a large undo history.
+    const evictionOrder = [...lru].sort((a, b) => {
+      const rank = img => ahead.includes(img) ? ahead.length - ahead.indexOf(img) : 0;
+      return rank(a) - rank(b);
+    });
+    for (const img of evictionOrder) {
       if (residentImageBytes() <= budget) break;
+      if (img._hydrating || img._pinned) continue;
+      if (img !== state.images[state.activeIdx] && canReuseOriginalCache(img) && await evictImage(img)) {
+        const at = lru.indexOf(img);
+        if (at >= 0) lru.splice(at, 1);
+        continue;
+      }
       await spillHistory(img);
       // Full encoded previews can be rebuilt from the current canvas.
       if (!img._lazy) { img.src = null; img._fullSrcDirty = true; }
     }
-    for (const img of [...lru]) {
+    for (const img of evictionOrder) {
       if (residentImageBytes() <= budget) break;
       if (img === state.images[state.activeIdx] || img._pinned || img._hydrating) continue;
       if (await evictImage(img)) {
@@ -2214,12 +2259,12 @@ function enforceMemoryBudget(reserve = 0) {
   memoryPass = pass.catch(() => {});
   return pass;
 }
-async function touchHydrated(img) {
+function touchHydrated(img) {
   const lru = state._hydratedLRU;
   const at = lru.indexOf(img);
   if (at !== -1) lru.splice(at, 1);
   lru.push(img);
-  await enforceMemoryBudget();
+  scheduleMemoryCheck();
 }
 async function reserveFilterMemory(img, type, value) {
   const n = img.w * img.h;
@@ -2272,6 +2317,16 @@ async function spillHistory(img, keepCurrent = false) {
 async function evictImage(img) {
   if (img._evicting) return img._evicting;
   if (img._lazy || !img.canvas || !window.electronAPI?.cachePut) return false;
+  if (canReuseOriginalCache(img) && img !== state.images[state.activeIdx] && !img._pinned) {
+    // An untouched preload already has its original in the session cache.
+    // Reuse it instead of PNG-encoding and writing identical pixels again.
+    img._sessionKey = img._originalKey;
+    img.history = null; img.historyIndex = 0;
+    img.canvas.width = img.canvas.height = 0;
+    img.canvas = img.ctx = img.src = null;
+    img._lazy = true;
+    return true;
+  }
   img._evicting = (async () => {
     try {
       const revision = currentRevision(img);
@@ -2293,6 +2348,7 @@ async function evictImage(img) {
   try { return await img._evicting; } finally { img._evicting = null; }
 }
 async function hydrateImage(img) {
+  if (img._disposed) return;
   if (img._evicting) await img._evicting;
   if (img._hydrating) return img._hydrating;
   if (!img._lazy) { await touchHydrated(img); return; }
@@ -2313,6 +2369,7 @@ async function hydrateImage(img) {
     const tmpImg = new Image();
     tmpImg.src = dataUrl;
     await tmpImg.decode();
+    if (img._disposed) return;
     const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
     if (w * h * 12 > OPERATION_MEMORY_LIMIT) throw new Error("Image dimensions exceed the editing memory budget.");
     const { canvas, ctx } = makeCanvas(tmpImg, w, h);
@@ -2333,7 +2390,7 @@ async function hydrateImage(img) {
     }
     await touchHydrated(img);
   })();
-  try { return await img._hydrating; } finally { img._hydrating = null; }
+  try { return await img._hydrating; } finally { img._hydrating = null; scheduleMemoryCheck(); }
 }
 function canvasToDataURLAsync(canvas) {
   return new Promise((resolve, reject) => {
@@ -2522,7 +2579,7 @@ function loadImageFile(file) {
 // usable while the background queue fills their thumbnails.
 function makeLazyStub(item) {
   return {
-    name: item.name, path: item.path, unsaved: false, w: 0, h: 0,
+    name: item.name, path: item.path, diskVersion: item.diskVersion, unsaved: false, w: 0, h: 0,
     canvas: null, ctx: null, src: null, _fullSrcDirty: false,
     mask: null, categoryId: null,
     history: null, historyIndex: 0, revision: null, savedRevision: null, _lazy: true,
@@ -2636,7 +2693,7 @@ async function triggerOpenFolder() {
   }
   if (!result) { setStatus('Open folder cancelled', false); return; }
   const folderName = result.dir.split(/[\\/]/).pop() || result.dir;
-  importFolders([{ name: folderName, images: result.images }]);
+  importFolders([{ name: folderName, path: result.dir, images: result.images }]);
 }
 // Register all discovered folders before any preview decoding. Focus once,
 // rather than opening a full-resolution image from every folder in turn.
@@ -2646,6 +2703,7 @@ function importFolders(folders) {
   for (const folder of folders) {
     if (!folder.images?.length) continue;
     const categoryId = addCategory(folder.name);
+    state.categories.find(cat => cat.id === categoryId).folderPath = folder.path;
     for (const item of folder.images) {
       const img = makeLazyStub(item);
       img.categoryId = categoryId;
@@ -2660,6 +2718,62 @@ function importFolders(folders) {
   else selectImage(state.images.indexOf(imported[0]));
   thumbnailQueue.add(imported);
   return categoryCount;
+}
+async function reloadCategory(id) {
+  const cat = state.categories.find(c => c.id === id);
+  if (!cat?.folderPath || cat.reloading) return;
+  const busy = () => state.filterBusy || state.saveBusy || state.historyBusy;
+  if (busy()) { setStatus('Wait for the current operation before reloading.', false); return; }
+  cat.reloading = true;
+  renderCategoryPanel();
+  setStatus(`Checking folder for "${categoryLabel(cat)}"…`, true);
+  try {
+    const files = await window.electronAPI.reloadFolder(cat.folderPath);
+    if (!state.categories.includes(cat)) return;
+    if (busy()) { setStatus('An image operation started. Reload the folder again when it finishes.', false); return; }
+    const active = state.images[state.activeIdx];
+    const selected = new Set([...state.multiSelected].map(i => state.images[i]));
+    const previous = state.images.filter(img => img.categoryId === id);
+    const byPath = new Map(previous.map(img => [img.path, img]));
+    const next = [], added = [];
+    let protectedCount = 0;
+    for (const file of files) {
+      const existing = byPath.get(file.path);
+      byPath.delete(file.path);
+      if (existing && (existing.unsaved || existing.diskVersion === file.diskVersion)) {
+        next.push(existing);
+        if (existing.unsaved) protectedCount++;
+      } else {
+        const img = makeLazyStub(file);
+        img.categoryId = id;
+        next.push(img); added.push(img);
+      }
+    }
+    for (const img of byPath.values()) {
+      if (img.unsaved) { next.push(img); protectedCount++; }
+    }
+    const keep = new Set(next);
+    previous.filter(img => !keep.has(img)).forEach(releaseImage);
+    const insertion = state.images.findIndex(img => img.categoryId === id);
+    state.images = state.images.filter(img => img.categoryId !== id);
+    state.images.splice(insertion < 0 ? state.images.length : insertion, 0, ...next);
+    state.multiSelected = new Set(state.images.map((img, i) => selected.has(img) ? i : -1).filter(i => i >= 0));
+    const target = state.images.includes(active) ? active : next.find(img => img.path === active?.path) || next[0] || state.images[0];
+    state.activeIdx = -1;
+    if (target && target === active) {
+      state.activeIdx = state.images.indexOf(active);
+      updateStatusBar();
+    } else if (target) selectImage(state.images.indexOf(target));
+    else {
+      displayCanvas.style.display = 'none'; dropZone.classList.remove('has-image');
+      clearSelection(); updateStatusBar(); renderHistoryPanel();
+    }
+    renderGallery();
+    thumbnailQueue.add(added);
+    setStatus(`Reloaded "${categoryLabel(cat)}" — ${next.length} images${protectedCount ? `; kept ${protectedCount} unsaved images` : ''}`, true);
+  } catch (error) {
+    setStatus(`Could not reload folder: ${error.message}`, false);
+  } finally { cat.reloading = false; renderCategoryPanel(); }
 }
 function focusFirstCategory() {
   const firstCategory = state.categories.find(cat => state.images.some(img => img.categoryId === cat.id));
@@ -2724,11 +2838,14 @@ function categoryPromptAction(action) {
 // the person has already clicked past doesn't clobber whatever they clicked
 // next.
 let _selectToken = 0;
+let selectionLoadTimer;
 function selectImage(idx) {
   if (idx < 0 || idx >= state.images.length) return;
   const myToken = ++_selectToken;
+  clearTimeout(selectionLoadTimer);
   state.activeIdx = idx;
   const img = state.images[idx];
+  img._loadFailed = false;
   // Keep the filmstrip's category filter following whatever image just
   // became active. Without this, the filmstrip only updates its highlight
   // for images that happen to already be inside the currently-filtered
@@ -2753,7 +2870,8 @@ function selectImage(idx) {
     // drawing null/stale pixels, and let the status line show it's working.
     displayCanvas.style.display = 'none';
     setStatus(`Opening ${img.name}…`, true);
-    hydrateImage(img).then(() => {
+    // Coalesce rapid skips; already prepared images still display immediately.
+    selectionLoadTimer = setTimeout(() => hydrateImage(img).then(() => {
       if (myToken !== _selectToken || img._disposed) return; // superseded by a newer selection
       fitImage(false);
       renderDisplay();
@@ -2761,9 +2879,10 @@ function selectImage(idx) {
       updateStatusBar();
       setStatus(`Opened ${img.name}`, true);
     }).catch(err => {
+      img._loadFailed = true;
       console.error(err);
       if (myToken === _selectToken) setStatus(`Failed to open ${img.name}`, false);
-    });
+    }), 35);
   } else {
     touchHydrated(img);
     renderDisplay();
@@ -3035,6 +3154,15 @@ function renderCategoryPanel() {
       count.textContent = state.images.filter(i => i.categoryId === cat.id).length;
       pill.appendChild(name);
       pill.appendChild(count);
+      if (cat.folderPath) {
+        const reload = document.createElement('button');
+        reload.className = 'cat-reload'; reload.textContent = '↻';
+        reload.title = 'Reload from folder (keeps unsaved edits)';
+        reload.setAttribute('aria-label', `Reload ${categoryLabel(cat)} from folder`);
+        reload.disabled = !!cat.reloading;
+        reload.onclick = e => { e.stopPropagation(); reloadCategory(cat.id); };
+        pill.appendChild(reload);
+      }
     }
     list.appendChild(pill);
   });
@@ -3060,6 +3188,7 @@ function openCategoryContextMenu(e, categoryId) {
     menu.appendChild(btn);
   };
   addRow('Save all in category', () => saveAllInCategory(categoryId));
+  if (cat.folderPath) addRow('Reload from folder', () => reloadCategory(categoryId));
   addRow('Add current image', () => assignActiveToCategory(categoryId));
   const sep = document.createElement('div'); sep.className = 'cm-sep'; menu.appendChild(sep);
   addRow('Rename', () => startRenameCategory(categoryId));
@@ -3195,6 +3324,7 @@ function renderGallery() {
   $('save-all-btn').disabled = !state.images.some(i => i.unsaved);
   renderCategoryPanel();
   renderFilmstrip();
+  imageReadAhead.request();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -3222,6 +3352,12 @@ function nextCategoryWithImages(afterCatId) {
     if (state.images.some(im => (im.categoryId ?? null) === id)) return id;
   }
   return undefined;
+}
+function navigateWorkflow(direction) {
+  const order = workflowImages(state.images, state.categories);
+  const at = order.indexOf(state.images[state.activeIdx]);
+  const target = order[at + direction];
+  if (target) selectImage(state.images.indexOf(target));
 }
 // Jumps to the next image after a save — the last step of the select ->
 // pixelate -> save -> next loop, so the workflow never needs a mouse click
@@ -3916,10 +4052,10 @@ document.addEventListener('keydown', e => {
     toggleAllUI();
   } else if (e.key === 'ArrowLeft') {
     e.preventDefault();
-    if (state.activeIdx > 0) { selectImage(state.activeIdx - 1); setStatus(`Showing ${state.images[state.activeIdx].name}`, true); }
+    navigateWorkflow(-1);
   } else if (e.key === 'ArrowRight') {
     e.preventDefault();
-    if (state.activeIdx < state.images.length - 1) { selectImage(state.activeIdx + 1); setStatus(`Showing ${state.images[state.activeIdx].name}`, true); }
+    navigateWorkflow(1);
   } else if (e.key === '+' || e.key === '=') {
     zoomBy(0.25);
   } else if (e.key === '-') {

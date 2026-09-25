@@ -24,7 +24,7 @@ A desktop image reviewer for sorting through generated variations. Group repeate
 - keep flags after trash execution until you clear them
 - open a larger focus view and step through a set's images
 - choose whether right-click marks images or flags sets
-- background scans and visible-area thumbnail loading
+- background scans and progressive preview loading; rendered previews stay in memory for the entire folder visit, including large folders
 - remember window position, size, and zoom
 
 Flags are reminders inside Reviewer; they do not automatically send jobs to ComfyUI or Cover.

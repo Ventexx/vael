@@ -192,18 +192,14 @@
   #canvas-placeholder svg { width: 34px; height: 34px; stroke: currentColor; fill: none; stroke-width: 1.3; opacity: .5; }
   #canvas-placeholder.hidden { display: none; }
 
-  /* LOADING OVERLAY -- darkens the canvas while every set in a newly opened
-     folder is pre-loaded (since everything now expands by default). */
-  #canvas-loading {
-    position: absolute; inset: 0; background: rgba(5,5,5,0.78); backdrop-filter: blur(1px); z-index: 55;
-    display: flex; align-items: center; justify-content: center; transition: opacity .15s;
-  }
+  /* Quiet loading progress in the status bar. */
+  #canvas-loading { display: flex; align-items: center; gap: 7px; flex-shrink: 0; font-size: 10px; color: var(--text-dim); }
   #canvas-loading.hidden { display: none; }
-  .cl-box { width: 240px; text-align: center; }
-  .cl-title { font-size: 11px; color: var(--text); margin-bottom: 10px; }
-  .cl-bar { height: 4px; border-radius: 2px; background: var(--bg4); overflow: hidden; }
-  .cl-bar-fill { height: 100%; width: 0%; background: var(--accent); transition: width .15s ease; }
-  .cl-sub { font-size: 10px; color: var(--text-dim); margin-top: 8px; }
+  #canvas-wrap.preparing { overflow: hidden; }
+  #canvas-wrap.preparing #wall-list, #canvas-wrap.preparing #groups-list { visibility: hidden; }
+  .cl-bar { width: 64px; height: 2px; border-radius: 1px; background: var(--bg4); overflow: hidden; }
+  .cl-bar-fill { height: 100%; width: 0%; background: var(--text-dim); transition: width .15s ease; }
+  .cl-sub { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
   /* GROUP SECTIONS (accordion list, replaces the old draggable canvas) --
      styled to match the simple folder-list pattern: a plain header row,
@@ -245,7 +241,7 @@
     transition: transform .12s ease, box-shadow .12s ease; animation: tileIn .3s ease both;
   }
   .wall-tile:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgba(0,0,0,.45); z-index: 2; }
-  .wall-tile img { height: 100%; width: auto; display: block; }
+  .wall-tile canvas { height: 100%; width: auto; display: block; }
   /* Iteration highlight -- a colored border + soft outer glow only. The
      border sits around the tile so it never touches the image's own
      pixels; a translucent color wash used to be layered on top of the
@@ -298,7 +294,7 @@
      own rendered height, so portrait, landscape and square sources are all
      shown in full. Zooming (focus overlay) remains available for detail. */
   .img-tile-imgwrap { position: relative; width: 100%; cursor: zoom-in; background: var(--bg2); overflow: hidden; display: flex; }
-  .img-tile-imgwrap img { width: 100%; height: auto; display: block; }
+  .img-tile-imgwrap canvas { width: 100%; height: auto; display: block; }
   .tile-iter-badge {
     position: absolute; top: 6px; left: 6px; background: rgba(10,10,10,.75); border: 1px solid var(--border2);
     color: var(--text-bright); font-size: 9.5px; padding: 2px 6px; border-radius: 3px; letter-spacing: .02em;
@@ -361,6 +357,9 @@
     font-size: 10px; color: var(--text-dim);
   }
   #statusbar b { color: var(--text); }
+  #status-left { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status-end { display: flex; align-items: center; justify-content: flex-end; gap: 14px; min-width: 0; margin-left: 12px; }
+  #status-right { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* MODALS */
   .modal-backdrop {
@@ -513,14 +512,7 @@
         <div id="groups-list"></div>
         <div id="wall-list"></div>
 
-        <!-- LOADING OVERLAY (pre-loading every set's images on folder entry) -->
-        <div id="canvas-loading" class="hidden">
-          <div class="cl-box">
-            <div class="cl-title" id="cl-title">Loading sets&hellip;</div>
-            <div class="cl-bar"><div class="cl-bar-fill" id="cl-bar-fill"></div></div>
-            <div class="cl-sub" id="cl-sub">0 / 0</div>
-          </div>
-        </div>
+
       </div>
 
       <!-- FOCUS OVERLAY -- lives outside #canvas-wrap (the scrollable element)
@@ -550,7 +542,14 @@
   <!-- STATUS BAR -->
   <div id="statusbar">
     <div id="status-left">&mdash;</div>
-    <div id="status-right"></div>
+    <div id="status-end">
+      <div id="status-right"></div>
+      <div id="canvas-loading" class="hidden" aria-label="Loading folder previews">
+        <span id="cl-title">Loading</span>
+        <div class="cl-bar"><div class="cl-bar-fill" id="cl-bar-fill"></div></div>
+        <span class="cl-sub" id="cl-sub"></span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -791,7 +790,9 @@ function updateModeToggleButton() {
 
 function toggleReviewMode() {
   resetPreviews();
+  clearThumbnails();
   canvasGeneration++;
+  document.getElementById('canvas-wrap').classList.remove('preparing');
   reviewMode = reviewMode === 'iteration' ? 'general' : 'iteration';
   currentFolder = null;
   closeFocus();
@@ -1044,7 +1045,7 @@ function renderFoldersList() {
     countFn: f => Object.keys(f.groups).length,
     hasFlag: f => [...flaggedKeys].some(k => JSON.parse(k)[0] === f.dir),
     isActive: f => f.dir === currentFolder,
-    onOpen: f => renderGroupsCanvas(f.dir),
+    onOpen: f => { if (currentFolder !== f.dir) renderGroupsCanvas(f.dir); },
     rerender: renderFoldersList,
   };
   for (const [root, items] of byRoot) {
@@ -1088,6 +1089,7 @@ function renderFoldersListGeneral() {
 }
 
 function openGeneralFolder(dir) {
+  if (currentFolder === dir) return;
   renderGeneralCanvas(dir); // sets currentFolder and rebuilds the wall
   renderFoldersList();      // only to refresh the .active highlight -- the list itself is unchanged
 }
@@ -1136,9 +1138,33 @@ function populateLetterFilter(allBases) {
 }
 
 // ---------------------------------------------------------------- CANVAS (general review): the image wall
+function beginFolderPreviews(dir) {
+  beginPreviewFolder(dir);
+  const wrap = document.getElementById('canvas-wrap');
+  wrap.classList.add('preparing'); wrap.scrollTop = 0;
+  document.getElementById('canvas-loading').classList.remove('hidden');
+  document.getElementById('cl-title').textContent = 'Preparing folder…';
+  document.getElementById('cl-sub').textContent = '';
+  document.getElementById('cl-bar-fill').style.width = '0%';
+}
+async function finishFolderPreviews(generation) {
+  if (generation !== canvasGeneration) return;
+  document.getElementById('canvas-wrap').classList.remove('preparing');
+  const images = [...trackedPreviews];
+  let done = 0;
+  await Promise.all(images.map(image => image._previewReady.then(() => {
+    if (generation !== canvasGeneration) return;
+    document.getElementById('cl-sub').textContent = `${++done} / ${images.length}`;
+    document.getElementById('cl-bar-fill').style.width = `${done / images.length * 100}%`;
+  })));
+  if (generation !== canvasGeneration) return;
+  document.getElementById('canvas-wrap').classList.remove('preparing');
+  document.getElementById('canvas-loading').classList.add('hidden');
+}
 function renderGeneralCanvas(dir) {
   resetPreviews();
   canvasGeneration++;
+  beginFolderPreviews(dir);
   hoveredTile = null;
   groupSectionEls.clear();
   const isNewFolder = currentFolder !== dir;
@@ -1178,9 +1204,10 @@ function renderGeneralCanvas(dir) {
 
 
 async function loadWallImagesWithProgress(dir, order, tintForBase) {
-  document.getElementById('canvas-loading').classList.add('hidden');
+  const generation = canvasGeneration;
   for (const base of new Set(order.map(entry => entry.base))) ensureImagesLoaded(dir, base);
   await renderWallTiles(dir, order, tintForBase);
+  await finishFolderPreviews(generation);
 }
 
 async function renderWallTiles(dir, order, tintForBase) {
@@ -1214,7 +1241,7 @@ async function renderWallTiles(dir, order, tintForBase) {
     }
 
     tile.innerHTML =
-      '<img>' +
+      '<canvas width="160" height="210" draggable="true"></canvas>' +
       '<div class="wall-badges">' +
         (flagged ? '<span class="wall-flag-dot" title="Flagged for requeue"></span>' : '') +
         '<div class="tile-iter-badge small" title="' + escapeHtml(item.base) + '">' + escapeHtml(setLabel(item.base)) + '</div>' +
@@ -1222,11 +1249,10 @@ async function renderWallTiles(dir, order, tintForBase) {
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
 
-    trackPreview(tile.querySelector('img'), dir, imgEntry);
-    tile.querySelector('img').onclick = () => openFocus(dir, item.base, item.name, wallContext);
-    // Drag the real file out via the main process instead of letting the
-    // browser drag the data: URL -- see main.js's start-drag handler.
-    tile.querySelector('img').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, item.name); };
+    trackPreview(tile.querySelector('canvas'), dir, imgEntry);
+    tile.querySelector('canvas').onclick = () => openFocus(dir, item.base, item.name, wallContext);
+    // Drag the original file via the main process, not the preview canvas.
+    tile.querySelector('canvas').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, item.name); };
     tile.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, item.base, item.name); };
     tile.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, item.base, item.name); });
     tile.addEventListener('mouseenter', () => { hoveredTile = { dir, base: item.base, name: item.name }; });
@@ -1267,6 +1293,7 @@ function updateWallTileFlag(dir, base) {
 async function renderGroupsCanvas(dir) {
   resetPreviews();
   const generation = ++canvasGeneration;
+  beginFolderPreviews(dir);
   hoveredTile = null;
   const isNewFolder = currentFolder !== dir;
   currentFolder = dir;
@@ -1287,8 +1314,8 @@ async function renderGroupsCanvas(dir) {
   document.getElementById('btn-expand-all').style.display = bases.length ? 'flex' : 'none';
   document.getElementById('btn-collapse-all').style.display = bases.length ? 'flex' : 'none';
 
-  // Every set expands by default. Build sections in batches; only nearby
-  // thumbnails request image bytes through the intersection observer.
+  // Build the folder structure in batches, then show previews arriving
+  // progressively. Their rendered pixels remain resident for this visit.
   expandedGroups = new Set(bases.map(b => key(dir, b)));
 
   groupSectionEls.clear();
@@ -1305,10 +1332,9 @@ async function renderGroupsCanvas(dir) {
   loadAllImagesWithProgress(dir, bases);
 }
 
-// Build metadata-only tiles in batches. Pixel loading follows viewport visibility.
+// Build every tile once; fill its preview progressively and retain it.
 async function loadAllImagesWithProgress(dir, bases) {
   const generation = canvasGeneration;
-  document.getElementById('canvas-loading').classList.add('hidden');
   let count = 0;
   for (const base of bases) {
     if (generation !== canvasGeneration) return;
@@ -1317,6 +1343,7 @@ async function loadAllImagesWithProgress(dir, bases) {
     const section = groupSectionEls.get(key(dir, base));
     if (section && expandedGroups.has(key(dir, base))) await renderGroupBody(dir, base, section.querySelector('.group-section-body'));
   }
+  await finishFolderPreviews(generation);
 }
 
 function buildGroupSection(dir, base, entries, renderNow = true) {
@@ -1389,6 +1416,7 @@ function ensureImagesLoaded(dir, base) {
 }
 
 async function populateGroupBody(dir, base, body) {
+  if (body.querySelector('.img-tile')) return;
   const k = key(dir, base);
   if (!imageCache[k]) body.innerHTML = '<div class="group-section-loading">loading iterations\u2026</div>';
   await ensureImagesLoaded(dir, base);
@@ -1412,15 +1440,14 @@ async function renderGroupBody(dir, base, body) {
     const imgwrap = document.createElement('div');
     imgwrap.className = 'img-tile-imgwrap';
     imgwrap.innerHTML =
-      '<img>' +
+      '<canvas width="160" height="210" draggable="true"></canvas>' +
       '<div class="tile-iter-badge">' + img.iter + '</div>' +
       '<div class="tile-x-overlay"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></div>' +
       '<button class="mark-btn" title="Mark for deletion"><svg viewBox="0 0 24 24"><line x1="4" y1="4" x2="20" y2="20"></line><line x1="20" y1="4" x2="4" y2="20"></line></svg></button>';
-    trackPreview(imgwrap.querySelector('img'), dir, img);
-    imgwrap.querySelector('img').onclick = () => openFocus(dir, base, img.name);
-    // Drag the real file out via the main process instead of letting the
-    // browser drag the data: URL -- see main.js's start-drag handler.
-    imgwrap.querySelector('img').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, img.name); };
+    trackPreview(imgwrap.querySelector('canvas'), dir, img);
+    imgwrap.querySelector('canvas').onclick = () => openFocus(dir, base, img.name);
+    // Drag the original file via the main process, not the preview canvas.
+    imgwrap.querySelector('canvas').ondragstart = (e) => { e.preventDefault(); api.startDrag(dir, img.name); };
     imgwrap.querySelector('.mark-btn').onclick = (e) => { e.stopPropagation(); toggleMark(dir, base, img.name); };
     imgwrap.addEventListener('contextmenu', (e) => { e.preventDefault(); onImageRightClick(dir, base, img.name); });
 
