@@ -8,8 +8,11 @@ const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 const PROMO_ORDER = [['q', 'Queen'], ['r', 'Rook'], ['b', 'Bishop'], ['n', 'Knight']];
 
 let flipped = false;
-let liveActive = false;     // true while Live screen-reading is driving the board
-let liveMode = 'continuous'; // 'continuous' (auto-polls) or 'manual' (only reads on Capture click)
+let liveActive = false;     // true while an external source is driving the board
+let livePaused = false;
+const boardLocked = () => liveActive && !livePaused;
+let reviewState = {status: 'idle', rows: [], points: []};
+let liveMode = 'browser';   // browser metadata, continuous screen scan, or manual capture
 let liveLowConfidence = false; // true when the last scan's piece-shape match confidence was low
 let boardState = null;      // last state from the backend
 let legalMoves = {};        // square -> [{to, uci, promotion}]
@@ -164,8 +167,8 @@ function renderHighlights() {
 
 function renderHeader() {
   if (!boardState) return;
-  el('btn-step-back').disabled = liveActive || boardState.ply <= 0;
-  el('btn-step-fwd').disabled = liveActive || boardState.ply >= boardState.total_plies;
+  el('btn-step-back').disabled = boardLocked() || boardState.ply <= 0;
+  el('btn-step-fwd').disabled = boardLocked() || boardState.ply >= boardState.total_plies;
 }
 
 function renderAll() {
@@ -174,37 +177,36 @@ function renderAll() {
   renderHeader();
   renderMovesList();
   renderArrows();
+  updateEvalBar();
 }
 
 // ---------------------------------------------------------------- moves list (notation)
 function renderMovesList() {
   const box = el('moves-table');
   el('moves-count-tag').textContent = boardState ? boardState.total_plies : 0;
-  if (!boardState || boardState.moves_san.length === 0) {
-    box.innerHTML = '<div class="moves-empty">No moves played yet.</div>';
+  if (!boardState?.notation?.length) {
+    box.innerHTML = '<div class="moves-empty">Play a move or import a game.</div>';
     return;
   }
-  const sans = boardState.moves_san;
-  let html = '';
-  for (let i = 0; i < sans.length; i += 2) {
-    const moveNum = i / 2 + 1;
-    const whitePly = i + 1;
-    const blackPly = i + 2;
-    const whiteActive = boardState.ply === whitePly ? ' active' : '';
-    html += `<div class="move-row">
-      <div class="move-num">${moveNum}.</div>
-      <div class="move-cell${whiteActive}" data-ply="${whitePly}">${sans[i]}</div>`;
-    if (sans[i + 1] !== undefined) {
-      const blackActive = boardState.ply === blackPly ? ' active' : '';
-      html += `<div class="move-cell${blackActive}" data-ply="${blackPly}">${sans[i + 1]}</div>`;
-    } else {
-      html += `<div class="move-cell empty"></div>`;
+  const opened = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.branch));
+  const moveButton = node => `<button class="notation-move${node.id === boardState.selected_node ? ' active' : ''}" data-node="${node.id}">${node.number}${node.turn === 'w' ? '.' : '…'} ${node.san}</button>`;
+  function line(children) {
+    let html = '';
+    while (children?.length) {
+      const main = children[0];
+      html += moveButton(main);
+      for (const branch of children.slice(1)) {
+        const open = opened.has(branch.id) || boardState.selected_node === branch.id || boardState.selected_node.startsWith(branch.id + ' ');
+        html += `<details class="variation" data-branch="${branch.id}" ${open ? 'open' : ''}><summary>Alternative: ${branch.number}${branch.turn === 'w' ? '.' : '…'} ${branch.san}</summary><div>${line([branch])}</div></details>`;
+      }
+      children = main.children;
     }
-    html += `</div>`;
+    return html;
   }
-  box.innerHTML = html;
-  box.querySelectorAll('.move-cell[data-ply]').forEach((cell) => {
-    cell.addEventListener('click', () => goToPly(parseInt(cell.dataset.ply, 10)));
+  box.innerHTML = line(boardState.notation);
+  box.querySelectorAll('[data-node]').forEach(button => {
+    button.disabled = boardLocked();
+    button.addEventListener('click', async () => applyBundle(await window.pywebview.api.go_to_node(button.dataset.node)));
   });
 }
 
@@ -274,7 +276,7 @@ function hidePromoPicker() {
 }
 
 function onPiecePointerDown(e) {
-  if (liveActive) return; // board is driven by screen capture -- no manual input
+  if (boardLocked()) return;
   e.preventDefault();
   const pieceEl = e.currentTarget;
   const square = pieceEl.dataset.square;
@@ -340,7 +342,7 @@ function onPiecePointerDown(e) {
 
 // clicking an empty (or non-piece-owning) square to complete a move
 el('board-squares').addEventListener('click', (e) => {
-  if (liveActive) return;
+  if (boardLocked()) return;
   const sqDiv = e.target.closest('.sq');
   if (!sqDiv) return;
   const square = sqDiv.dataset.square;
@@ -352,12 +354,13 @@ el('board-squares').addEventListener('click', (e) => {
 });
 
 function goToPly(ply) {
-  if (liveActive) return;
+  if (boardLocked()) return;
   window.pywebview.api.go_to_ply(ply).then(applyBundle);
 }
 
 // ---------------------------------------------------------------- state application
 function applyBundle(res) {
+  if (!res?.state) return;
   boardState = res.state;
   legalMoves = res.legal_moves;
   selectedSquare = null;
@@ -370,9 +373,12 @@ function applyBundle(res) {
 function updateStatusbar() {
   if (!boardState) return;
   let liveTag = '';
+  el('turn-indicator').textContent = boardState.game_over
+    ? (boardState.status || 'Game over').replaceAll('_', ' ')
+    : (boardState.turn === 'w' ? 'White' : 'Black') + ' to move' + (boardState.in_check ? ' · Check' : '');
   if (liveActive) {
     const modeLabel = liveMode === 'manual' ? 'LIVE (manual)' : 'LIVE';
-    liveTag = `<span class="status-live-tag">&#9679; ${modeLabel} &mdash; reading screen</span> &middot; `;
+    liveTag = `<span class="status-live-tag">&#9679; ${modeLabel} &middot; ${liveMode === 'browser' ? 'browser board' : 'screen capture'}</span> &middot; `;
     if (liveLowConfidence) {
       liveTag += `<span class="status-low-confidence" title="Piece-shape match confidence was low on the last scan -- worth double-checking the position">&#9888; low confidence</span> &middot; `;
     }
@@ -380,6 +386,8 @@ function updateStatusbar() {
   el('status-left').innerHTML =
     `${liveTag}<b>${boardState.fullmove_number}</b> move${boardState.fullmove_number === 1 ? '' : 's'} &middot; ply <b>${boardState.ply}</b> / ${boardState.total_plies}`;
   el('status-right').textContent = boardState.fen;
+  el('status-right').title = boardState.fen;
+  el('status-left').title = boardState.recovery_note || '';
 }
 
 // ---------------------------------------------------------------- eval bar + arrows
@@ -626,6 +634,7 @@ function initEnginePanelEvents() {
 
   el('toggle-arrows').addEventListener('change', (e) => {
     showArrows = e.target.checked;
+    window.pywebview.api.set_view_preferences({show_arrows: showArrows});
     renderArrows();
   });
 
@@ -702,40 +711,84 @@ function initTopbar() {
   });
   el('btn-flip').addEventListener('click', () => {
     flipped = !flipped;
+    window.pywebview.api.set_view_preferences({flipped});
     buildSquares();
     renderAll();
   });
   el('btn-step-back').addEventListener('click', () => goToPly((boardState?.ply ?? 1) - 1));
   el('btn-step-fwd').addEventListener('click', () => goToPly((boardState?.ply ?? 0) + 1));
 
-  el('btn-live').addEventListener('click', async () => {
-    const btn = el('btn-live');
-    if (liveActive) {
-      btn.disabled = true;
-      await window.pywebview.api.stop_live();
-      btn.disabled = false;
-      return;
-    }
-    clearSelection();
-    hidePromoPicker();
-    btn.disabled = true;
-    btn.title = 'Drag a box around the board in the overlay window\u2026';
-    const chosenMode = el('live-mode-select').value;
-    const res = await window.pywebview.api.start_live(flipped, chosenMode);
-    btn.disabled = false;
-    if (!res.ok && res.error !== 'cancelled') {
-      alert('Could not start Live mode: ' + res.error);
-    }
-    // on success, window.onLiveStatus({live:true,...}) drives the UI state
+  el('btn-live').addEventListener('click', () => {
+    el('section-live').hidden = false;
+    el('section-live').classList.remove('collapsed');
+    el('section-live').scrollIntoView({block:'nearest'});
   });
+  el('live-connect').addEventListener('click', async () => {
+    const btn = el('live-connect');
+    btn.disabled = true;
+    try {
+      if (liveActive) { await window.pywebview.api.stop_live(); }
+      clearSelection();
+      hidePromoPicker();
+      const chosenMode = el('live-mode-select').value;
+      const res = await window.pywebview.api.start_live(flipped, chosenMode);
+      if (!res.ok && res.error !== 'cancelled') throw new Error(res.error);
+      if (res.ok && chosenMode === 'browser') {
+        el('live-token').value = res.token;
+        el('extension-path').value = res.extension_path;
+        if (!res.paired) {
+          el('modal-live').classList.add('open');
+          el('copy-live-token').focus();
+        }
+      }
+    } catch (error) {
+      showLiveNotice(error.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.title = 'Connect or retry the saved browser connection';
+    }
+  });
+  el('live-disconnect').addEventListener('click', () => window.pywebview.api.stop_live());
+  el('live-pause').addEventListener('click', async () => {
+    const res = await window.pywebview.api[livePaused ? 'resume_live' : 'pause_live']();
+    if (res.error) showLiveNotice(res.error, true); else applyBundle(res);
+  });
+  el('live-pairing').addEventListener('click', async () => {
+    const state = await window.pywebview.api.get_live_status();
+    if (!state.token) {el('live-connect').click(); return;}
+    el('live-token').value = state.token;
+    el('extension-path').value = state.extension_path;
+    el('modal-live').classList.add('open');
+  });
+  el('live-switch').addEventListener('click', async () => {
+    const res = await window.pywebview.api.switch_live_tab();
+    if (!res.ok) {showLiveNotice(res.error, true); return;}
+    el('live-token').value = res.token;
+    el('extension-path').value = res.extension_path;
+    el('modal-live').classList.add('open');
+  });
+  const closeLiveSetup = () => {el('modal-live').classList.remove('open'); el('btn-live').focus();};
+  el('live-close').addEventListener('click', closeLiveSetup);
+  el('live-done').addEventListener('click', closeLiveSetup);
+  el('live-stop').addEventListener('click', async () => {await window.pywebview.api.stop_live(); closeLiveSetup();});
+  for (const [buttonId, inputId] of [['copy-live-token','live-token'], ['copy-extension-path','extension-path']]) {
+    el(buttonId).addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(el(inputId).value);
+        const label = el(buttonId).textContent;
+        el(buttonId).textContent = 'Copied';
+        setTimeout(() => {el(buttonId).textContent = label;}, 1600);
+      } catch { el(inputId).focus(); el(inputId).select(); }
+    });
+  }
 
   el('btn-capture-now').addEventListener('click', async () => {
     const btn = el('btn-capture-now');
     btn.disabled = true;
     btn.classList.add('pulse');
-    await window.pywebview.api.capture_live_now();
-    btn.disabled = false;
-    btn.classList.remove('pulse');
+    try { await window.pywebview.api.capture_live_now(); }
+    catch (error) { showLiveNotice(error.message, true); }
+    finally { btn.disabled = false; btn.classList.remove('pulse'); }
   });
 
   el('btn-import').addEventListener('click', () => el('modal-import').classList.add('open'));
@@ -781,6 +834,18 @@ function initTopbar() {
   });
 
   document.addEventListener('keydown', (e) => {
+    const modal = document.querySelector('.modal-backdrop.open');
+    if (modal) {
+      if (e.key === 'Escape') { modal.classList.remove('open'); el('btn-live').focus(); }
+      if (e.key === 'Tab') {
+        const controls = [...modal.querySelectorAll('button, input, textarea, select')].filter(c => !c.disabled && c.offsetParent !== null);
+        const first = controls[0], last = controls[controls.length - 1];
+        if (e.shiftKey && document.activeElement === first) {e.preventDefault(); last?.focus();}
+        else if (!e.shiftKey && document.activeElement === last) {e.preventDefault(); first?.focus();}
+      }
+      return;
+    }
+    if (e.target.matches('input, textarea, select') || e.target.isContentEditable) return;
     if (e.key === 'ArrowLeft') goToPly((boardState?.ply ?? 1) - 1);
     else if (e.key === 'ArrowRight') goToPly((boardState?.ply ?? 0) + 1);
     else if (e.key === 'Escape') { clearSelection(); hidePromoPicker(); }
@@ -845,29 +910,20 @@ function occupancyDiffCount(fenA, fenB) {
 }
 
 window.onLiveResync = function (res) {
-  const prevFen = boardState ? boardState.fen : null;
-  const bigChange = prevFen ? occupancyDiffCount(prevFen, res.state.fen) > BIG_RESYNC_SQUARES : false;
-
-  if (bigChange) {
-    // A jump this size means the screen moved on to a different game/
-    // position entirely, not a continuation -- briefly clear the board
-    // before showing the new one instead of pieces just teleporting,
-    // so it visually reads as "new position" rather than "your last move
-    // got weird".
-    const layer = el('pieces-layer');
-    layer.classList.add('flash-clear');
-    setTimeout(() => {
-      applyBundle(res);
-      layer.classList.remove('flash-clear');
-    }, 160);
-  } else {
-    applyBundle(res);
-  }
-  console.log(`[live] board resynced from screen scan (confidence ${(res.confidence * 100).toFixed(0)}%)`);
+  applyBundle(res);
 };
 
+function showLiveNotice(message, warning = false) {
+  el('live-notice').hidden = !message;
+  el('live-notice').textContent = message;
+  el('live-notice').classList.toggle('warning', warning);
+  el('live-setup-status').textContent = message;
+}
+
 window.onLiveStatus = function (payload) {
+  const wasLocked = boardLocked();
   liveActive = !!payload.live;
+  livePaused = !!payload.paused;
   if (payload.mode) liveMode = payload.mode;
   if ('low_confidence' in payload) liveLowConfidence = !!payload.low_confidence;
   if (!liveActive) liveLowConfidence = false;
@@ -875,17 +931,29 @@ window.onLiveStatus = function (payload) {
   const btn = el('btn-live');
   const modeSelect = el('live-mode-select');
   const captureBtn = el('btn-capture-now');
-  document.getElementById('app').classList.toggle('live-mode', liveActive);
+  document.getElementById('app').classList.toggle('live-mode', boardLocked());
   btn.classList.toggle('active', liveActive);
-  btn.title = liveActive
-    ? 'Stop Live (screen reading active)'
-    : 'Watch a screen region and mirror moves made there live';
+  el('live-button-label').textContent = livePaused ? 'Live · paused' : 'Live';
+  btn.title = 'Open Live controls';
+  if (liveActive) el('section-live').hidden = false;
+  el('live-tag').textContent = !liveActive ? 'off' : payload.warning ? 'waiting' : livePaused ? 'explore' : 'on';
+  el('live-connect').textContent = liveActive ? 'Reconnect' : 'Connect';
+  el('live-disconnect').hidden = !liveActive;
+  el('live-switch').hidden = !liveActive || liveMode !== 'browser';
+  el('live-pause').hidden = !liveActive || liveMode !== 'browser';
+  el('live-pause').textContent = livePaused ? 'Return to live' : 'Pause & explore';
+  el('live-source-status').textContent = (payload.source || 'No board connected') + (payload.updated ? ' · Updated ' + new Date(payload.updated * 1000).toLocaleTimeString() : '');
   modeSelect.disabled = liveActive; // mode is fixed for the duration of a Live session
   captureBtn.style.display = (liveActive && liveMode === 'manual') ? '' : 'none';
 
-  clearSelection();
-  hidePromoPicker();
+  if (wasLocked !== boardLocked()) {
+    clearSelection();
+    hidePromoPicker();
+    renderMovesList();
+  }
   updateStatusbar();
+  if (boardState) renderHeader();
+  showLiveNotice(payload.error || payload.warning || payload.info || (liveActive ? 'Reading screen…' : ''), !!(payload.warning || payload.error));
 
   // Routine, expected notices (low confidence, "no change on manual
   // capture", orientation confirmed, etc.) are surfaced quietly in the
@@ -900,10 +968,68 @@ window.onLiveStatus = function (payload) {
   if (payload.warning) {
     console.warn('[live] ' + payload.warning);
   }
-  if (payload.error) {
-    alert('Live mode stopped: ' + payload.error);
-  }
 };
+
+// Review lives in an on-demand dialog; the graph and slider inspect the board.
+function reviewScore(score) {
+  if (!score) return '—';
+  return score.mate === 0 ? 'Checkmate' : formatScore(score.cp, score.mate);
+}
+function renderReview() {
+  const data = reviewState;
+  const running = data.status === 'running';
+  el('review-status').textContent = data.error || (running ? `Reviewing ${data.completed} / ${data.total} moves…` : data.status === 'complete' ? `Reviewed ${data.total} moves` : data.status === 'cancelled' ? 'Review cancelled · partial results below' : 'Review the main game with your local engine.');
+  el('review-start').disabled = running;
+  el('review-start').textContent = data.status === 'complete' ? 'Review again' : 'Review game';
+  el('review-cancel').hidden = !running;
+  const points = data.points || [];
+  el('review-position').max = Math.max(0, points.length - 1);
+  const path = points.map((p, i) => `${points.length === 1 ? 0 : i / (points.length - 1) * 600},${80 - Math.tanh(p.value / 400) * 70}`).join(' ');
+  el('review-graph').innerHTML = `<line x1="0" y1="80" x2="600" y2="80" stroke="var(--border2)"/><polyline points="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5"/>`;
+  const box = el('review-turning-points');
+  box.replaceChildren();
+  [...(data.rows || [])].filter(row => row.loss >= 50).sort((a,b) => b.loss - a.loss).slice(0,5).forEach(row => {
+    const button = document.createElement('button');
+    button.className = 'review-point';
+    const drop = row.before.mate !== null || row.after.mate !== null ? 'mate evaluation changed' : `${(row.loss / 100).toFixed(1)} pawn drop`;
+    button.textContent = `${row.number}${row.turn === 'w' ? '.' : '…'} ${row.san} · ${drop}`;
+    button.addEventListener('click', () => inspectReview(row.ply));
+    box.appendChild(button);
+  });
+  if (!box.children.length) box.textContent = points.length ? 'No large evaluation drops found so far.' : 'Run a review to find turning points.';
+}
+async function inspectReview(ply) {
+  el('review-position').value = ply;
+  el('review-position-label').textContent = ply;
+  const row = reviewState.rows?.[ply - 1];
+  el('review-detail').textContent = row ? `${row.number}${row.turn === 'w' ? '.' : '…'} ${row.san} · ${reviewScore(row.before)} → ${reviewScore(row.after)}${row.best ? ' · Engine preferred ' + row.best : ''}` : 'Starting position';
+  const result = await window.pywebview.api.go_to_node(row?.id || '');
+  if (result.error) el('review-status').textContent = result.error;
+  else applyBundle(result);
+}
+function initReview() {
+  el('btn-review').addEventListener('click', async () => {
+    reviewState = await window.pywebview.api.get_review();
+    renderReview();
+    el('modal-review').classList.add('open');
+    el('review-start').focus();
+  });
+  el('review-close').addEventListener('click', () => el('modal-review').classList.remove('open'));
+  el('review-start').addEventListener('click', async () => {
+    const result = await window.pywebview.api.start_review();
+    if (!result.ok) {el('review-status').textContent = result.error; return;}
+    reviewState = result.review;
+    renderReview();
+  });
+  el('review-cancel').addEventListener('click', async () => {reviewState = await window.pywebview.api.cancel_review(); renderReview();});
+  el('review-position').addEventListener('input', e => inspectReview(Number(e.target.value)));
+  el('review-graph').addEventListener('click', e => {
+    if (!reviewState.points?.length) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    inspectReview(Math.max(0, Math.min(reviewState.points.length - 1, Math.round((e.clientX - rect.left) / rect.width * (reviewState.points.length - 1)))));
+  });
+}
+window.onReview = data => {reviewState = data; renderReview();};
 
 // ---------------------------------------------------------------- boot
 async function boot() {
@@ -911,6 +1037,7 @@ async function boot() {
   initTitlebar();
   initResizeHandles();
   initTopbar();
+  initReview();
   initEnginePanelEvents();
   initPanelSections();
 
@@ -921,6 +1048,10 @@ async function boot() {
     window.pywebview.api.get_saved_settings(),
   ]);
   boardState = state;
+  flipped = !!state.view?.flipped;
+  showArrows = state.view?.show_arrows !== false;
+  el('toggle-arrows').checked = showArrows;
+  buildSquares();
   legalMoves = legal;
   renderAll();
   updateStatusbar();
@@ -952,6 +1083,7 @@ async function boot() {
   if (saved && saved.engine_path) el('engine-path').value = saved.engine_path;
 
   setEngineConnectedUI(status.connected, status.identity);
+  window.onLiveStatus(await window.pywebview.api.get_live_status());
 }
 
 if (window.pywebview) {

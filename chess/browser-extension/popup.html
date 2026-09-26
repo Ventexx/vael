@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Vael Chess Live</title>
+<style>
+body{width:280px;padding:20px;margin:0;background:#141a1a;color:#e8efeb;font:14px/1.5 system-ui}
+h1{font-size:19px;margin:0 0 6px}p{color:#a8b9b1}input,button{box-sizing:border-box;width:100%;padding:11px;border-radius:7px;border:1px solid #43544c;margin:6px 0;font:inherit}input{background:#202a26;color:#fff}button{background:#9bd2b4;color:#15271c;cursor:pointer}#status{font-size:12px;min-height:36px}
+</style>
+<h1>Connect this board</h1><p>Pair once with Vael. This tab reconnects after refreshes and restarts. Site access enables reconnection; only the paired game tab is read.</p>
+<label for="token">Pairing code</label><input id="token" placeholder="Leave blank to use saved pairing" autocomplete="off" spellcheck="false" maxlength="32">
+<button id="connect">Connect to Vael</button><p id="status" role="status"></p>
+<script src="popup.js"></script></html>

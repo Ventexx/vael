@@ -1,0 +1,5 @@
+.vael_chess_settings.json
+.vael_chess_session.json*
+.vael_chess_session.backup.json
+tests/.preview-session.json*
+tests/.preview-session.backup.json

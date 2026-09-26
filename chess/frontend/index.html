@@ -42,17 +42,9 @@
         <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
         Flip
       </button>
-      <select class="tb-select" id="live-mode-select" title="Continuous: reads the region on a timer. Manual: only reads when you click Capture.">
-        <option value="continuous">Continuous</option>
-        <option value="manual">Manual</option>
-      </select>
-      <button class="tb-btn" id="btn-live" title="Watch a screen region and mirror moves made there live">
+      <button class="tb-btn" id="btn-live" title="Connect a Lichess or Chess.com browser board">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.34 6.34l1.42 1.42M16.24 16.24l1.42 1.42M6.34 17.66l1.42-1.42M16.24 7.76l1.42-1.42"></path></svg>
-        Live
-      </button>
-      <button class="tb-btn" id="btn-capture-now" title="Capture the assigned region now and update the position" style="display:none;">
-        <svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
-        Capture
+        <span id="live-button-label">Live</span>
       </button>
       <div class="tb-sep"></div>
       <button class="tb-btn" id="btn-import" title="Import PGN or FEN">
@@ -87,13 +79,23 @@
             <div id="eval-fill-black"></div>
             <div id="eval-fill-white"></div>
           </div>
-          <div id="eval-num" class="top">+0.2</div>
+          <div id="eval-num" class="top">—</div>
         </div>
       </div>
     </div>
 
     <!-- RIGHT PANEL -->
     <div id="right-panel">
+      <div class="panel-section collapsed" id="section-live" hidden>
+        <button class="panel-section-head"><svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg><span class="panel-section-title">Live</span><span class="panel-section-tag" id="live-tag">off</span></button>
+        <div class="panel-section-body">
+          <div id="live-notice" role="status" aria-live="polite">Connect a browser game.</div>
+          <div class="hint" id="live-source-status">No board connected</div>
+          <select id="live-mode-select" aria-label="Live source"><option value="browser">Browser board</option><option value="continuous">Screen · experimental</option><option value="manual">Screen · manual</option></select>
+          <div class="live-controls"><button class="small-btn primary" id="live-connect">Connect</button><button class="small-btn" id="live-pause" hidden>Pause & explore</button><button class="small-btn" id="live-disconnect" hidden>Stop</button></div>
+          <div class="live-controls"><button class="small-btn" id="live-pairing">Pairing & setup</button><button class="small-btn" id="live-switch" hidden>Switch browser/tab</button><button class="small-btn" id="btn-capture-now" style="display:none">Capture</button></div>
+        </div>
+      </div>
 
       <!-- ENGINE SETTINGS -->
       <div class="panel-section collapsed" id="section-engine">
@@ -205,6 +207,7 @@
             <span class="panel-section-title">Notation</span>
           </button>
           <div class="moves-nav no-collapse">
+            <button class="small-btn" id="btn-review" title="Review the main game">Review</button>
             <button class="tb-btn icon-only mini" id="btn-step-back" title="Previous move">
               <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </button>
@@ -224,7 +227,7 @@
 
   <!-- STATUS BAR -->
   <div id="statusbar">
-    <div id="status-left">&mdash;</div>
+    <div id="status-left">&mdash;</div><span id="turn-indicator">White to move</span>
     <div id="status-right"></div>
   </div>
 </div>
@@ -271,6 +274,40 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="modal-live" role="dialog" aria-modal="true" aria-labelledby="live-dialog-title">
+  <div class="modal live-modal">
+    <div class="modal-head"><h2 class="modal-title" id="live-dialog-title">Connect your browser board</h2><button class="modal-close" id="live-close" aria-label="Close">×</button></div>
+    <div class="modal-body">
+      <p class="live-intro">Lichess or Chess.com. Your choice of pieces and board.</p>
+      <ol class="setup-steps">
+        <li><strong>Add the companion extension</strong>
+          <p><b>Zen / Firefox:</b> enter <code>about:debugging#/runtime/this-firefox</code> in the browser address bar. Choose <b>Load Temporary Add-on…</b> and select <code>manifest.json</code> inside the folder below. Load it again after restarting your browser.</p>
+          <p><b>Chrome / Edge:</b> open Extensions → Manage extensions. Enable Developer mode, choose <b>Load unpacked</b>, and select this folder. If already installed, click its Reload button after an update.</p>
+          <input id="extension-path" readonly aria-label="Extension folder"><button class="small-btn" id="copy-extension-path">Copy folder path</button>
+        </li>
+        <li><strong>Open the game you want to mirror</strong><p>On Lichess, keep the game's move list available. Click the Vael Chess Live extension in that tab.</p></li>
+        <li><strong>Pair with this workspace</strong><p>Paste this code into the extension and choose Connect to Vael. If asked, allow access to <code>127.0.0.1</code> — that is Vael on your own computer.</p><div class="pairing-row"><input id="live-token" readonly aria-label="Pairing code"><button class="small-btn primary" id="copy-live-token">Copy code</button></div></li>
+      </ol>
+      <p class="hint">Pair once. The selected game reconnects after tab refreshes and app restarts. Allow chess-site access in the extension for automatic reconnection. Use Switch browser/tab in Live to pair a different browser.</p>
+      <p id="live-setup-status" role="status">Waiting for browser…</p>
+    </div>
+    <div class="modal-foot"><button class="btn-secondary" id="live-stop">Stop Live</button><button class="btn-primary" id="live-done">Done</button></div>
+  </div>
+</div>
+<div class="modal-backdrop" id="modal-review" role="dialog" aria-modal="true" aria-labelledby="review-title">
+  <div class="modal review-modal">
+    <div class="modal-head"><h2 class="modal-title" id="review-title">Game review</h2><button class="modal-close" id="review-close" aria-label="Close game review">×</button></div>
+    <div class="modal-body">
+      <p id="review-status" role="status">Review the main game with your local engine.</p>
+      <svg id="review-graph" viewBox="0 0 600 160" role="img" aria-label="Evaluation over the game, from White's perspective"></svg>
+      <label class="hint" for="review-position">Position <span id="review-position-label">0</span></label><input type="range" id="review-position" min="0" max="0" value="0" aria-label="Review position">
+      <div id="review-detail" class="review-detail"></div>
+      <h3 class="review-subtitle">Largest evaluation drops</h3><div id="review-turning-points"></div>
+      <p class="hint">Quick review · 0.35 seconds per position. Scores are from White's perspective. Drops compare consecutive engine evaluations; they are estimates, not move-quality grades. Select a point to inspect the position on the board.</p>
+    </div>
+    <div class="modal-foot"><button class="btn-secondary" id="review-cancel" hidden>Cancel review</button><button class="btn-primary" id="review-start">Review game</button></div>
+  </div>
+</div>
 <script src="pieces.js"></script>
 <script src="app.js"></script>
 </body>

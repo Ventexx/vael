@@ -108,20 +108,11 @@ _PIECE_SYMBOL = {
     chess.ROOK: "r", chess.QUEEN: "q", chess.KING: "k",
 }
 
-# A full-board scan is ALWAYS trusted and adopted when it disagrees with the
-# app's tracked position -- Live's job is to report what's actually on
-# screen, not to second-guess it against how "legal" or "familiar" it
-# looks. These two thresholds only control how the result is *labeled* to
-# the user, never whether it gets used:
-#   - below FULL_SCAN_MIN_USABLE: so few squares matched any piece template
-#     that there's nothing coherent to build a board out of (misaligned
-#     region, or a piece skin so different every single match fails) --
-#     the only case a scan is discarded rather than adopted.
-#   - between the two: adopted, but flagged "low confidence" so the UI can
-#     say so honestly instead of pretending certainty it doesn't have.
-FULL_SCAN_MIN_USABLE = 0.15
-FULL_SCAN_MIN_CONFIDENCE = 0.42
-BOARD_DIFF_TOLERANCE = 1         # squares allowed to disagree before two boards are considered "different"
+# Screen recognition is experimental. Never adopt weak template matches.
+# Browser Live is the theme-independent path for Lichess and Chess.com.
+FULL_SCAN_MIN_USABLE = 0.75
+FULL_SCAN_MIN_CONFIDENCE = 0.80
+BOARD_DIFF_TOLERANCE = 0
 
 _TEMPLATE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 _TEMPLATE_CACHE = {}
@@ -654,6 +645,8 @@ class LiveWatcher:
                         best_flipped, recognized_board = _recognize_board(
                             occupied, type_grid, color_grid, self.flipped
                         )
+                        if not recognized_board.is_valid():
+                            raise ValueError("Screen recognition could not identify a valid position. Use Browser board for Lichess or Chess.com.")
                         self.flipped = best_flipped
                         used_full_scan = True
                         if _boards_differ(recognized_board, app_board, tolerance=BOARD_DIFF_TOLERANCE):
@@ -833,6 +826,9 @@ class LiveWatcher:
         # is actually on screen instead of guessing wrong.
         if self.on_resync:
             self.flipped, recognized_board = _recognize_board(occupied, type_grid, color_grid, self.flipped)
+            if not recognized_board.is_valid():
+                self.on_status({"live": True, "warning": "Screen position is uncertain. Keeping the last board; use Browser board for reliable theme-independent sync."})
+                return False
             self.on_resync(recognized_board.fen(), avg_conf)
             return True
         return False

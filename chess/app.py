@@ -17,6 +17,9 @@ import json
 import os
 import shutil
 import sys
+import secrets
+import threading
+import time
 
 if sys.platform == "win32":
     try:
@@ -33,12 +36,16 @@ import chess.pgn
 import webview
 
 import capture
+from browser_live import BrowserLive, resolve_position
 from engine import EngineManager
+from study import Study, SessionStore
+from review import GameReview
 
 APP_TITLE = "vael. chess"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(SCRIPT_DIR, "frontend")
 SETTINGS_PATH = os.path.join(SCRIPT_DIR, ".vael_chess_settings.json")
+SESSION_PATH = os.path.join(SCRIPT_DIR, ".vael_chess_session.json")
 # .ico isn't reliably supported outside Windows, so use icon.png on Linux/macOS.
 ICON_PATH = os.path.join(SCRIPT_DIR, "icon.ico" if sys.platform == "win32" else "icon.png")
 
@@ -84,23 +91,81 @@ def find_stockfish():
 
 
 class Api:
-    def __init__(self):
-        self.root_fen = chess.STARTING_FEN  # position the master line starts from
-        self.moves = []                     # master line: list[chess.Move], from root_fen
-        self.ply = 0                        # current viewing position = moves[:ply] applied to root
+    def __init__(self, session_path=None):
+        self.state_lock = threading.RLock()
+        self.study = Study()
+        self.session_store = SessionStore(session_path or SESSION_PATH)
+        self.view_preferences = {"flipped": False, "show_arrows": True}
+        self.recovery_note = None
+        self.review_result = {"status": "idle", "rows": [], "points": []}
+        self.review_job = 0
+        self.reviewer = GameReview(self._on_review)
         self.engine_mgr = EngineManager(self._push_info)
         self.settings = load_settings()
         self.live_active = False
+        self.live_paused = False
+        self.live_board = None
+        self.live_source = None
+        self.live_updated = None
+        self.live_status = {"live": False}
+        recovered = self.session_store.load()
+        if recovered:
+            self.study = Study.restore(recovered["study"])
+            self.view_preferences.update(recovered.get("view", {}))
+            self.review_result = recovered.get("review", self.review_result)
+            if self.review_result.get("status") == "running":
+                self.review_result["status"] = "cancelled"
+            self.recovery_note = "Previous session restored."
+            if recovered.get("live_study"):
+                try:
+                    self.live_board = Study.restore(recovered["live_study"]).node.board()
+                    self.live_paused = bool(recovered.get("live_paused"))
+                except (ValueError, KeyError, TypeError):
+                    pass
+        self.browser_live = BrowserLive(self._on_browser_position, self._push_live_status)
         self.live_watcher = capture.LiveWatcher(
             self._board, self._on_live_move, self._on_live_status, self._on_live_resync
         )
 
     # ------------------------------------------------------------ board helpers
+    @property
+    def root_fen(self):
+        return self.study.root_fen
+
+    @property
+    def moves(self):
+        return self.study.line
+
+    @property
+    def ply(self):
+        return len(self.study.path)
+
     def _board(self):
-        b = chess.Board(self.root_fen)
-        for mv in self.moves[: self.ply]:
-            b.push(mv)
-        return b
+        return self.study.node.board()
+
+    def _save_session(self):
+        with self.state_lock:
+            self._write_session()
+
+    def _write_session(self):
+        live_study = None
+        if self.live_board is not None:
+            live_study = Study(self.live_board.root().fen())
+            live_study.merge_board(self.live_board)
+        try:
+            self.session_store.save({"study": self.study.snapshot(), "view": self.view_preferences,
+                "review": self.review_result, "live_paused": self.live_paused,
+                "live_study": live_study.snapshot() if live_study else None})
+        except OSError as exc:
+            self.recovery_note = "Session could not be saved: " + str(exc)
+
+    def set_view_preferences(self, preferences):
+        with self.state_lock:
+            for key in ("flipped", "show_arrows"):
+                if key in preferences:
+                    self.view_preferences[key] = bool(preferences[key])
+            self._save_session()
+        return {"ok": True}
 
     def _san_history(self):
         b = chess.Board(self.root_fen)
@@ -162,6 +227,10 @@ class Api:
             "total_plies": len(self.moves),
             "last_move": self.moves[self.ply - 1].uci() if self.ply > 0 else None,
             "fullmove_number": b.fullmove_number,
+            "selected_node": " ".join(m.uci() for m in self.study.path),
+            "notation": self.study.notation(),
+            "view": self.view_preferences,
+            "recovery_note": self.recovery_note,
         }
 
     def legal_moves(self):
@@ -178,14 +247,15 @@ class Api:
         return out
 
     def _bundle(self, extra=None):
-        out = {"state": self.get_state(), "legal_moves": self.legal_moves()}
-        if extra:
-            out.update(extra)
-        return out
+        with self.state_lock:
+            out = {"state": self.get_state(), "legal_moves": self.legal_moves()}
+            if extra:
+                out.update(extra)
+            return out
 
     # ------------------------------------------------------------ moves
     def make_move(self, uci):
-        if self.live_active:
+        if self.live_active and not self.live_paused:
             return {"ok": False, "error": "live_active"}
         try:
             mv = chess.Move.from_uci(uci)
@@ -194,71 +264,128 @@ class Api:
         b = self._board()
         if mv not in b.legal_moves:
             return {"ok": False, "error": "illegal"}
-        self.moves = self.moves[: self.ply] + [mv]
-        self.ply += 1
-        self._restart_analysis()
-        return {"ok": True, **self._bundle()}
+        with self.state_lock:
+            self.study.play(mv)
+            self._invalidate_review_if_changed()
+            self._save_session()
+            self._restart_analysis()
+            return {"ok": True, **self._bundle()}
 
     def go_to_ply(self, ply):
-        if self.live_active:
+        if self.live_active and not self.live_paused:
             return self._bundle()
         ply = max(0, min(len(self.moves), int(ply)))
-        self.ply = ply
+        line = self.moves[:]
+        self.study.select(" ".join(m.uci() for m in line[:ply]))
+        self.study.line = line
+        self._save_session()
         self._restart_analysis()
         return self._bundle()
 
     def step(self, delta):
         return self.go_to_ply(self.ply + int(delta))
 
+    def go_to_node(self, identifier):
+        with self.state_lock:
+            if self.live_active and not self.live_paused:
+                return self._bundle()
+            try:
+                self.study.select(identifier)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            self._save_session()
+            self._restart_analysis()
+            return self._bundle()
+
     def new_game(self):
         self._stop_live_if_active()
-        self.root_fen = chess.STARTING_FEN
-        self.moves = []
-        self.ply = 0
+        self.study = Study()
+        self.live_board = None
+        self._clear_review()
+        self._save_session()
         self._restart_analysis()
         return self._bundle()
 
     def set_fen(self, fen):
         try:
             b = chess.Board(fen)
+            if not b.is_valid():
+                raise ValueError("This is not a valid chess position.")
         except Exception as e:
             return {"ok": False, "error": str(e)}
         self._stop_live_if_active()
-        self.root_fen = b.fen()
-        self.moves = []
-        self.ply = 0
+        self.study = Study(b.fen())
+        self.live_board = None
+        self._clear_review()
+        self._save_session()
         self._restart_analysis()
         return {"ok": True, **self._bundle()}
 
     def import_pgn(self, pgn_text):
         try:
-            game = chess.pgn.read_game(io.StringIO(pgn_text))
-            if game is None:
-                return {"ok": False, "error": "No game found in PGN text."}
-            root = game.board()  # honors a [FEN] header if present, else standard start
-            mvs = list(game.mainline_moves())
+            study = Study.from_pgn(pgn_text)
         except Exception as e:
             return {"ok": False, "error": str(e)}
         self._stop_live_if_active()
-        self.root_fen = root.fen()
-        self.moves = mvs
-        self.ply = len(mvs)
+        self.study = study
+        self.live_board = None
+        self._clear_review()
+        self._save_session()
         self._restart_analysis()
         return {"ok": True, **self._bundle()}
 
     def export_pgn(self):
-        game = chess.pgn.Game()
-        game.headers["Event"] = "vael. chess"
-        game.headers["Site"] = "local"
-        if self.root_fen != chess.STARTING_FEN:
-            game.headers["FEN"] = self.root_fen
-            game.headers["SetUp"] = "1"
-            game.setup(chess.Board(self.root_fen))
-        node = game
-        for mv in self.moves:
-            node = node.add_variation(mv)
-        exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
-        return game.accept(exporter)
+        return self.study.export()
+
+    # ------------------------------------------------------------ game review
+    def _review_signature(self):
+        return self.root_fen + "|" + " ".join(m.uci() for m in self.study.game.mainline_moves())
+
+    def _clear_review(self):
+        self.reviewer.cancel()
+        self.review_job += 1
+        self.review_result = {"status": "idle", "rows": [], "points": []}
+
+    def _invalidate_review_if_changed(self):
+        if self.review_result.get("signature") not in (None, self._review_signature()):
+            self._clear_review()
+
+    def get_review(self):
+        return self.review_result
+
+    def start_review(self):
+        with self.state_lock:
+            if self.live_active:
+                return {"ok": False, "error": "Stop Live before reviewing the game."}
+            path = self.engine_mgr.engine_path or self.settings.get("engine_path")
+            moves = list(self.study.game.mainline_moves())
+            if not path or not os.path.isfile(path):
+                return {"ok": False, "error": "Connect a local engine in Engine settings first."}
+            if not moves:
+                return {"ok": False, "error": "Play or import a game to review."}
+            self._clear_review()
+            self.review_result = {"status": "running", "rows": [], "points": [], "completed": 0,
+                "total": len(moves), "signature": self._review_signature()}
+            self.reviewer.start(path, self.root_fen, moves, self.review_job)
+            return {"ok": True, "review": self.review_result}
+
+    def cancel_review(self):
+        with self.state_lock:
+            self.reviewer.cancel()
+            self.review_job += 1
+            self.review_result = {**self.review_result, "status": "cancelled"}
+            self._save_session()
+        return self.review_result
+
+    def _on_review(self, result):
+        with self.state_lock:
+            if result["job_id"] != self.review_job:
+                return
+            self.review_result = {**result, "signature": self._review_signature()}
+            if result["status"] != "running":
+                self._save_session()
+            if window is not None:
+                window.evaluate_js("window.onReview && window.onReview(%s)" % json.dumps(self.review_result))
 
     # ------------------------------------------------------------ engine
     def connect_engine(self, path):
@@ -296,26 +423,32 @@ class Api:
     def get_saved_settings(self):
         return self.settings
 
-    # ------------------------------------------------------------ live mode (screen-region board reader)
-    def start_live(self, flipped, mode="continuous"):
-        """Opens the region-selection overlay (blocks until the user drags a
-        box or cancels), then starts watching that region for board changes
-        and mirroring them into the game.
+    # ------------------------------------------------------------ live mode
+    def start_live(self, flipped=False, mode="browser"):
+        """Pair a browser tab by default; screen modes are experimental.
 
-        mode="continuous" (default) polls the region on a timer, same as
-        before. mode="manual" assigns the region but does nothing further
-        until capture_live_now() is called -- useful when a piece skin or
-        overlay makes continuous auto-recognition unreliable, or when you'd
-        rather control exactly when a read happens.
-
-        Live calibrates against whatever position is currently loaded here
-        -- it works starting from any position, not just a fresh game --
-        but it has no way to independently know what's actually on screen.
-        To join a game already in progress: paste the FEN/PGN from the
-        source into Import first, *then* start Live, so the seed position
-        actually matches what's on screen."""
-        if self.live_watcher.active:
+        Browser metadata supplies full FEN or notation plus logical squares.
+        Custom positions without either need an imported FEN as their seed.
+        Screen modes open a region picker and use piece template matching.
+        """
+        if self.live_active:
             return {"ok": False, "error": "already_active"}
+        if mode == "browser":
+            try:
+                token = self.settings.get("browser_pair_token") or secrets.token_hex(16)
+                token = self.browser_live.start(token, self.settings.get("browser_session"))
+            except OSError:
+                return {"ok": False, "error": "The browser connection port is in use. Close any other Vael Chess window and retry."}
+            self.live_active = True
+            if self.live_board is not None and not self.live_paused:
+                with self.state_lock:
+                    self._adopt_live_board()
+            self.settings.update(browser_pair_token=token, live_enabled=True)
+            save_settings(self.settings)
+            self._push_live_status({"live": True, "mode": "browser", "info": "Waiting for your browser tab. Use the pairing code to connect."})
+            return {"ok": True, "token": token, "paired": bool(self.settings.get("browser_session")), "extension_path": os.path.join(SCRIPT_DIR, "browser-extension")}
+        if mode not in ("continuous", "manual"):
+            return {"ok": False, "error": "Unknown Live mode."}
         region = capture.select_region()
         if not region:
             return {"ok": False, "error": "cancelled"}
@@ -334,16 +467,94 @@ class Api:
         return {"ok": True}
 
     def stop_live(self):
+        self.browser_live.stop()
         self.live_watcher.stop()
         self.live_active = False
+        self.live_paused = False
+        self.settings["live_enabled"] = False
+        save_settings(self.settings)
+        self._save_session()
         self._push_live_status({"live": False})
         return {"ok": True}
 
     def _stop_live_if_active(self):
-        if self.live_watcher.active:
-            self.live_watcher.stop()
-            self.live_active = False
-            self._push_live_status({"live": False})
+        if self.live_active:
+            self.stop_live()
+
+    def _on_browser_position(self, payload):
+        with self.state_lock:
+            current = self.live_board if self.live_board is not None else self._board()
+            board = resolve_position(payload, current)
+            if board.fen() == current.fen():
+                board = current.copy()
+            elif not board.move_stack:
+                for move in current.legal_moves:
+                    candidate = current.copy()
+                    candidate.push(move)
+                    if candidate.fen() == board.fen():
+                        board = candidate
+                        break
+            changed = self.live_board is None or board.fen() != self.live_board.fen()
+            self.live_board = board.copy()
+            self.live_source = payload["source"]
+            self.live_updated = time.time()
+            if self.settings.get("browser_session") != payload.get("session"):
+                self.settings["browser_session"] = payload.get("session")
+                save_settings(self.settings)
+            if changed:
+                self._adopt_live_board()
+                self._save_session()
+            self._push_live_status({"live": True, "mode": "browser", "info":
+                "Exploring locally · incoming moves are saved" if self.live_paused else "Board synced", "low_confidence": False})
+
+    def _adopt_live_board(self):
+        if self.live_board is None:
+            return
+        if self.live_board.root().fen() == self.root_fen:
+            self.study.merge_board(self.live_board, select=not self.live_paused)
+        elif not self.live_paused:
+            self.study = Study(self.live_board.root().fen())
+            self.study.merge_board(self.live_board)
+        self._invalidate_review_if_changed()
+        if not self.live_paused:
+            self._restart_analysis()
+            if window is not None:
+                window.evaluate_js("window.onLiveMove && window.onLiveMove(%s)" % json.dumps(self._bundle()))
+
+    def get_live_status(self):
+        return {**self.live_status, "live": self.live_active, "paused": self.live_paused,
+            "source": self.live_source, "updated": self.live_updated,
+            "token": self.settings.get("browser_pair_token", ""),
+            "extension_path": os.path.join(SCRIPT_DIR, "browser-extension")}
+
+    def pause_live(self):
+        if not self.live_active or not self.browser_live.active:
+            return {"ok": False, "error": "Pause & explore is available for a connected browser board."}
+        with self.state_lock:
+            self.live_paused = True
+            self._save_session()
+            self._push_live_status({"live": True, "mode": "browser", "info": "Exploring locally · incoming moves are saved"})
+            return self._bundle()
+
+    def resume_live(self):
+        with self.state_lock:
+            if self.live_board is None:
+                return {"ok": False, "error": "Waiting for the browser's first position."}
+            self.live_paused = False
+            self._adopt_live_board()
+            self._save_session()
+            self._push_live_status({"live": self.live_active, "mode": "browser", "info": "Returned to the latest browser position"})
+            return self._bundle()
+
+    def switch_live_tab(self):
+        # Release ownership explicitly; the extension's Connect action claims
+        # the chosen new tab. Existing tabs cannot race to reclaim ownership.
+        self.stop_live()
+        self.settings.pop("browser_session", None)
+        self.settings["browser_pair_token"] = secrets.token_hex(16)
+        self.live_board = None
+        save_settings(self.settings)
+        return self.start_live(mode="browser")
 
     def _on_live_move(self, move):
         """Runs on the watcher's background thread -- applies a detected
@@ -351,8 +562,9 @@ class Api:
         b = self._board()
         if move not in b.legal_moves:
             return
-        self.moves = self.moves[: self.ply] + [move]
-        self.ply += 1
+        self.study.play(move)
+        self._invalidate_review_if_changed()
+        self._save_session()
         self._restart_analysis()
         if window is None:
             return
@@ -370,12 +582,14 @@ class Api:
         for the master line, the same way Import/set_fen would."""
         try:
             b = chess.Board(fen)
+            if not b.is_valid():
+                raise ValueError("Invalid recognized position")
         except Exception as e:
             print("[live] resync FEN was invalid, ignoring:", e)
             return
-        self.root_fen = b.fen()
-        self.moves = []
-        self.ply = 0
+        self.study = Study(b.fen())
+        self._clear_review()
+        self._save_session()
         self._restart_analysis()
         if window is None:
             return
@@ -393,6 +607,8 @@ class Api:
         self._push_live_status(payload)
 
     def _push_live_status(self, payload):
+        payload = {**payload, "paused": self.live_paused, "source": self.live_source, "updated": self.live_updated}
+        self.live_status = payload
         if window is None:
             return
         try:
@@ -422,9 +638,17 @@ class Api:
             window.toggle_fullscreen()
 
     def close_window(self):
-        self.live_watcher.stop()
+        self.shutdown()
         if window is not None:
             window.destroy()
+
+    def shutdown(self):
+        self.reviewer.cancel()
+        self.browser_live.stop()
+        self.live_watcher.stop()
+        with self.state_lock:
+            self._save_session()
+        self.engine_mgr.disconnect()
 
     def get_window_geometry(self):
         """Current size, used by the JS-side edge/corner resize handles as
@@ -483,6 +707,8 @@ def main():
     )
 
     def on_shown():
+        if api.settings.get("live_enabled"):
+            api.start_live(mode="browser")
         saved = api.settings.get("engine_path")
         path = saved if saved and os.path.exists(saved) else find_stockfish()
         try:
@@ -495,6 +721,7 @@ def main():
             print("[startup] engine auto-connect failed:", e)
 
     window.events.shown += on_shown
+    window.events.closed += api.shutdown
 
     start_kwargs = {"debug": "--debug" in sys.argv}
     if os.path.exists(ICON_PATH):

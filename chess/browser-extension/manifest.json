@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Vael Chess Live",
+  "version": "1.2.0",
+  "minimum_chrome_version": "121",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "vael-chess-live@vael.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {"required": ["none"]}
+    }
+  },
+  "description": "Mirror your selected Lichess or Chess.com board into the local Vael chess app, independently of board and piece themes.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1:18765/*"],
+  "optional_host_permissions": ["https://lichess.org/*", "https://www.chess.com/*", "https://chess.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["read-board.js", "background.js"]
+  },
+  "action": {"default_popup": "popup.html", "default_title": "Connect to Vael Chess"}
+}
