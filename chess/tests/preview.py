@@ -29,8 +29,13 @@ engine_path = app.load_settings().get('engine_path')
 app.load_settings = lambda: {'engine_path':engine_path}
 app.save_settings = lambda _: None
 api = app.Api(str(ROOT / 'tests' / '.preview-session.json'))
+if "--finished-game" in sys.argv:
+    # Simulated browser delivery for visual handoff tests; no browser pairing.
+    api.import_pgn("1. f3 e5 2. g4 Qh4# 0-1")
+    api.live_active = True
+    api._on_browser_position({"source": "lichess.org", "session": "preview-fixture", "fen": api._board().fen()})
 
-ALLOWED = {"get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review", "review_position"}
+ALLOWED = {"get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review", "review_position", "deepen_review", "review_finished_game", "dismiss_live_review"}
 BRIDGE = """<script>
 window.pywebview={api:new Proxy({}, {get:(_,name)=>async(...args)=>{
 const r=await fetch('/api/'+name,{method:'POST',headers:{'X-Vael-Preview':'1'},body:JSON.stringify(args)});return r.json();}})};

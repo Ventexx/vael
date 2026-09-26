@@ -6,6 +6,7 @@ let reviewStep = 0;
 let reviewRequest = 0;
 let reviewSide = 'all';
 let reviewTourIndex = -1;
+let liveReviewOffer = null;
 const reviewColors = {great:'#73c7dd',best:'#a4d4a9',excellent:'#93bf9b',good:'#b5c4b3',inaccuracy:'#e4c078',mistake:'#e8a066',blunder:'#ed8582',forced:'#a2a9aa'};
 const reviewLabels = {great:'Great',best:'Best',excellent:'Excellent',good:'Good',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',forced:'Forced'};
 function reviewScore(score) {
@@ -35,14 +36,17 @@ function gradeBadge(row) {
 }
 function renderReview() {
   const data = reviewState, running = data.status === 'running';
+  const deepRunning = data.deep?.status === 'running';
   const modern = data.version === 2;
   el('review-status').textContent = data.error || (running ? `Analysing ${data.completed} / ${data.total} moves · checking alternatives…` :
     data.status === 'complete' ? `${data.total} moves analysed · ${data.engine || 'Local engine'}` :
     data.status === 'cancelled' ? 'Analysis cancelled · partial results' : 'Analyse your game, then explore its key moments.');
   if (data.rows?.length && !modern) el('review-status').textContent = 'Analyse again to upgrade this saved review with grades and playable alternatives.';
-  el('review-start').disabled = running;
+  el('review-start').disabled = running || deepRunning;
   el('review-start').textContent = data.rows?.length ? 'Analyse again' : 'Analyse game';
-  el('review-cancel').hidden = !running;
+  el('review-cancel').hidden = !running && !deepRunning;
+  el('review-cancel').textContent = deepRunning ? 'Cancel deeper check' : 'Cancel analysis';
+  if (deepRunning) el('review-status').textContent = `Checking move ${data.deep.ply} more deeply · the other moves are unchanged`;
   el('review-progress').hidden = !running;
   el('review-progress').max = data.total || 1;
   el('review-progress').value = data.completed || 0;
@@ -139,7 +143,24 @@ function renderReviewDetail() {
   title.appendChild(gradeBadge(row)); detail.appendChild(title);
   detail.appendChild(reviewNode('p',row.explanation || 'Analyse again for a detailed explanation.'));
   detail.appendChild(reviewNode('p',`Played: ${reviewScore(row.after)} · Preferred: ${reviewScore(row.before)} · White’s perspective`,'hint'));
-  if (row.provisional) detail.appendChild(reviewNode('p','Shallow search · treat this grade as provisional.','hint'));
+  if (row.provisional) detail.appendChild(reviewNode('p','Limited or changing search evidence · treat this grade as provisional.','hint'));
+  const deep = reviewState.deep;
+  el('review-deeper').disabled = reviewState.status === 'running' || deep?.status === 'running' || row.search_seconds >= 6;
+  el('review-deeper').textContent = row.search_seconds >= 6 ? 'Deep check complete' : row.search_seconds >= 3 ? 'Check further' : 'Check deeper';
+  let deepStatus = row.search_seconds >= 3 ? 'Deeper analysis saved' : 'Only this move';
+  if (deep?.ply === row.ply) {
+    if (deep.status === 'running') deepStatus = 'Checking this move…';
+    else if (deep.status === 'error') deepStatus = deep.error;
+    else if (deep.status === 'cancelled') deepStatus = 'Cancelled · previous verdict kept';
+    else if (deep.status === 'complete') deepStatus = deep.previous_grade === row.grade ? 'Verdict confirmed' : `${reviewLabels[deep.previous_grade] || 'Previous verdict'} → ${reviewLabels[row.grade]}`;
+  }
+  el('review-deeper-status').textContent = deepStatus;
+  const evidence = el('review-evidence-lines'); evidence.replaceChildren();
+  el('review-evidence').hidden = !row.evidence?.length;
+  (row.evidence || []).forEach(item=>{
+    const button = reviewButton((item.line === 'best' ? 'Preferred line: ' : 'Played line: ') + item.text,()=>previewReviewLine(item.line,item.step));
+    evidence.appendChild(button);
+  });
   const tour = reviewTour();
   reviewTourIndex = tour.indexOf(reviewPly);
   el('review-counter').textContent = reviewTourIndex < 0 ? 'Move ' + reviewPly : `Highlight ${reviewTourIndex+1} of ${tour.length}`;
@@ -211,12 +232,44 @@ function renderReviewArrows(layer) {
   });
   layer.appendChild(svg);
 }
-function initReview() {
-  el('btn-review').addEventListener('click',async()=>{
+async function openReview() {
     if (liveActive) {showLiveNotice('Stop Live before opening game review.',true); return;}
     reviewState=await window.pywebview.api.get_review(); reviewOpen=true; reviewPly=null;
     el('modal-review').classList.add('open'); renderAll(); renderReview();
     el(reviewState.version === 2 && reviewState.rows?.length ? 'review-tour' : 'review-start').focus();
+}
+function updateLiveReviewOffer(offer) {
+  liveReviewOffer = offer || null;
+  el('live-review-ready').hidden = !offer;
+  if (offer) {
+    el('section-live').hidden = false;
+    el('live-finished-label').textContent = offer.result === 'finished' ? 'Game finished' : 'Finished · ' + offer.result;
+    el('live-review-game').textContent = offer.partial ? 'Review captured moves' : 'Review this game';
+  }
+}
+function initReview() {
+  el('btn-review').addEventListener('click',openReview);
+  el('live-review-dismiss').addEventListener('click',async()=>{
+    if (!liveReviewOffer) return;
+    const id=liveReviewOffer.id;
+    await window.pywebview.api.dismiss_live_review(id);
+    if(liveReviewOffer?.id===id)updateLiveReviewOffer(null);
+  });
+  el('live-review-game').addEventListener('click',async()=>{
+    if (!liveReviewOffer) return;
+    el('live-review-game').disabled=true;
+    try {
+      const result=await window.pywebview.api.review_finished_game(liveReviewOffer.id);
+      if(!result.ok){showLiveNotice(result.error,true);return;}
+      liveActive=false;livePaused=false;updateLiveReviewOffer(null);applyBundle(result);
+      await openReview();el('review-start').click();
+    } finally {el('live-review-game').disabled=false;}
+  });
+  el('review-deeper').addEventListener('click',async()=>{
+    el('review-deeper').disabled=true;
+    const result=await window.pywebview.api.deepen_review(reviewPly);
+    if(!result.ok){el('review-deeper-status').textContent=result.error;el('review-deeper').disabled=false;return;}
+    reviewState=result.review;renderReview();
   });
   el('review-close').addEventListener('click',closeReview);
   el('review-start').addEventListener('click',async()=>{
@@ -245,4 +298,9 @@ function initReview() {
     inspectReview(Math.max(1,Math.min(count,Math.round((e.clientX-rect.left)/rect.width*count))));
   });
 }
-window.onReview=data=>{if ((data.job_id ?? 0) < (reviewState.job_id ?? 0)) return; reviewState=data;renderReview();};
+window.onReview=data=>{
+  if ((data.job_id ?? 0) < (reviewState.job_id ?? 0)) return;
+  const refreshed = data.deep?.status === 'complete' && reviewState.deep?.status === 'running' && data.deep.ply === reviewPly;
+  reviewState=data;renderReview();
+  if(refreshed && reviewOpen) previewReviewLine('before',0);
+};

@@ -3,10 +3,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const sourceCode = fs.readFileSync(require('node:path').join(__dirname, '../browser-extension/read-board.js'), 'utf8');
-function read(host, board, moves = []) {
+function read(host, board, moves = [], resultNode = null) {
   const context = {location: {hostname: host}, document: {
     querySelectorAll: selector => selector.includes('cg-board') || selector.includes('chess-board') ? [board] : moves,
-    querySelector: () => null
+    querySelector: selector => selector.includes('result-wrap') || selector.includes('game-over') ? resultNode : null
   }};
   vm.createContext(context);
   vm.runInContext(sourceCode, context);
@@ -45,4 +45,26 @@ test('Chess.com analysis notation provides a complete fallback without game API'
     {classList:['piece','wk','square-51']}, {classList:['piece','bk','square-58']}]};
   const moves = ['e4','e5','Nf3'].map((san,i) => ({textContent:san, querySelector: selector => selector === '.selected' ? (i === 1 ? {} : null) : {textContent:san}}));
   assert.deepEqual(read('www.chess.com',board,moves).sans,['e4','e5']);
+});
+
+test('Lichess completed results are theme-independent and only offered at the latest ply', () => {
+  const board = {getBoundingClientRect:()=>({width:500}),querySelectorAll:()=>[]};
+  const result = {textContent:'½–½',getBoundingClientRect:()=>({width:40})};
+  assert.equal(read('lichess.org',board,[],result).result,'1/2-1/2');
+  const moves=['e4','e5'].map((san,i)=>({classList:{contains:c=>i===0&&c==='active'},childNodes:[{nodeType:3,textContent:san}]}));
+  assert.equal(read('lichess.org',board,moves,result).finished,undefined);
+  result.textContent='';
+  assert.equal(read('lichess.org',board,[],result).finished,undefined);
+});
+
+test('Chess.com recognizes explicit results and rejects aborted game dialogs', () => {
+  const board={getBoundingClientRect:()=>({width:500}),game:{getFEN:()=> '4k3/8/8/8/8/8/8/4K3 w - - 0 1',getResult:()=> '0-1'}};
+  assert.equal(read('www.chess.com',board).result,'0-1');
+  board.game.getResult=()=> '*';
+  const result={textContent:'White won by resignation',getBoundingClientRect:()=>({width:200})};
+  assert.equal(read('www.chess.com',board,[],result).finished,true);
+  result.textContent='Game aborted';
+  assert.equal(read('www.chess.com',board,[],result).finished,undefined);
+  result.textContent='Black won on timeout'; result.getBoundingClientRect=()=>({width:0});
+  assert.equal(read('www.chess.com',board,[],result).finished,undefined);
 });

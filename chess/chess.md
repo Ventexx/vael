@@ -53,7 +53,7 @@ Close Chess and delete its `chess` folder, including the generated `venv` folder
 
 1. Click **Live** in Vael, then **Connect** in its compact panel.
 2. Load the companion from the `browser-extension` folder beside `app.py`. The setup dialog provides the full folder path:
-   - **Zen / Firefox:** enter `about:debugging#/runtime/this-firefox` in the browser address bar, choose **Load Temporary Add-on…**, and select `browser-extension/manifest.json`. Load it again after a browser restart. Permanent installation requires a Mozilla-signed release, which is not included.
+   - **Zen / Firefox:** enter `about:debugging#/runtime/this-firefox` in the browser address bar, choose **Load Temporary Add-on…**, and select `browser-extension/firefox/manifest.json`. Load it again after a browser restart. Permanent installation requires a Mozilla-signed release, which is not included.
    - **Chrome / Edge:** open the extension manager, enable Developer mode, choose **Load unpacked**, and select the `browser-extension` folder. If already installed, use its **Reload** button after updating these files.
 3. Open a single game board on Lichess or Chess.com. Click **Vael Chess Live** in your browser's extensions, paste the pairing code, and connect. Allow local access and access to the supported chess sites so the companion can reconnect after a page refresh. The extension stores the paired game URL and connection details locally.
 4. The Live panel shows connection and sync status. **Pause & explore** lets you navigate and create variations while browser updates continue in the background. **Return to live** follows the latest position. **Stop** disables automatic startup; **Switch browser/tab** creates a new pairing code.
@@ -94,3 +94,11 @@ start_silent.bat      — alternate Windows launcher
 chess.md              — this guide
 icon.png / .ico       — app icons
 ```
+
+### Review refinements
+
+Use **Check deeper** on a move for a three-second search per candidate, then **Check further** for six seconds. Cancelling keeps the previous verdict. **See the threat and reply** jumps to concrete positions in the analysed lines without changing your game.
+
+A completed connected game offers **Review this game** in the Live section. It stops Live and starts the review; dismissing the offer keeps it quiet. Checkmate and automatic draws are detected from the board. Resignations and clock results depend on the site's visible result data; detection is covered by fixtures but has not been verified against every current site layout or language.
+
+The Chrome/Edge extension uses the root `browser-extension` folder. Zen/Firefox uses the generated `browser-extension/firefox` package. After editing shared companion sources, run `python browser-extension/build_firefox.py`; tests verify both packages stay in sync.

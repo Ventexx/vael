@@ -924,6 +924,7 @@ function showLiveNotice(message, warning = false) {
 }
 
 window.onLiveStatus = function (payload) {
+  updateLiveReviewOffer(payload.review_offer);
   const wasLocked = boardLocked();
   liveActive = !!payload.live;
   livePaused = !!payload.paused;

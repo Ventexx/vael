@@ -9,6 +9,8 @@ const source = name => fs.readFileSync(path.join(directory, name), 'utf8');
 const manifest = JSON.parse(source('manifest.json'));
 
 function loadBackground(family) {
+  const packageSource = name => source((family === 'firefox' ? 'firefox/' : '') + name);
+  const packageManifest = JSON.parse(packageSource('manifest.json'));
   let listener, startup;
   const storage = {};
   const injections = [], posts = [], badges = [];
@@ -38,19 +40,32 @@ function loadBackground(family) {
     },
     [family === 'firefox' ? 'browser' : 'chrome']: api
   });
-  const run = file => vm.runInContext(source(file), context, {filename:file});
+  const run = file => vm.runInContext(packageSource(file), context, {filename:file});
   if (family === 'chromium') {
     context.importScripts = run;
-    run(manifest.background.service_worker);
+    run(packageManifest.background.service_worker);
   } else {
     // No chrome or importScripts global: reproduce Firefox's event page.
-    for (const file of manifest.background.scripts) run(file);
+    for (const file of packageManifest.background.scripts) run(file);
   }
   return {storage, injections, posts, badges, startup,
     send: (message, sender = {}) => new Promise(resolve => {
       assert.equal(listener(message, sender, resolve), true);
     })};
 }
+
+test('browser packages use compatible background manifests and synchronized sources', () => {
+  assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.background.service_worker, 'background.js');
+  assert.equal('scripts' in manifest.background, false);
+  assert.equal('browser_specific_settings' in manifest, false);
+  const firefox = JSON.parse(source('firefox/manifest.json'));
+  assert.equal('service_worker' in firefox.background, false);
+  assert.deepEqual(firefox.background.scripts, ['read-board.js','background.js']);
+  assert.equal(firefox.version, manifest.version);
+  for (const file of ['background.js','read-board.js','poll.js','popup.js','popup.html'])
+    assert.equal(source('firefox/'+file), source(file), file + ' must be regenerated');
+});
 
 for (const family of ['chromium', 'firefox']) {
   test(`${family}: manifest startup, pairing, MAIN-world read and authenticated local delivery`, async () => {

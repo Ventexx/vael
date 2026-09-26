@@ -88,6 +88,7 @@
     <div id="right-panel">
       <div class="panel-section collapsed" id="section-live" hidden>
         <button class="panel-section-head"><svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg><span class="panel-section-title">Live</span><span class="panel-section-tag" id="live-tag">off</span></button>
+        <div id="live-review-ready" hidden><span id="live-finished-label">Game finished</span><button class="small-btn primary" id="live-review-game">Review this game</button><button class="small-btn" id="live-review-dismiss" aria-label="Dismiss finished-game review">×</button></div>
         <div class="panel-section-body">
           <div id="live-notice" role="status" aria-live="polite">Connect a browser game.</div>
           <div class="hint" id="live-source-status">No board connected</div>
@@ -281,7 +282,7 @@
       <p class="live-intro">Lichess or Chess.com. Your choice of pieces and board.</p>
       <ol class="setup-steps">
         <li><strong>Add the companion extension</strong>
-          <p><b>Zen / Firefox:</b> enter <code>about:debugging#/runtime/this-firefox</code> in the browser address bar. Choose <b>Load Temporary Add-on…</b> and select <code>manifest.json</code> inside the folder below. Load it again after restarting your browser.</p>
+          <p><b>Zen / Firefox:</b> enter <code>about:debugging#/runtime/this-firefox</code> in the browser address bar. Choose <b>Load Temporary Add-on…</b>, open the folder below, then select <code>firefox/manifest.json</code>. Load it again after restarting your browser.</p>
           <p><b>Chrome / Edge:</b> open Extensions → Manage extensions. Enable Developer mode, choose <b>Load unpacked</b>, and select this folder. If already installed, click its Reload button after an update.</p>
           <input id="extension-path" readonly aria-label="Extension folder"><button class="small-btn" id="copy-extension-path">Copy folder path</button>
         </li>
@@ -305,6 +306,8 @@
       <section id="review-journey" hidden aria-label="Guided review">
         <div class="review-nav"><button class="small-btn" id="review-summary-back">Summary</button><span id="review-counter"></span></div>
         <div id="review-detail" class="review-detail" aria-live="polite"></div>
+        <div class="review-nav"><button class="small-btn" id="review-deeper">Check deeper</button><span id="review-deeper-status" role="status"></span></div>
+        <details id="review-evidence"><summary>See the threat and reply</summary><div id="review-evidence-lines"></div></details>
         <div class="review-choices"><button class="btn-secondary" id="review-before">Before move</button><button class="btn-secondary" id="review-played">Played move</button><button class="btn-primary" id="review-preferred">Show preferred</button></div>
         <p class="hint" id="review-board-caption"></p>
         <div id="review-line" aria-label="Engine continuation"></div>

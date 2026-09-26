@@ -21,14 +21,14 @@ Mate scores map to the corresponding extreme. Loss is the nonnegative difference
 Grades:
 - Forced: exactly one legal move.
 - Best: the engine's preferred move.
-- Great: a preferred move with a candidate-index gap of at least 12 and search depth at least 14. This denotes a critical engine choice, not proof of human difficulty.
+- Great: a preferred move with a candidate-index gap of at least 15 and search depth at least 18, confirmed across searches. Captures, immediate mates, positions with at most two legal moves, and already decisive evaluations are excluded. This denotes a critical engine choice, not proof of human difficulty.
 - Excellent: loss below 1.5 points and centipawn loss at most 60.
 - Good: loss below 4 points.
 - Inaccuracy: loss of at least 4 points.
 - Mistake: loss of at least 10 points.
 - Blunder: loss of at least 20 points.
 
-The highest applicable loss category wins. Searches below depth 12 are marked provisional. A candidate search can miss a better move, and equivalent moves may exchange rankings between searches. If the constrained played search finds a higher score, it becomes the preferred candidate. These estimates need corpus calibration before stronger claims are justified.
+The highest applicable loss category wins. Searches below depth 14 are marked provisional. A candidate search can miss a better move, and equivalent moves may exchange rankings between searches. If the constrained played search finds a higher score, it becomes the preferred candidate. These estimates need corpus calibration before stronger claims are justified.
 
 Phases are deliberately simple: the first ten move numbers are opening unless already an endgame; an endgame begins at at most 26 total non-pawn material points (minor piece 3, rook 5, queen 9). Everything else is middlegame. Missing phases show no score.
 
@@ -39,8 +39,14 @@ Explanations combine the engine comparison with verifiable facts: checkmate, pro
 ## Remaining work
 
 - Calibrate scoring against a diverse, human-reviewed corpus and measure stability at larger search budgets.
-- Offer deeper per-move analysis and cache searches by full position history, engine version, and settings.
+- Cache searches by full position history, engine version, and settings.
 - Verify tactical motifs across the opponent's strongest replies, including sacrifices with delayed compensation, defensive resources, pins and discovered attacks.
 - Add opening-book labels only with an actual opening database.
 - Consider Brilliant only after sound sacrifice, compensation, and uniqueness can be verified. No Brilliant labels or estimated player ratings are currently generated.
 - Expand explanations for quiet strategy and endgames only when backed by concrete evidence or tablebases.
+
+## Verification and deeper checks
+
+Individual moves can be rechecked with three- then six-second searches per candidate. Cancellation or failure keeps the previous row; completing a check refreshes the summary and highlights. Expandable evidence links show specific checks, captures and replies in legal engine continuations.
+
+`tests/calibrate_review.py` records Stockfish results in `tests/review-calibration-report.json`: 44/44 synthetic position checks passed across both colors and two search budgets, with three Best/Excellent changes between budgets. Three short game controls also passed. These are regression controls, not independent human validation of the accuracy formula. Broader human-reviewed calibration remains necessary.

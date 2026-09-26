@@ -7,6 +7,130 @@ from review import grade_move, summarize, highlights, move_fact, line_data, Game
 import test_workspace
 
 
+class DeeperReviewTests(unittest.TestCase):
+    setUp = test_workspace.WorkspaceTests.setUp
+    tearDown = test_workspace.WorkspaceTests.tearDown
+
+    def prepare(self):
+        self.api.import_pgn("1. f3 e5 2. g4 Qh4# *")
+        row = {"ply":1,"id":"f2f3","before_id":"","fen":chess.STARTING_FEN,"uci":"f2f3",
+               "grade":"mistake","turn":"w","phase":"opening","accuracy":50,"chance_loss":15,
+               "candidate_gap":0,"before":score(30),"after":score(-120),"search_seconds":1}
+        self.api.review_result = {"version":2,"status":"complete","signature":self.api._review_signature(),
+                                  "rows":[row],"points":[score(30),score(-120)],"completed":1,"total":1}
+        self.api.settings["engine_path"]="test-engine"
+        return row.copy()
+
+    def test_deep_check_preserves_history_and_only_replaces_target(self):
+        original = self.prepare()
+        saved = self.api.study.snapshot()
+        with patch("app.os.path.isfile",return_value=True), patch.object(self.api.reviewer,"deepen") as worker:
+            result=self.api.deepen_review(1)
+            self.assertTrue(result["ok"])
+            self.assertEqual(worker.call_args.args[-1],3)
+        replacement={**original,"grade":"inaccuracy","accuracy":80,"chance_loss":5,"search_seconds":3}
+        self.api._on_review({"kind":"deep","status":"complete","job_id":self.api.review_job,"row":replacement})
+        self.assertEqual(self.api.study.snapshot(),saved)
+        self.assertEqual(self.api.review_result["summary"]["w"]["accuracy"],80)
+        self.assertEqual(self.api.review_result["deep"]["previous_grade"],"mistake")
+        self.assertEqual(self.api.review_result["status"],"complete")
+
+    def test_cancel_keeps_report_and_discards_late_deep_response(self):
+        original=self.prepare()
+        with patch("app.os.path.isfile",return_value=True), patch.object(self.api.reviewer,"deepen"):
+            self.api.deepen_review(1)
+        job=self.api.review_job
+        self.api.cancel_review()
+        self.api._on_review({"kind":"deep","status":"complete","job_id":job,"row":{**original,"grade":"blunder"}})
+        self.assertEqual(self.api.review_result["rows"][0],original)
+        self.assertEqual(self.api.review_result["status"],"complete")
+        self.assertEqual(self.api.review_result["deep"]["status"],"cancelled")
+
+    def test_deep_failure_and_limit_keep_previous_row(self):
+        original=self.prepare()
+        with patch("app.os.path.isfile",return_value=True), patch.object(self.api.reviewer,"deepen"):
+            self.api.deepen_review(1)
+        self.api._on_review({"kind":"deep","status":"error","job_id":self.api.review_job,"error":"Engine stopped"})
+        self.assertEqual(self.api.review_result["rows"][0],original)
+        self.api.review_result["rows"][0]["search_seconds"]=6
+        with patch("app.os.path.isfile",return_value=True):
+            self.assertFalse(self.api.deepen_review(1)["ok"])
+
+
+class LiveCompletionTests(unittest.TestCase):
+    setUp = test_workspace.WorkspaceTests.setUp
+    tearDown = test_workspace.WorkspaceTests.tearDown
+
+    def send(self,board,**extra):
+        self.api._on_browser_position({"source":"lichess.org","session":"fixture","fen":board.fen(),**extra})
+
+    def test_mate_offered_once_and_dismissal_survives_polling(self):
+        self.api.import_pgn("1. f3 e5 2. g4 Qh4# *")
+        self.api.live_active=True
+        board=self.api._board().copy()
+        self.send(board)
+        offer=self.api.get_live_status()["review_offer"]
+        self.assertEqual(offer["result"],"0-1")
+        self.send(board)
+        self.assertEqual(self.api.get_live_status()["review_offer"]["id"],offer["id"])
+        self.api.dismiss_live_review(offer["id"])
+        self.send(board)
+        self.assertIsNone(self.api.get_live_status()["review_offer"])
+
+    def test_resignation_metadata_and_new_game_clear_offer(self):
+        self.api.import_pgn("1. e4 e5 *")
+        self.api.live_active=True
+        self.send(self.api._board(),finished=True,result="1-0")
+        self.assertIsNone(self.api.live_review_offer)
+        self.send(self.api._board(),finished=True,result="1-0")
+        self.assertIsNotNone(self.api.live_review_offer)
+        self.send(self.api._board())
+        self.assertIsNotNone(self.api.live_review_offer)
+        self.send(chess.Board())
+        self.assertIsNone(self.api.live_review_offer)
+
+    def test_resignation_review_excludes_later_exploration_and_recovers(self):
+        self.api.import_pgn("1. e4 e5 2. Nf3 Nc6 *")
+        finished = chess.Board()
+        finished.push_san("e4")
+        finished.push_san("e5")
+        self.api.live_board = finished.copy()
+        self.api.live_active = True
+        self.send(finished, finished=True, result="1-0")
+        self.send(finished, finished=True, result="1-0")
+        self.assertTrue(self.api.review_finished_game(self.api.live_review_offer["id"])["ok"])
+        self.assertEqual([m.uci() for m in self.api._review_moves()], ["e2e4", "e7e5"])
+        self.assertIn("Nc6", self.api.export_pgn())
+        recovered = self.api.session_store.load()
+        self.assertEqual(recovered["review_route"]["moves"], ["e2e4", "e7e5"])
+
+    def test_false_or_unrecognized_result_does_not_end_game(self):
+        self.api.import_pgn("1. e4 e5 *")
+        self.send(self.api._board(),finished=True,result="aborted")
+        self.assertIsNone(self.api.live_review_offer)
+        self.send(self.api._board(),finished=False,result="1-0")
+        self.assertIsNone(self.api.live_review_offer)
+
+    def test_handoff_uses_live_game_while_preserving_exploration(self):
+        self.api.import_pgn("1. f3 e5 2. g4 *")
+        self.api.live_board=self.api._board().copy()
+        self.api.live_active=True
+        self.api.live_paused=True
+        self.api.make_move("b8c6")
+        finished=self.api.live_board.copy()
+        finished.push_san("Qh4#")
+        self.send(finished)
+        offer=self.api.live_review_offer["id"]
+        self.assertFalse(self.api.review_finished_game("stale")["ok"])
+        result=self.api.review_finished_game(offer)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.api._board().fen(),finished.fen())
+        self.assertIn("Nc6",self.api.export_pgn())
+        self.assertFalse(self.api.live_active)
+        self.assertIsNone(self.api.live_review_offer)
+
+
+
 def score(cp):
     return {"cp": cp, "mate": None, "value": cp}
 

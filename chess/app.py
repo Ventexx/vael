@@ -39,7 +39,7 @@ import capture
 from browser_live import BrowserLive, resolve_position
 from engine import EngineManager
 from study import Study, SessionStore
-from review import GameReview
+from review import GameReview, summarize, highlights
 
 APP_TITLE = "vael. chess"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -98,6 +98,7 @@ class Api:
         self.view_preferences = {"flipped": False, "show_arrows": True}
         self.recovery_note = None
         self.review_result = {"status": "idle", "rows": [], "points": []}
+        self.review_route = None
         self.review_job = 0
         self.reviewer = GameReview(self._on_review)
         self.engine_mgr = EngineManager(self._push_info)
@@ -108,13 +109,21 @@ class Api:
         self.live_source = None
         self.live_updated = None
         self.live_status = {"live": False}
+        self.live_review_offer = None
+        self.live_finished_board = None
+        self.live_finished_key = None
+        self.live_dismissed_key = None
+        self.live_finish_candidate = None
         recovered = self.session_store.load()
         if recovered:
             self.study = Study.restore(recovered["study"])
             self.view_preferences.update(recovered.get("view", {}))
             self.review_result = recovered.get("review", self.review_result)
+            self.review_route = recovered.get("review_route")
             if self.review_result.get("status") == "running":
                 self.review_result["status"] = "cancelled"
+            if self.review_result.get("deep", {}).get("status") == "running":
+                self.review_result["deep"]["status"] = "cancelled"
             self.recovery_note = "Previous session restored."
             if recovered.get("live_study"):
                 try:
@@ -154,7 +163,7 @@ class Api:
             live_study.merge_board(self.live_board)
         try:
             self.session_store.save({"study": self.study.snapshot(), "view": self.view_preferences,
-                "review": self.review_result, "live_paused": self.live_paused,
+                "review": self.review_result, "review_route": self.review_route, "live_paused": self.live_paused,
                 "live_study": live_study.snapshot() if live_study else None})
         except OSError as exc:
             self.recovery_note = "Session could not be saved: " + str(exc)
@@ -338,8 +347,18 @@ class Api:
         return self.study.export()
 
     # ------------------------------------------------------------ game review
+    def _review_moves(self):
+        moves = list(self.study.game.mainline_moves())
+        route = self.review_route
+        if isinstance(route, dict) and route.get("root") == self.root_fen:
+            captured = route.get("moves")
+            if isinstance(captured, list) and [m.uci() for m in moves[:len(captured)]] == captured:
+                return moves[:len(captured)]
+        self.review_route = None
+        return moves
+
     def _review_signature(self):
-        return self.root_fen + "|" + " ".join(m.uci() for m in self.study.game.mainline_moves())
+        return self.root_fen + "|" + " ".join(m.uci() for m in self._review_moves())
 
     def _clear_review(self):
         self.reviewer.cancel()
@@ -359,7 +378,7 @@ class Api:
             if self.live_active:
                 return {"ok": False, "error": "Stop Live before reviewing the game."}
             path = self.engine_mgr.engine_path or self.settings.get("engine_path")
-            moves = list(self.study.game.mainline_moves())
+            moves = self._review_moves()
             if not path or not os.path.isfile(path):
                 return {"ok": False, "error": "Connect a local engine in Engine settings first."}
             if not moves:
@@ -372,6 +391,37 @@ class Api:
             players = {key: (value if value and value != "?" else ("White" if key == "w" else "Black")) for key, value in players.items()}
             self.reviewer.start(path, self.root_fen, moves, self.review_job, players)
             return {"ok": True, "review": self.review_result}
+
+    def deepen_review(self, ply):
+        with self.state_lock:
+            if self.live_active:
+                return {"ok": False, "error": "Stop Live before checking a move."}
+            if self.review_result.get("status") == "running" or self.review_result.get("deep", {}).get("status") == "running":
+                return {"ok": False, "error": "Wait for the current analysis or cancel it first."}
+            if self.review_result.get("signature") != self._review_signature():
+                return {"ok": False, "error": "The game changed. Analyse it again."}
+            path = self.engine_mgr.engine_path or self.settings.get("engine_path")
+            if not path or not os.path.isfile(path):
+                return {"ok": False, "error": "Connect a local engine first."}
+            try:
+                ply = int(ply)
+                row = self.review_result["rows"][ply - 1]
+                if ply < 1 or row["ply"] != ply:
+                    raise ValueError()
+                seconds = 3 if row.get("search_seconds", 0) < 3 else 6
+                if row.get("search_seconds", 0) >= 6:
+                    return {"ok": False, "error": "This move already has the deepest check."}
+                moves = self._review_moves()
+                board = self.study.game.board()
+                for move in moves[:ply - 1]:
+                    board.push(move)
+                self.review_job += 1
+                self.review_result = {**self.review_result, "job_id": self.review_job,
+                    "deep": {"status": "running", "ply": ply, "seconds": seconds, "previous_grade": row.get("grade")}}
+                self.reviewer.deepen(path, board, moves[ply - 1], [m.uci() for m in moves[:ply - 1]], self.review_job, seconds, previous_best=row.get("best_uci"))
+                return {"ok": True, "review": self.review_result}
+            except (IndexError, KeyError, ValueError, TypeError):
+                return {"ok": False, "error": "Select an analysed move to check."}
 
     def review_position(self, ply, line="before", step=0):
         """Return an ephemeral board; never mutate the study or its saved cursor."""
@@ -394,7 +444,7 @@ class Api:
                     game_over=board.is_game_over(), status="checkmate" if board.is_checkmate() else "draw" if board.is_game_over() else None,
                     last_move=board.peek().uci() if board.move_stack else None,
                     ply=int(ply) - 1 + step, fullmove_number=board.fullmove_number,
-                    total_plies=len(list(self.study.game.mainline_moves())), selected_node=row["before_id"],
+                    total_plies=len(self._review_moves()), selected_node=row["before_id"],
                     recovery_note="Review preview · your game and variations are unchanged")
                 return {"state": state, "legal_moves": {}, "step": step}
             except (KeyError, IndexError, ValueError, TypeError):
@@ -404,7 +454,11 @@ class Api:
         with self.state_lock:
             self.reviewer.cancel()
             self.review_job += 1
-            self.review_result = {**self.review_result, "job_id": self.review_job, "status": "cancelled"}
+            if self.review_result.get("deep", {}).get("status") == "running":
+                self.review_result = {**self.review_result, "job_id": self.review_job,
+                    "deep": {**self.review_result["deep"], "status": "cancelled"}}
+            else:
+                self.review_result = {**self.review_result, "job_id": self.review_job, "status": "cancelled"}
             self._save_session()
         return self.review_result
 
@@ -412,7 +466,22 @@ class Api:
         with self.state_lock:
             if result["job_id"] != self.review_job:
                 return
-            self.review_result = {**result, "signature": self._review_signature()}
+            if result.get("kind") == "deep":
+                deep = {**self.review_result.get("deep", {}), "status": result["status"]}
+                if result.get("error"):
+                    deep["error"] = result["error"]
+                self.review_result = {**self.review_result, "deep": deep}
+                if result["status"] == "complete":
+                    row = result["row"]
+                    rows = list(self.review_result["rows"])
+                    rows[row["ply"] - 1] = row
+                    points = list(self.review_result["points"])
+                    points[row["ply"]] = row["after"]
+                    if row["ply"] == 1:
+                        points[0] = row["before"]
+                    self.review_result.update(rows=rows, points=points, summary=summarize(rows), highlights=highlights(rows))
+            else:
+                self.review_result = {**result, "signature": self._review_signature()}
             if result["status"] != "running":
                 self._save_session()
             if window is not None:
@@ -509,6 +578,11 @@ class Api:
         return {"ok": True}
 
     def _stop_live_if_active(self):
+        self.review_route = None
+        self.live_review_offer = None
+        self.live_finished_board = None
+        self.live_finished_key = None
+        self.live_finish_candidate = None
         if self.live_active:
             self.stop_live()
 
@@ -535,12 +609,30 @@ class Api:
             if changed:
                 self._adopt_live_board()
                 self._save_session()
+            outcome = board.outcome(claim_draw=False)
+            site_finished = payload.get("finished") is True and payload.get("result") in ("1-0", "0-1", "1/2-1/2", "finished")
+            key = (payload.get("session"), board.root().fen(), board.fen())
+            candidate = (key, payload.get("result")) if site_finished else None
+            confirmed = site_finished and self.live_finish_candidate == candidate
+            self.live_finish_candidate = candidate
+            if (outcome or confirmed or key == self.live_finished_key) and board.move_stack:
+                if key != self.live_finished_key:
+                    self.live_finished_key = key
+                    self.live_finished_board = board.copy()
+                    self.live_review_offer = None if key == self.live_dismissed_key else {
+                        "id": secrets.token_hex(8), "result": outcome.result() if outcome else payload["result"],
+                        "partial": board.root().fen() != chess.STARTING_FEN}
+            else:
+                self.live_finished_key = None
+                self.live_finished_board = None
+                self.live_review_offer = None
             self._push_live_status({"live": True, "mode": "browser", "info":
                 "Exploring locally · incoming moves are saved" if self.live_paused else "Board synced", "low_confidence": False})
 
     def _adopt_live_board(self):
         if self.live_board is None:
             return
+        self.review_route = None
         if self.live_board.root().fen() == self.root_fen:
             self.study.merge_board(self.live_board, select=not self.live_paused)
         elif not self.live_paused:
@@ -554,9 +646,38 @@ class Api:
 
     def get_live_status(self):
         return {**self.live_status, "live": self.live_active, "paused": self.live_paused,
+            "review_offer": self.live_review_offer,
             "source": self.live_source, "updated": self.live_updated,
             "token": self.settings.get("browser_pair_token", ""),
             "extension_path": os.path.join(SCRIPT_DIR, "browser-extension")}
+
+    def dismiss_live_review(self, offer_id):
+        with self.state_lock:
+            if self.live_review_offer and self.live_review_offer["id"] == offer_id:
+                self.live_dismissed_key = self.live_finished_key
+                self.live_review_offer = None
+            return {"ok": True}
+
+    def review_finished_game(self, offer_id):
+        with self.state_lock:
+            if not self.live_review_offer or self.live_review_offer["id"] != offer_id or self.live_finished_board is None:
+                return {"ok": False, "error": "That game is no longer the connected game."}
+            board = self.live_finished_board.copy()
+        # Receiver shutdown must not hold the state lock: a callback can be finishing.
+        self.stop_live()
+        with self.state_lock:
+            if not self.live_review_offer or self.live_review_offer["id"] != offer_id:
+                return {"ok": False, "error": "The browser game changed. Connect the finished game again."}
+            self.live_board = board
+            self.live_paused = False
+            self._adopt_live_board()
+            self.review_route = {"root": board.root().fen(), "moves": [m.uci() for m in board.move_stack]}
+            self._invalidate_review_if_changed()
+            self.live_dismissed_key = self.live_finished_key
+            self.live_review_offer = None
+            self._save_session()
+            self._push_live_status({"live": False})
+            return {"ok": True, **self._bundle()}
 
     def pause_live(self):
         if not self.live_active or not self.browser_live.active:
@@ -584,6 +705,10 @@ class Api:
         self.settings.pop("browser_session", None)
         self.settings["browser_pair_token"] = secrets.token_hex(16)
         self.live_board = None
+        self.live_review_offer = None
+        self.live_finished_board = None
+        self.live_finished_key = None
+        self.live_finish_candidate = None
         save_settings(self.settings)
         return self.start_live(mode="browser")
 
@@ -638,7 +763,8 @@ class Api:
         self._push_live_status(payload)
 
     def _push_live_status(self, payload):
-        payload = {**payload, "paused": self.live_paused, "source": self.live_source, "updated": self.live_updated}
+        payload = {**payload, "paused": self.live_paused, "source": self.live_source, "updated": self.live_updated,
+                   "review_offer": self.live_review_offer}
         self.live_status = payload
         if window is None:
             return

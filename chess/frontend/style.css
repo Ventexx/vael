@@ -455,6 +455,12 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #review-turning-points .review-point { display: flex; align-items: center; justify-content: space-between; }
 #review-progress { width: 100%; height: 4px; accent-color: var(--accent); }
 .review-intro { font-size: 13px; line-height: 1.7; color: var(--text-dim); }
+#live-review-ready:not([hidden]) { display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 11px; }
+#live-finished-label { flex: 1; color: var(--text-dim); }
+#live-review-game { font-size: 11px; }
+#review-evidence-lines { display: grid; gap: 6px; margin-top: 8px; }
+#review-evidence-lines .review-point { line-height: 1.5; }
+#review-deeper-status { max-width: 205px; text-align: right; line-height: 1.4; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
