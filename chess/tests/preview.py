@@ -1,4 +1,6 @@
-"""Local UI verification using the real board API; no engine or file operations.
+"""Local UI verification using the board API and an isolated session file.
+
+Reads the saved engine path for real review tests; never writes user settings.
 
 Run from the chess directory: python tests/preview.py
 """
@@ -27,7 +29,8 @@ engine_path = app.load_settings().get('engine_path')
 app.load_settings = lambda: {'engine_path':engine_path}
 app.save_settings = lambda _: None
 api = app.Api(str(ROOT / 'tests' / '.preview-session.json'))
-ALLOWED = {"get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review"}
+
+ALLOWED = {"get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review", "review_position"}
 BRIDGE = """<script>
 window.pywebview={api:new Proxy({}, {get:(_,name)=>async(...args)=>{
 const r=await fetch('/api/'+name,{method:'POST',headers:{'X-Vael-Preview':'1'},body:JSON.stringify(args)});return r.json();}})};
@@ -54,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
                 events.clear()
             return self.respond(json.dumps(pending))
         name = "index.html" if self.path == "/" else self.path.lstrip("/")
-        if name not in ("index.html", "style.css", "app.js", "pieces.js"):
+        if name not in ("index.html", "style.css", "app.js", "pieces.js", "review.js"):
             return self.send_error(404)
         data = (ROOT / "frontend" / name).read_text(encoding="utf-8")
         if name == "index.html":
@@ -76,4 +79,4 @@ if __name__ == "__main__":
     try:
         ThreadingHTTPServer(("127.0.0.1", 8766), Handler).serve_forever()
     finally:
-        api.stop_live()
+        api.shutdown()

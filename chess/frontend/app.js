@@ -10,7 +10,7 @@ const PROMO_ORDER = [['q', 'Queen'], ['r', 'Rook'], ['b', 'Bishop'], ['n', 'Knig
 let flipped = false;
 let liveActive = false;     // true while an external source is driving the board
 let livePaused = false;
-const boardLocked = () => liveActive && !livePaused;
+const boardLocked = () => (liveActive && !livePaused) || reviewOpen;
 let reviewState = {status: 'idle', rows: [], points: []};
 let liveMode = 'browser';   // browser metadata, continuous screen scan, or manual capture
 let liveLowConfidence = false; // true when the last scan's piece-shape match confidence was low
@@ -169,6 +169,7 @@ function renderHeader() {
   if (!boardState) return;
   el('btn-step-back').disabled = boardLocked() || boardState.ply <= 0;
   el('btn-step-fwd').disabled = boardLocked() || boardState.ply >= boardState.total_plies;
+  for (const id of ['btn-new-game', 'btn-import', 'btn-live']) el(id).disabled = reviewOpen;
 }
 
 function renderAll() {
@@ -406,13 +407,13 @@ function formatScore(cp, mate) {
 }
 
 function updateEvalBar() {
-  const line1 = engineLines[1];
+  const line1 = reviewOpen ? reviewEvaluation() : engineLines[1];
   const cp = line1 ? line1.cp : null;
   const mate = line1 ? line1.mate : null;
-  const frac = cpToWhiteFraction(cp, mate);
+  const frac = mate === 0 && line1?.value != null ? (line1.value > 0 ? 0.98 : 0.02) : cpToWhiteFraction(cp, mate);
   el('eval-fill-white').style.flexBasis = (frac * 100) + '%';
   el('eval-fill-black').style.flexBasis = ((1 - frac) * 100) + '%';
-  el('eval-num').textContent = line1 ? formatScore(cp, mate) : '\u2014';
+  el('eval-num').textContent = line1 ? (mate === 0 ? 'Mate' : formatScore(cp, mate)) : '\u2014';
 }
 
 // A single arrow hue (the accent color) that desaturates toward gray the
@@ -441,6 +442,7 @@ function lerpColor(c1, c2, t) {
 function renderArrows() {
   const layer = el('arrows-layer');
   layer.innerHTML = '';
+  if (reviewOpen) { renderReviewArrows(layer); return; }
   if (!showArrows) return;
   const lines = Object.values(engineLines).sort((a, b) => a.multipv - b.multipv);
   if (!lines.length) return;
@@ -830,13 +832,13 @@ function initTopbar() {
   });
 
   document.querySelectorAll('.modal-backdrop').forEach((m) => {
-    m.addEventListener('click', (e) => { if (e.target === m) m.classList.remove('open'); });
+    m.addEventListener('click', (e) => { if (e.target === m) { if (m.id === 'modal-review') closeReview(); else m.classList.remove('open'); } });
   });
 
   document.addEventListener('keydown', (e) => {
     const modal = document.querySelector('.modal-backdrop.open');
     if (modal) {
-      if (e.key === 'Escape') { modal.classList.remove('open'); el('btn-live').focus(); }
+      if (e.key === 'Escape') { if (modal.id === 'modal-review') closeReview(); else {modal.classList.remove('open'); el('btn-live').focus();} }
       if (e.key === 'Tab') {
         const controls = [...modal.querySelectorAll('button, input, textarea, select')].filter(c => !c.disabled && c.offsetParent !== null);
         const first = controls[0], last = controls[controls.length - 1];
@@ -877,6 +879,7 @@ function scheduleEngineRender() {
 }
 
 window.onEngineInfo = function (payload) {
+  if (reviewOpen) return;
   if (payload.type === 'gameover') return;
   if (payload.type !== 'info') return;
   engineLines[payload.multipv] = payload;
@@ -970,66 +973,6 @@ window.onLiveStatus = function (payload) {
   }
 };
 
-// Review lives in an on-demand dialog; the graph and slider inspect the board.
-function reviewScore(score) {
-  if (!score) return '—';
-  return score.mate === 0 ? 'Checkmate' : formatScore(score.cp, score.mate);
-}
-function renderReview() {
-  const data = reviewState;
-  const running = data.status === 'running';
-  el('review-status').textContent = data.error || (running ? `Reviewing ${data.completed} / ${data.total} moves…` : data.status === 'complete' ? `Reviewed ${data.total} moves` : data.status === 'cancelled' ? 'Review cancelled · partial results below' : 'Review the main game with your local engine.');
-  el('review-start').disabled = running;
-  el('review-start').textContent = data.status === 'complete' ? 'Review again' : 'Review game';
-  el('review-cancel').hidden = !running;
-  const points = data.points || [];
-  el('review-position').max = Math.max(0, points.length - 1);
-  const path = points.map((p, i) => `${points.length === 1 ? 0 : i / (points.length - 1) * 600},${80 - Math.tanh(p.value / 400) * 70}`).join(' ');
-  el('review-graph').innerHTML = `<line x1="0" y1="80" x2="600" y2="80" stroke="var(--border2)"/><polyline points="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5"/>`;
-  const box = el('review-turning-points');
-  box.replaceChildren();
-  [...(data.rows || [])].filter(row => row.loss >= 50).sort((a,b) => b.loss - a.loss).slice(0,5).forEach(row => {
-    const button = document.createElement('button');
-    button.className = 'review-point';
-    const drop = row.before.mate !== null || row.after.mate !== null ? 'mate evaluation changed' : `${(row.loss / 100).toFixed(1)} pawn drop`;
-    button.textContent = `${row.number}${row.turn === 'w' ? '.' : '…'} ${row.san} · ${drop}`;
-    button.addEventListener('click', () => inspectReview(row.ply));
-    box.appendChild(button);
-  });
-  if (!box.children.length) box.textContent = points.length ? 'No large evaluation drops found so far.' : 'Run a review to find turning points.';
-}
-async function inspectReview(ply) {
-  el('review-position').value = ply;
-  el('review-position-label').textContent = ply;
-  const row = reviewState.rows?.[ply - 1];
-  el('review-detail').textContent = row ? `${row.number}${row.turn === 'w' ? '.' : '…'} ${row.san} · ${reviewScore(row.before)} → ${reviewScore(row.after)}${row.best ? ' · Engine preferred ' + row.best : ''}` : 'Starting position';
-  const result = await window.pywebview.api.go_to_node(row?.id || '');
-  if (result.error) el('review-status').textContent = result.error;
-  else applyBundle(result);
-}
-function initReview() {
-  el('btn-review').addEventListener('click', async () => {
-    reviewState = await window.pywebview.api.get_review();
-    renderReview();
-    el('modal-review').classList.add('open');
-    el('review-start').focus();
-  });
-  el('review-close').addEventListener('click', () => el('modal-review').classList.remove('open'));
-  el('review-start').addEventListener('click', async () => {
-    const result = await window.pywebview.api.start_review();
-    if (!result.ok) {el('review-status').textContent = result.error; return;}
-    reviewState = result.review;
-    renderReview();
-  });
-  el('review-cancel').addEventListener('click', async () => {reviewState = await window.pywebview.api.cancel_review(); renderReview();});
-  el('review-position').addEventListener('input', e => inspectReview(Number(e.target.value)));
-  el('review-graph').addEventListener('click', e => {
-    if (!reviewState.points?.length) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    inspectReview(Math.max(0, Math.min(reviewState.points.length - 1, Math.round((e.clientX - rect.left) / rect.width * (reviewState.points.length - 1)))));
-  });
-}
-window.onReview = data => {reviewState = data; renderReview();};
 
 // ---------------------------------------------------------------- boot
 async function boot() {

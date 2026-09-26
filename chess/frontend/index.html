@@ -300,15 +300,25 @@
     <div class="modal-body">
       <p id="review-status" role="status">Review the main game with your local engine.</p>
       <svg id="review-graph" viewBox="0 0 600 160" role="img" aria-label="Evaluation over the game, from White's perspective"></svg>
-      <label class="hint" for="review-position">Position <span id="review-position-label">0</span></label><input type="range" id="review-position" min="0" max="0" value="0" aria-label="Review position">
-      <div id="review-detail" class="review-detail"></div>
-      <h3 class="review-subtitle">Largest evaluation drops</h3><div id="review-turning-points"></div>
-      <p class="hint">Quick review · 0.35 seconds per position. Scores are from White's perspective. Drops compare consecutive engine evaluations; they are estimates, not move-quality grades. Select a point to inspect the position on the board.</p>
+      <progress id="review-progress" max="1" value="0" aria-label="Analysis progress" hidden></progress>
+      <div id="review-summary"></div>
+      <section id="review-journey" hidden aria-label="Guided review">
+        <div class="review-nav"><button class="small-btn" id="review-summary-back">Summary</button><span id="review-counter"></span></div>
+        <div id="review-detail" class="review-detail" aria-live="polite"></div>
+        <div class="review-choices"><button class="btn-secondary" id="review-before">Before move</button><button class="btn-secondary" id="review-played">Played move</button><button class="btn-primary" id="review-preferred">Show preferred</button></div>
+        <p class="hint" id="review-board-caption"></p>
+        <div id="review-line" aria-label="Engine continuation"></div>
+        <div class="review-nav"><button class="btn-secondary" id="review-prev">Previous highlight</button><button class="btn-primary" id="review-next">Next highlight</button></div>
+        <label class="hint" for="review-position">Inspect any move <span id="review-position-label"></span></label><input type="range" id="review-position" min="1" max="1" value="1" aria-label="Review move">
+      </section>
+      <details id="review-move-list"><summary>All analysed moves</summary><div id="review-turning-points"></div></details>
+      <details class="review-method"><summary>About these scores</summary><p class="hint">Vael accuracy is a 0–100 estimate of how closely the moves match engine choices, not an Elo rating or Chess.com accuracy. Forced moves are excluded. Grades compare equally timed candidate searches; costly moves get a deeper check. Limited searches can miss tactics. No automatic Brilliant labels are assigned.</p><p class="hint">The opening means the first ten move numbers; an endgame begins when combined non-pawn material is at most 26 points. Phase scores use only the moves available. Graph scores are from White's perspective.</p></details>
     </div>
-    <div class="modal-foot"><button class="btn-secondary" id="review-cancel" hidden>Cancel review</button><button class="btn-primary" id="review-start">Review game</button></div>
+    <div class="modal-foot"><button class="btn-secondary" id="review-cancel" hidden>Cancel analysis</button><button class="btn-secondary" id="review-start">Analyse game</button><button class="btn-primary" id="review-tour" hidden>Start review</button></div>
   </div>
 </div>
 <script src="pieces.js"></script>
+<script src="review.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

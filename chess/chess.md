@@ -68,7 +68,13 @@ This supports standard chess. Chess variants are not supported. Page structure c
 
 Playing a different move from an earlier position creates a variation instead of erasing the original continuation. Expand branches in Notation and export them with PGN. The previous workspace restores when the app opens.
 
-After stopping Live, choose **Review** beside Notation to run a quick Stockfish review. Its graph, largest evaluation drops, and suggested alternatives are available on demand. Move grades and natural-language explanations are planned in `review-roadmap.md`; the quick estimates are not definitive grades.
+After stopping Live, choose **Review** beside Notation, then **Analyse game**. The local engine compares candidate moves and the played move; costly decisions receive a deeper check. Allow roughly 1–5 seconds per move, depending on the position and computer. You can cancel and keep partial results.
+
+The summary shows separate White and Black accuracy estimates, a move-quality breakdown, and optional phase scores. Choose **Start review** for a chronological tour of strong decisions and costly mistakes, or choose any analysed move from the graph, slider, or move list. You can filter highlights to one side. The score is Vael's own estimate, not Elo or Chess.com's formula; short games and shallow searches deserve caution.
+
+Before each move, a green arrow shows the preferred move and a dashed amber arrow shows the played move. **Try …** previews the preferred position; the continuation buttons step through the engine's replies. **Played move** compares the original choice and its engine continuation. These previews never change your saved game or variations, and closing Review restores your original position. Review arrows remain visible independently of the normal engine-arrow setting.
+
+Explanations use verified board facts and engine lines. The system assigns Great, Best, Excellent, Good, Inaccuracy, Mistake, Blunder, and Forced; it does not invent Brilliant labels or human skill ratings. See `review-roadmap.md` for the scoring method and remaining work.
 
 ## file structure
 

@@ -351,6 +351,7 @@ class Api:
             self._clear_review()
 
     def get_review(self):
+        self._invalidate_review_if_changed()
         return self.review_result
 
     def start_review(self):
@@ -364,16 +365,46 @@ class Api:
             if not moves:
                 return {"ok": False, "error": "Play or import a game to review."}
             self._clear_review()
-            self.review_result = {"status": "running", "rows": [], "points": [], "completed": 0,
+            self.review_result = {"version": 2, "job_id": self.review_job, "status": "running", "rows": [], "points": [], "completed": 0,
                 "total": len(moves), "signature": self._review_signature()}
-            self.reviewer.start(path, self.root_fen, moves, self.review_job)
+            players = {color: self.study.game.headers.get(key, fallback) for color, key, fallback in
+                       (("w", "White", "White"), ("b", "Black", "Black"))}
+            players = {key: (value if value and value != "?" else ("White" if key == "w" else "Black")) for key, value in players.items()}
+            self.reviewer.start(path, self.root_fen, moves, self.review_job, players)
             return {"ok": True, "review": self.review_result}
+
+    def review_position(self, ply, line="before", step=0):
+        """Return an ephemeral board; never mutate the study or its saved cursor."""
+        with self.state_lock:
+            if self.live_active:
+                return {"error": "Stop Live before inspecting a review."}
+            if self.review_result.get("signature") != self._review_signature():
+                return {"error": "The game changed. Analyse it again."}
+            try:
+                row = self.review_result["rows"][int(ply) - 1]
+                if int(ply) < 1 or row["ply"] != int(ply) or line not in ("before", "played", "best"):
+                    raise ValueError()
+                board = chess.Board(row["fen"])
+                continuation = row.get(line + "_line", []) if line != "before" else []
+                step = max(0, min(int(step), len(continuation)))
+                for item in continuation[:step]:
+                    board.push_uci(item["uci"])
+                state = self.get_state()
+                state.update(fen=board.fen(), turn="w" if board.turn else "b", in_check=board.is_check(),
+                    game_over=board.is_game_over(), status="checkmate" if board.is_checkmate() else "draw" if board.is_game_over() else None,
+                    last_move=board.peek().uci() if board.move_stack else None,
+                    ply=int(ply) - 1 + step, fullmove_number=board.fullmove_number,
+                    total_plies=len(list(self.study.game.mainline_moves())), selected_node=row["before_id"],
+                    recovery_note="Review preview · your game and variations are unchanged")
+                return {"state": state, "legal_moves": {}, "step": step}
+            except (KeyError, IndexError, ValueError, TypeError):
+                return {"error": "This review needs to be analysed again before its lines can be previewed."}
 
     def cancel_review(self):
         with self.state_lock:
             self.reviewer.cancel()
             self.review_job += 1
-            self.review_result = {**self.review_result, "status": "cancelled"}
+            self.review_result = {**self.review_result, "job_id": self.review_job, "status": "cancelled"}
             self._save_session()
         return self.review_result
 

@@ -141,8 +141,10 @@ class ReviewTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): pass
             def configure(self, _): pass
-            def analyse(self, board, limit):
-                return {'score':chess.engine.PovScore(chess.engine.Cp(25),chess.WHITE), 'pv':[next(iter(board.legal_moves))], 'depth':12}
+            def analyse(self, board, limit, **kwargs):
+                moves = kwargs.get('root_moves') or list(board.legal_moves)
+                infos = [{'score':chess.engine.PovScore(chess.engine.Cp(25),chess.WHITE), 'pv':[move], 'depth':16} for move in moves[:kwargs.get('multipv', 1)]]
+                return infos if 'multipv' in kwargs else infos[0]
         updates = []
         review = GameReview(updates.append)
         with patch('review.chess.engine.SimpleEngine.popen_uci', return_value=Engine()):
