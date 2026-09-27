@@ -46,7 +46,7 @@ class WorkspaceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.settings = {}
         self.load = patch('app.load_settings', side_effect=lambda: dict(self.settings))
-        self.save = patch('app.save_settings', side_effect=lambda data:self.settings.update(data))
+        self.save = patch('app.save_settings', side_effect=lambda data:(self.settings.clear(), self.settings.update(data)))
         self.load.start()
         self.save.start()
         self.path = str(Path(self.temp.name) / 'session.json')
@@ -109,6 +109,23 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(restored.start_live()['token'], token)
         restored.stop_live()
         self.assertFalse(self.settings['live_enabled'])
+
+    def test_explicit_stop_releases_pairing_and_restart_generates_new_code(self):
+        with patch('browser_live.PORT', 0):
+            old = self.api.start_live()['token']
+            self.api.settings['browser_session'] = 'old-browser'
+            self.api.browser_live.session = 'old-browser'
+            self.api.stop_live()
+            self.assertNotIn('browser_pair_token', self.settings)
+            self.assertNotIn('browser_session', self.settings)
+            self.assertEqual(self.api.get_live_status()['token'], '')
+            result = self.api.start_live()
+            self.assertNotEqual(result['token'], old)
+            self.assertFalse(result['paired'])
+            self.assertIsNone(self.api.browser_live.session)
+            replacement = self.api.switch_live_tab()
+            self.assertNotEqual(replacement['token'], result['token'])
+            self.assertFalse(replacement['paired'])
 
     def test_stale_review_cannot_replace_new_game_results(self):
         old_job = self.api.review_job

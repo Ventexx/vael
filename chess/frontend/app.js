@@ -747,7 +747,7 @@ function initTopbar() {
       showLiveNotice(error.message, true);
     } finally {
       btn.disabled = false;
-      btn.title = 'Connect or retry the saved browser connection';
+      btn.title = 'Start a fresh browser connection with a new pairing code';
     }
   });
   el('live-disconnect').addEventListener('click', () => window.pywebview.api.stop_live());

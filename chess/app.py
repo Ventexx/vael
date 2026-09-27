@@ -572,6 +572,9 @@ class Api:
         self.live_active = False
         self.live_paused = False
         self.settings["live_enabled"] = False
+        # Explicit stops release ownership; ordinary app shutdown preserves pairing.
+        self.settings.pop("browser_pair_token", None)
+        self.settings.pop("browser_session", None)
         save_settings(self.settings)
         self._save_session()
         self._push_live_status({"live": False})
@@ -702,8 +705,6 @@ class Api:
         # Release ownership explicitly; the extension's Connect action claims
         # the chosen new tab. Existing tabs cannot race to reclaim ownership.
         self.stop_live()
-        self.settings.pop("browser_session", None)
-        self.settings["browser_pair_token"] = secrets.token_hex(16)
         self.live_board = None
         self.live_review_offer = None
         self.live_finished_board = None
