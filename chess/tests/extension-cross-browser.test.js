@@ -48,7 +48,7 @@ function loadBackground(family) {
     // No chrome or importScripts global: reproduce Firefox's event page.
     for (const file of packageManifest.background.scripts) run(file);
   }
-  return {storage, injections, posts, badges, startup,
+  return {api, storage, injections, posts, badges, startup,
     send: (message, sender = {}) => new Promise(resolve => {
       assert.equal(listener(message, sender, resolve), true);
     })};
@@ -84,6 +84,20 @@ for (const family of ['chromium', 'firefox']) {
     assert.equal(runtime.posts.length, 1);
   });
 
+  test(`${family}: board read failure is visible and the next tick can recover`, async () => {
+    const runtime = loadBackground(family);
+    await runtime.send({type:'connect',token:'d'.repeat(32)});
+    const execute = runtime.api.scripting.executeScript;
+    runtime.api.scripting.executeScript = async () => [];
+    const sender = {tab:{id:42,url:'https://lichess.org/test'}};
+    assert.equal((await runtime.send({type:'tick'}, sender)).ok, false);
+    assert.match(runtime.storage.lastStatus, /Reading the selected board failed:.*no board data/);
+    assert.equal(runtime.posts.length, 0);
+    runtime.api.scripting.executeScript = execute;
+    assert.equal((await runtime.send({type:'tick'}, sender)).ok, true);
+    assert.equal(runtime.storage.lastStatus, 'Connected. Board is syncing.');
+  });
+
   test(`${family}: restored game tab reclaims pairing after browser restart`, async () => {
     const runtime = loadBackground(family);
     await runtime.send({type:'connect',token:'c'.repeat(32)});
@@ -99,14 +113,14 @@ for (const family of ['chromium', 'firefox']) {
 
   for (const granted of [true, false]) {
     test(`${family}: popup ${granted ? 'connects after local access is granted' : 'explains denied local access'}`, async () => {
-      let click;
+      let click, statusChanged;
       const messages = [], requested = [];
       const elements = {
         status: {textContent:''}, token: {value:'b'.repeat(32)},
         connect: {disabled:false, addEventListener: (_, fn) => {click=fn;}}
       };
       const api = {
-        storage: {session: {get: async () => ({})}},
+        storage: {onChanged:{addListener:fn=>{statusChanged=fn;}},session: {get: async () => ({lastStatus:'Connecting…'})}},
         permissions: {request: async options => {requested.push(options); return granted;}},
         runtime: {sendMessage: async message => {messages.push(message); return {ok:true};}}
       };
@@ -119,6 +133,12 @@ for (const family of ['chromium', 'firefox']) {
       assert.equal(messages.length, granted ? 1 : 0);
       assert.match(elements.status.textContent, granted ? /Connecting/ : /Allow access to 127\.0\.0\.1/);
       assert.equal(elements.connect.disabled, false);
+      statusChanged({lastStatus:{newValue:'Sending the board to Vael failed: Failed to fetch'}}, 'session');
+      assert.match(elements.status.textContent, /Failed to fetch/);
+      statusChanged({lastStatus:{newValue:'Connected. Board is syncing.'}}, 'session');
+      assert.equal(elements.status.textContent, 'Connected. Board is syncing.');
+      statusChanged({lastStatus:{newValue:'unrelated'}}, 'local');
+      assert.equal(elements.status.textContent, 'Connected. Board is syncing.');
     });
   }
 

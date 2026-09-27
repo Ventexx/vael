@@ -22,6 +22,7 @@ extensionApi.tabs.onRemoved.addListener(async tabId => {
 });
 
 extensionApi.runtime.onMessage.addListener((message, sender, reply) => {
+  let stage = 'Preparing the browser connection';
   async function handle() {
     if (message.type === 'connect') {
       const [tab] = await extensionApi.tabs.query({active: true, currentWindow: true});
@@ -51,7 +52,10 @@ extensionApi.runtime.onMessage.addListener((message, sender, reply) => {
     // A restored tab can tick before onStartup clears the previous tab ID.
     // Keep waiting without reading it; only the owning tab may send positions.
     if (connection.tabId !== sender.tab.id) return {ok: false, retryMs: 3000};
+    stage = 'Reading the selected board';
     const [read] = await extensionApi.scripting.executeScript({target: {tabId: connection.tabId}, world: 'MAIN', func: readVaelBoard});
+    if (!read?.result) throw new Error('The page returned no board data. Refresh the game tab and reconnect.');
+    stage = 'Sending the board to Vael';
     const response = await fetch('http://127.0.0.1:18765/position', {
       method: 'POST', headers: {'Content-Type': 'application/json', Authorization: 'Bearer ' + connection.token},
       body: JSON.stringify({...read.result, session: connection.session}), signal: AbortSignal.timeout(3000)
@@ -63,7 +67,7 @@ extensionApi.runtime.onMessage.addListener((message, sender, reply) => {
     return {...result, stop: response.status === 403 || response.status === 409, retryMs: result.ok ? 700 : 3000};
   }
   messageQueue = messageQueue.then(handle).then(reply).catch(async error => {
-    await extensionApi.storage.session.set({lastStatus: 'Cannot connect. Check that Live is open in Vael. ' + error.message});
+    await extensionApi.storage.session.set({lastStatus: stage + ' failed: ' + error.message + (stage === 'Sending the board to Vael' ? ' Check that Live is open in Vael and local access is allowed.' : '')});
     if (sender.tab) await extensionApi.action.setBadgeText({tabId: sender.tab.id, text: '!'});
     reply({ok: false, error: error.message, retryMs: 3000});
   });
