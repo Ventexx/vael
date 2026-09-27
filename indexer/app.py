@@ -6701,6 +6701,86 @@ class NoteSection(QWidget):
 # ── Note Panel ─────────────────────────────────────────────────────────────────
 
 
+class GeneratedNoteCard(NoteEntryCard):
+    """Normal click-to-copy notes, with read-only error menus instead of editing."""
+
+    def __init__(self, name, value, errors, ignore_callback=None):
+        super().__init__(name, value, POSTING_INFO_FILE, None)
+        self._errors = errors
+        self._ignore_callback = ignore_callback
+        self.setToolTip(f"{name}\n\n{value}" + ("\n\nRight-click to see errors." if errors else ""))
+        for label in self.findChildren(QLabel):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(self.CARD_W - 8)
+            label.ensurePolished()
+            # Generated folder names are longer than ordinary note names. Keep
+            # the same card dimensions without cutting text in mid-glyph.
+            label.setText("\n".join(label.fontMetrics().elidedText(
+                line, Qt.TextElideMode.ElideMiddle if label.objectName() == "noteEntryName"
+                else Qt.TextElideMode.ElideRight, self.CARD_W - 8)
+                for line in label.text().splitlines()))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._errors:
+            from PySide6.QtGui import QPainterPath
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(225, 85, 85, 190), 1))
+            path = QPainterPath()
+            path.addRoundedRect(1, 1, self.CARD_W - 2, self.CARD_H - 2, 7, 7)
+            painter.drawPath(path)
+            painter.end()
+
+    def _error_menu(self):
+        menu = QMenu(self)
+        menu.setObjectName("cardMenu")
+        menu.setToolTipsVisible(True)
+        for error in self._errors:
+            message = error["message"]
+            title = (message[:110] + "…" if len(message) > 110 else message).replace("&", "&&")
+            if (error.get("code") == "folder_metadata" and error.get("folder_path")
+                    and self._ignore_callback is not None):
+                submenu = menu.addMenu(title)
+                submenu.setObjectName("cardMenu")
+                submenu.menuAction().setToolTip(message)
+                action = submenu.addAction("Ignore Error")
+                action.setToolTip("Permanently ignore metadata errors for this folder")
+                action.triggered.connect(lambda checked=False, p=error["folder_path"]: self._ignore_callback(p))
+            else:
+                action = menu.addAction(title)
+                action.setToolTip(message)
+                # Informational row only: no copy, select-all, or edit actions.
+        return menu
+
+    def contextMenuEvent(self, event):
+        if self._errors:
+            menu = self._error_menu()
+            menu.exec(event.globalPos())
+            menu.deleteLater()
+        event.accept()
+
+
+def _posting_reload_icon():
+    from PySide6.QtGui import QPainterPath
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    color = QColor(0, 212, 160, 170)
+    painter.setPen(QPen(color, 1.3))
+    painter.drawArc(3, 3, 8, 8, 45 * 16, 290 * 16)
+    arrow = QPainterPath()
+    arrow.moveTo(11.5, 6.5)
+    arrow.lineTo(11.5, 10)
+    arrow.lineTo(8, 10)
+    painter.fillPath(arrow, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class GeneratedNoteSection(NoteSection):
     """Read-only section: no normal-note editing or sorting actions."""
 
@@ -6712,11 +6792,15 @@ class GeneratedNoteSection(NoteSection):
             self._header.setStyleSheet("color: #c8ac65;")
             header_layout = self.layout().itemAt(0).widget().layout()
             self._reload_button = QToolButton()
-            self._reload_button.setText("Reload")
+            self._reload_button.setObjectName("folderCopyBtn")
+            self._reload_button.setIcon(_posting_reload_icon())
+            self._reload_button.setIconSize(QSize(14, 14))
+            self._reload_button.setFixedHeight(16)
+            self._reload_button.setAccessibleName("Reload posting info")
             self._reload_button.setToolTip("Run the posting-info script and refresh these entries")
             self._reload_button.setEnabled(not DEV_MODE)
             self._reload_button.clicked.connect(reload_callback)
-            header_layout.addWidget(self._reload_button)
+            header_layout.insertWidget(1, self._reload_button)
             self._reload_button.hide()
 
     def _set_expanded(self, expanded, focus=True):
@@ -6728,41 +6812,24 @@ class GeneratedNoteSection(NoteSection):
         label = QLabel(text)
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if error:
             label.setStyleSheet("color: #ed9292; background: rgba(180, 45, 45, 22); padding: 5px;")
         self._body_lay.addWidget(label)
 
-    def add_text(self, title, value):
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(4, 4, 4, 4)
-        label = QLabel(f"{title}\n{value}")
-        label.setTextFormat(Qt.TextFormat.PlainText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(label, 1)
-        copy = QToolButton()
-        copy.setText("Copy")
-        def copy_value():
-            QApplication.clipboard().setText(value)
-            copy.setText("Copied")
-            QTimer.singleShot(900, copy, lambda: copy.setText("Copy"))
-        copy.clicked.connect(copy_value)
-        layout.addWidget(copy)
-        self._body_lay.addWidget(row)
+    def add_generated_card(self, name, value, errors, ignore_callback):
+        card = GeneratedNoteCard(name, value, errors, ignore_callback)
+        index = len(self._cards)
+        self._cards.append(card)
+        self._card_grid.addWidget(card, index // COLS, index % COLS)
 
 
-def _posting_section(reload_callback, query=""):
+def _posting_section(reload_callback, query="", ignore_callback=None):
+    # The local generator opts in by creating its data; other users see no section.
+    if DEV_MODE or not POSTING_INFO_SCRIPT.is_file() or not POSTING_INFO_FILE.is_file():
+        return None
     section = GeneratedNoteSection("Generated Posting Info", reload_callback=reload_callback)
     section._expansion_key = ("posting",)
-    if DEV_MODE:
-        section.add_message("Generated posting info is disabled in dev mode.")
-        return section
     try:
-        if not POSTING_INFO_FILE.exists():
-            section.add_message("No posting info yet. Expand this section and use Reload to generate it.")
-            return section
         data = _json_object(POSTING_INFO_FILE.read_text(encoding="utf-8"))
         if data.get("version") != 1 or not isinstance(data.get("modes"), dict):
             raise ValueError("Unsupported posting-info format")
@@ -6779,19 +6846,15 @@ def _posting_section(reload_callback, query=""):
                     if query and query.casefold() not in json.dumps(
                             [mode, destination, key, entry], ensure_ascii=False).casefold():
                         continue
-                    child = GeneratedNoteSection(entry["name"], depth=3)
-                    child._expansion_key = ("posting", mode, destination, key)
-                    child._header.setToolTip(entry.get("source", ""))
-                    if entry.get("status") != "complete":
-                        child._header.setStyleSheet("color: #ed9292;")
-                        for error in entry.get("errors", []):
-                            child.add_message(error["message"], error=True)
-                        if not entry.get("errors"):
-                            child.add_message("Incomplete entry. Reload to retry.", error=True)
-                    else:
-                        for item in entry.get("texts", []):
-                            child.add_text(item["label"], item["value"])
-                    destination_section.add_child_section(child)
+                    errors = entry.get("errors", [])
+                    if entry.get("status") != "complete" and not errors:
+                        errors = [{"message": "Incomplete entry. Reload to retry."}]
+                    texts = entry.get("texts") or [{"label": "Text", "value": ""}]
+                    for item in texts:
+                        title = entry["name"]
+                        if len(texts) > 1:
+                            title += "\n" + item["label"]
+                        destination_section.add_generated_card(title, item["value"], errors, ignore_callback)
                 mode_section.add_child_section(destination_section)
             section.add_child_section(mode_section)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -6802,6 +6865,7 @@ def _posting_section(reload_callback, query=""):
 
 class NotePanel(QScrollArea):
     posting_reload_requested = Signal()
+    posting_ignore_requested = Signal(str)
     def __init__(self, notes_file: Path, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._notes_file = notes_file
@@ -6968,7 +7032,9 @@ class NotePanel(QScrollArea):
                 for entry in entries:
                     sec.add_card(entry["name"], entry["value"], self._notes_file, self)
 
-        self._layout.addWidget(_posting_section(self.posting_reload_requested.emit, query))
+        generated = _posting_section(self.posting_reload_requested.emit, query, self.posting_ignore_requested.emit)
+        if generated is not None:
+            self._layout.addWidget(generated)
         self._layout.addStretch()
 
         # Searches reveal matches and their ancestors; clearing restores
@@ -7196,10 +7262,17 @@ class NoteWindow(QDialog):
         # ── Canvas ────────────────────────────────────────────────────────
         self._panel = NotePanel(NOTES_FILE)
         self._panel.posting_reload_requested.connect(self._reload_posting_info)
+        self._panel.posting_ignore_requested.connect(self._ignore_posting_folder)
         self._panel.setMinimumHeight(280)
         lay.addWidget(self._panel, 1)
 
     def _reload_posting_info(self):
+        self._run_posting_info([])
+
+    def _ignore_posting_folder(self, folder):
+        self._run_posting_info(["--ignore-folder", folder])
+
+    def _run_posting_info(self, arguments):
         if DEV_MODE:
             return
         main = self.parent()
@@ -7208,7 +7281,12 @@ class NoteWindow(QDialog):
         if main._script_runner is not None:
             QMessageBox.information(self, "Scripts running", "Wait for the current scripts to finish, then reload.")
             return
-        main._start_scripts([{"name": "Posting info", "path": str(POSTING_INFO_SCRIPT), "args": ""}])
+        if os.name == "nt":
+            args = subprocess.list2cmdline(arguments)
+        else:
+            import shlex
+            args = shlex.join(arguments)
+        main._start_scripts([{"name": "Posting info", "path": str(POSTING_INFO_SCRIPT), "args": args}])
 
     def closeEvent(self, event) -> None:
         _SESSION_POS["note_window_pos"] = [self.x(), self.y()]

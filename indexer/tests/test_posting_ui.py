@@ -41,6 +41,8 @@ class PostingUITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.path = self.root / "posting_info.json"
+        self.script = self.root / "posting_info.py"
+        self.script.write_text("# personal generator")
         self.path.write_text(json.dumps({"version": 1, "modes": {"Mira": {"Download": {
             "Good": {"name": "Good.zip", "status": "complete", "texts": [{"label": "Title", "value": "ready"}]},
             "Bad": {"name": "Bad.zip", "status": "incomplete", "texts": [{"label": "Do not copy", "value": "partial"}],
@@ -48,6 +50,7 @@ class PostingUITests(unittest.TestCase):
         }, "Promote": {}}}, "errors": []}), encoding="utf-8")
         self.addCleanup(patch.stopall)
         patch.object(indexer, "POSTING_INFO_FILE", self.path).start()
+        patch.object(indexer, "POSTING_INFO_SCRIPT", self.script).start()
         patch.object(indexer, "DEV_MODE", False).start()
 
     def test_readonly_section_errors_copy_and_reload(self):
@@ -60,15 +63,23 @@ class PostingUITests(unittest.TestCase):
         self.assertFalse(section._reload_button.isHidden())
         section._reload_button.click()
         self.assertEqual(requests, [True])
-        entries = section._child_sections[0]._child_sections[0]._child_sections
+        entries = section._child_sections[0]._child_sections[0]._cards
         good, bad = entries
-        copies = [b for b in good.findChildren(QToolButton) if b.text() == "Copy"]
-        self.assertEqual(len(copies), 1)
-        copies[0].click()
+        self.assertIsInstance(good, indexer.NoteEntryCard)
+        self.assertEqual(good.size(), indexer.NoteEntryCard("", "", self.path, None).size())
+        self.assertFalse(good.findChildren(QToolButton))
+        from PySide6.QtTest import QTest
+        QTest.mouseClick(good, indexer.Qt.MouseButton.LeftButton)
         self.assertEqual(self.qt.clipboard().text(), "ready")
-        self.assertFalse(any(b.text() == "Copy" for b in bad.findChildren(QToolButton)))
-        self.assertTrue(any(l.text() == "Missing character tags" for l in bad.findChildren(QLabel)))
-        self.assertIn("#ed9292", bad._header.styleSheet())
+        QTest.mouseClick(bad, indexer.Qt.MouseButton.LeftButton)
+        self.assertEqual(self.qt.clipboard().text(), "partial")
+        self.assertEqual(bad._errors[0]["message"], "Missing character tags")
+        self.assertEqual(section._reload_button.objectName(), "folderCopyBtn")
+        self.assertEqual(section._reload_button.text(), "")
+        self.assertFalse(section._reload_button.icon().isNull())
+        menu = bad._error_menu()
+        self.assertEqual([a.text() for a in menu.actions()], ["Missing character tags"])
+        self.assertIsNone(menu.actions()[0].menu())
 
     def test_bottom_placement_reload_search_and_normal_notes_preserved(self):
         notes = self.root / "notes.json"
@@ -85,9 +96,45 @@ class PostingUITests(unittest.TestCase):
         self.assertTrue(section._expanded)
         panel.reload("Bad")
         section = panel._layout.itemAt(panel._layout.count() - 2).widget()
-        entries = section._child_sections[0]._child_sections[0]._child_sections
-        self.assertEqual([e._header.text() for e in entries], ["Bad.zip"])
+        entries = section._child_sections[0]._child_sections[0]._cards
+        self.assertEqual([e._name for e in entries], ["Bad.zip"])
         self.assertEqual(notes.read_bytes(), before)
+
+    def test_section_requires_script_and_generated_data(self):
+        self.script.unlink()
+        self.assertIsNone(indexer._posting_section(lambda: None))
+        self.script.write_text("# personal generator")
+        self.path.unlink()
+        self.assertIsNone(indexer._posting_section(lambda: None))
+
+    def test_only_folder_metadata_errors_have_ignore_submenus(self):
+        ignored = []
+        folder = str(self.root / "Honkai")
+        card = indexer.GeneratedNoteCard("Example", "partial", [
+            {"code": "folder_metadata", "message": "Missing Honkai metadata", "folder_path": folder},
+            {"code": "character_tags", "message": "Missing character tags"},
+        ], ignored.append)
+        self.addCleanup(card.deleteLater)
+        menu = card._error_menu()
+        actions = menu.actions()
+        self.assertEqual(len(actions), 2)
+        self.assertIsNone(actions[1].menu())
+        action = actions[0].menu().actions()[0]
+        self.assertEqual(action.text(), "Ignore Error")
+        action.trigger()
+        self.assertEqual(ignored, [folder])
+
+    def test_two_texts_are_two_cards_without_entry_folders(self):
+        data = json.loads(self.path.read_text())
+        entry = data["modes"]["Mira"]["Download"]["Good"]
+        entry["texts"].append({"label": "Characters", "value": "A B C D"})
+        self.path.write_text(json.dumps(data))
+        section = indexer._posting_section(lambda: None)
+        self.addCleanup(section.deleteLater)
+        destination = section._child_sections[0]._child_sections[0]
+        self.assertFalse(destination._child_sections)
+        self.assertEqual(len(destination._cards), 3)
+        self.assertIn("Characters", destination._cards[1]._name)
 
     def test_runner_collects_reports_from_all_scripts_and_hides_regular_output(self):
         scripts = []

@@ -83,7 +83,7 @@ class PostingTests(unittest.TestCase):
         state = self.run_generation()
         entry = state["modes"]["Mira"]["Promote"]["Genre_Missing_3-72P"]
         self.assertEqual(entry["status"], "incomplete")
-        self.assertEqual(entry["texts"], [])
+        self.assertEqual(entry["texts"], [{"label": "Tags", "value": "genre"}])
         self.assertEqual(len(entry["errors"]), 4)
         for name in ("A", "B", "Unknown"):
             self.write(self.library / "Genre" / f"{name}.json", {"tags": name})
@@ -202,6 +202,49 @@ class PostingTests(unittest.TestCase):
         with posting.state_lock(path):
             posting.atomic_save(path, posting.new_state())
         self.assertEqual(posting.load_state(path)["counter"]["next"], 2)
+
+    def test_folder_metadata_exemption_persists_and_does_not_hide_character_errors(self):
+        self.promote("Genre_Maid_1-72P", ["A"])
+        folder = self.library / "Genre"
+        (folder / "!F-Genre.json").unlink()
+        self.write(folder / "A.json", {})
+        state = self.run_generation()
+        entry = state["modes"]["Mira"]["Promote"]["Genre_Maid_1-72P"]
+        self.assertEqual({e["code"] for e in entry["errors"]}, {"folder_metadata", "character_tags"})
+        posting.ignore_folder_error(state, folder)
+        path = self.app / "posting_info.json"
+        posting.atomic_save(path, state)
+        state = self.run_generation(posting.load_state(path))
+        entry = state["modes"]["Mira"]["Promote"]["Genre_Maid_1-72P"]
+        self.assertEqual([e["code"] for e in entry["errors"]], ["character_tags"])
+        self.assertEqual(entry["texts"][0]["value"], "scene")
+        self.write(folder / "A.json", {"tags": "A"})
+        state = self.run_generation(state)
+        self.assertFalse(state["errors"])
+        self.assertEqual(state["modes"]["Mira"]["Promote"]["Genre_Maid_1-72P"]["texts"][0]["value"], "A scene")
+        # Exemption skips errors, not valid tags added later.
+        self.write(folder / "!F-Genre.json", {"tags": "restored"})
+        state = self.run_generation(state)
+        self.assertEqual(state["modes"]["Mira"]["Promote"]["Genre_Maid_1-72P"]["texts"][0]["value"], "restored A scene")
+
+    def test_cannot_exempt_a_character_or_unknown_folder(self):
+        self.zip("Kim", "Missing;Genre")
+        state = self.run_generation()
+        with self.assertRaises(ValueError):
+            posting.ignore_folder_error(state, self.library / "Genre")
+        self.assertEqual(state["ignored_folder_metadata"], [])
+
+    def test_reports_group_and_deduplicate_causes(self):
+        self.promote("Genre_Maid_1-72P", ["A"])
+        self.promote("Genre_Empty_1-72P", ["A"])
+        (self.library / "Genre" / "!F-Genre.json").unlink()
+        state = self.run_generation()
+        reports = list(posting.error_reports(state["errors"]))
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].count("Missing folder metadata"), 1)
+        self.assertIn("Genre_Maid_1-72P", reports[0])
+        self.assertIn("Genre_Empty_1-72P", reports[0])
+        self.assertIn("1 issue", reports[0])
 
 
 if __name__ == "__main__":
