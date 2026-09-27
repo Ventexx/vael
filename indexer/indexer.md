@@ -102,6 +102,32 @@ Folders can also carry their own information file: a folder called `Characters` 
 
 Startup scripts are optional Python `.py` files that **you create or supply yourself**. Indexer runs them; it does not write them for you. They are useful for extracting metadata, creating missing JSON partners, or updating existing information before a library reload.
 
+Scripts can send notifications to Indexer by printing one JSON object per line after the exact prefix `VAEL_NOTIFY `. Ordinary output remains hidden. Reports from all completed scripts are collected and displayed together when the run finishes. Supported levels are `error`, `warning`, and `info`; report only actionable issues to keep startup quiet. For example:
+
+```python
+import json
+print("VAEL_NOTIFY " + json.dumps({
+    "level": "error",
+    "message": "Mira / Promote / Example: missing character tags"
+}), flush=True)
+```
+
+An individual data problem should be reported without stopping the script: process the remaining entries and exit normally. A fatal script failure still stops the existing startup pipeline. Notifications are plain text, never commands or HTML.
+
+### Generated posting information
+
+The Note Window has a separate, gold **Generated Posting Info** section at the bottom. It reads `~/.vael_indexer/posting_info.json` without modifying normal notes. Entries are grouped by mode, then Download or Promote. Complete entries have copy buttons; incomplete entries appear red with their missing-information errors and no copy buttons. All generated content is read-only in Indexer. Search includes these entries.
+
+Expand the gold section to reveal **Reload**, which runs the local `indexer/scripts/posting_info.py` in the background and refreshes the notes when finished. Scripts are personal, ignored by Git, and must be installed separately. Add the script to **Startup Scripts** yourself if you also want it to run automatically. Neither this feature nor Reload registers a startup script. Dev mode disables generation.
+
+The personal posting-info generator uses the `CHARS` library path in `roots.json`, live character/folder JSON metadata, and `1 Mira` scene notes in `notes.json`. It counts images inside Download ZIPs without extracting them. Promote entries follow existing folders (ignoring one leading dot); Download entries follow ZIPs. Successfully scanned locations remove obsolete entries, while unavailable locations retain previous entries and report an error. Fix the source metadata or notes and use Reload to retry every entry.
+
+Characters are matched exactly and recursively within the named genre. Duplicate names are reported as ambiguous. Promote folder tags include every parent from the character's deepest folder outward to the named genre; shared parents appear once. Every contributing folder needs its own nonempty `tags` field in `!F-FolderName.json`. Mira puts these folder tags before character tags; Kim puts them after character tags.
+
+Kim OC titles use `[DL Only]`. The script's `KIM_OC_START_VOLUME` setting starts at `2`; changing it affects the next new batch, not existing assignments. Run once with `--reset-volume NUMBER` to reset to a value that already matches the setting. Volume assignments remain in the JSON after old visible entries disappear, preventing reruns from consuming volumes again. The generator writes atomically and uses an OS lock to prevent overlapping runs. `--dry-run` performs a read-only check; `--state-file PATH` redirects generated state for testing.
+
+The generated JSON contract is version `1`: `modes` maps mode names to `Download` and `Promote` objects keyed by source identity. Each entry contains `name`, `source`, `status` (`complete` or `incomplete`), `texts` (objects with `label` and `value`), and `errors` (objects with `code` and `message`). Top-level `errors` can include `location` errors, which appear above the generated entries. Generator-owned counter state is not shown as notes.
+
 1. Prepare a script that can complete without asking questions in a terminal. Give it the folders and options it needs through its own configuration or command arguments.
 2. Open **Startup Scripts** from Indexer's menu, press **+**, and select the Python file. Give it a name and enter any arguments it requires. Put paths containing spaces in quotes.
 3. Use the up/down buttons to choose execution order. Scripts run one after another on launch, and through **Reload Database → with Scripts**. A reload without scripts just refreshes the index from files already on disk.

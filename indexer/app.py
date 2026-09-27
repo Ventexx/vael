@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from script_messages import read_messages, show_messages
+
 # ruff: noqa
 # Uncomment next 2 lines to force XWayland if Wayland causes issues:
 # import os
@@ -76,6 +78,8 @@ _LEGACY_APP_DIR = Path.home() / ".asset_indexer"
 ICON_PATH = Path(__file__).parent / ("icon.ico" if sys.platform == "win32" else "icon.png")
 PREFS_FILE = APP_DIR / "prefs.json"
 NOTES_FILE = APP_DIR / "notes.json"
+POSTING_INFO_FILE = APP_DIR / "posting_info.json"
+POSTING_INFO_SCRIPT = Path(__file__).parent / "scripts" / "posting_info.py"
 
 # ── Session-only window positions ─────────────────────────────────────────────
 # Positions are stored here (in memory) when a dialog is dragged or closed.
@@ -3645,6 +3649,7 @@ class ScriptRunner(QThread):
         self._scripts = scripts
         self.error = ""
         self.cancelled = False
+        self.notifications = []
 
     def run(self) -> None:
         try:
@@ -3690,10 +3695,14 @@ class ScriptRunner(QThread):
                                 process.wait(timeout=0.1)
                             except subprocess.TimeoutExpired:
                                 pass
+                        messages = read_messages(output, entry.get("name") or path.name)
+                        self.notifications.extend(messages)
                         if process.returncode:
                             output.seek(0, os.SEEK_END)
                             output.seek(max(0, output.tell() - 16384))
                             detail = output.read().decode("utf-8", errors="replace").strip()
+                            if messages:
+                                detail = "See this script's notifications for details."
                             raise RuntimeError(f"{path}\nExit code {process.returncode}\n{detail}")
         except Exception as exc:
             self.error = str(exc)
@@ -5683,12 +5692,18 @@ class MainWindow(QMainWindow):
         self._results.hide_loading()
         self._search.setEnabled(True)
         self._menu_btn.setEnabled(True)
+        if self._note_window is not None:
+            self._note_window._panel.reload(self._note_window._panel._current_query)
         if getattr(self, "_close_after_scripts", False):
             QTimer.singleShot(0, self.close)
             return
+        messages = list(runner.notifications)
+        if runner.error and messages:
+            messages.append({"source": "Script runner", "level": "error", "message": runner.error})
+        self._script_notification_dialog = show_messages(self, messages)
         if runner.cancelled or runner.isInterruptionRequested() or runner.error:
             self._set_status("Startup script failed" if runner.error else "Scripts cancelled")
-            if runner.error:
+            if runner.error and not runner.notifications:
                 QMessageBox.warning(self, "Startup script failed", runner.error)
             return
         if self._scripts_at_startup:
@@ -6686,7 +6701,107 @@ class NoteSection(QWidget):
 # ── Note Panel ─────────────────────────────────────────────────────────────────
 
 
+class GeneratedNoteSection(NoteSection):
+    """Read-only section: no normal-note editing or sorting actions."""
+
+    def __init__(self, title, depth=0, reload_callback=None):
+        super().__init__(title, depth=depth)
+        self._header.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self._reload_button = None
+        if reload_callback is not None:
+            self._header.setStyleSheet("color: #c8ac65;")
+            header_layout = self.layout().itemAt(0).widget().layout()
+            self._reload_button = QToolButton()
+            self._reload_button.setText("Reload")
+            self._reload_button.setToolTip("Run the posting-info script and refresh these entries")
+            self._reload_button.setEnabled(not DEV_MODE)
+            self._reload_button.clicked.connect(reload_callback)
+            header_layout.addWidget(self._reload_button)
+            self._reload_button.hide()
+
+    def _set_expanded(self, expanded, focus=True):
+        super()._set_expanded(expanded, focus)
+        if self._reload_button is not None:
+            self._reload_button.setVisible(expanded)
+
+    def add_message(self, text, error=False):
+        label = QLabel(text)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        if error:
+            label.setStyleSheet("color: #ed9292; background: rgba(180, 45, 45, 22); padding: 5px;")
+        self._body_lay.addWidget(label)
+
+    def add_text(self, title, value):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(4, 4, 4, 4)
+        label = QLabel(f"{title}\n{value}")
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(label, 1)
+        copy = QToolButton()
+        copy.setText("Copy")
+        def copy_value():
+            QApplication.clipboard().setText(value)
+            copy.setText("Copied")
+            QTimer.singleShot(900, copy, lambda: copy.setText("Copy"))
+        copy.clicked.connect(copy_value)
+        layout.addWidget(copy)
+        self._body_lay.addWidget(row)
+
+
+def _posting_section(reload_callback, query=""):
+    section = GeneratedNoteSection("Generated Posting Info", reload_callback=reload_callback)
+    section._expansion_key = ("posting",)
+    if DEV_MODE:
+        section.add_message("Generated posting info is disabled in dev mode.")
+        return section
+    try:
+        if not POSTING_INFO_FILE.exists():
+            section.add_message("No posting info yet. Expand this section and use Reload to generate it.")
+            return section
+        data = _json_object(POSTING_INFO_FILE.read_text(encoding="utf-8"))
+        if data.get("version") != 1 or not isinstance(data.get("modes"), dict):
+            raise ValueError("Unsupported posting-info format")
+        for error in data.get("errors", []):
+            if error.get("code") == "location":
+                section.add_message(error["message"], error=True)
+        for mode, destinations in data["modes"].items():
+            mode_section = GeneratedNoteSection(mode, depth=1)
+            mode_section._expansion_key = ("posting", mode)
+            for destination in ("Download", "Promote"):
+                destination_section = GeneratedNoteSection(destination, depth=2)
+                destination_section._expansion_key = ("posting", mode, destination)
+                for key, entry in destinations.get(destination, {}).items():
+                    if query and query.casefold() not in json.dumps(
+                            [mode, destination, key, entry], ensure_ascii=False).casefold():
+                        continue
+                    child = GeneratedNoteSection(entry["name"], depth=3)
+                    child._expansion_key = ("posting", mode, destination, key)
+                    child._header.setToolTip(entry.get("source", ""))
+                    if entry.get("status") != "complete":
+                        child._header.setStyleSheet("color: #ed9292;")
+                        for error in entry.get("errors", []):
+                            child.add_message(error["message"], error=True)
+                        if not entry.get("errors"):
+                            child.add_message("Incomplete entry. Reload to retry.", error=True)
+                    else:
+                        for item in entry.get("texts", []):
+                            child.add_text(item["label"], item["value"])
+                    destination_section.add_child_section(child)
+                mode_section.add_child_section(destination_section)
+            section.add_child_section(mode_section)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        # Never rewrite a malformed generated file from the UI.
+        section.add_message(f"Cannot read posting info: {exc}", error=True)
+    return section
+
+
 class NotePanel(QScrollArea):
+    posting_reload_requested = Signal()
     def __init__(self, notes_file: Path, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._notes_file = notes_file
@@ -6710,9 +6825,9 @@ class NotePanel(QScrollArea):
         self._current_query: str = ""
         self._pre_search_state = None
 
-    def _get_expanded_titles(self) -> set[str]:
+    def _get_expanded_titles(self) -> set:
         """Recursively collect the title text of every expanded NoteSection."""
-        titles: set[str] = set()
+        titles: set = set()
 
         def _collect(layout) -> None:
             for i in range(layout.count()):
@@ -6722,7 +6837,7 @@ class NotePanel(QScrollArea):
                 w = item.widget()
                 if isinstance(w, NoteSection):
                     if w._expanded:
-                        titles.add(w._header.text())
+                        titles.add(getattr(w, "_expansion_key", w._header.text()))
                     _collect(w._body_lay)
 
         _collect(self._layout)
@@ -6753,7 +6868,7 @@ class NotePanel(QScrollArea):
         self,
         data: dict,
         query: str = "",
-        expanded_titles: set[str] | None = None,
+        expanded_titles: set | None = None,
         scroll_value: int = 0,
         az_sort: bool = True,
     ) -> None:
@@ -6853,6 +6968,7 @@ class NotePanel(QScrollArea):
                 for entry in entries:
                     sec.add_card(entry["name"], entry["value"], self._notes_file, self)
 
+        self._layout.addWidget(_posting_section(self.posting_reload_requested.emit, query))
         self._layout.addStretch()
 
         # Searches reveal matches and their ancestors; clearing restores
@@ -6868,7 +6984,7 @@ class NotePanel(QScrollArea):
                     w = item.widget()
                     if (
                         isinstance(w, NoteSection)
-                        and (expand_results or w._header.text() in expanded_titles)
+                        and (expand_results or getattr(w, "_expansion_key", w._header.text()) in expanded_titles)
                     ):
                         if not w._expanded:
                             w._set_expanded(True, focus=False)
@@ -7079,8 +7195,20 @@ class NoteWindow(QDialog):
 
         # ── Canvas ────────────────────────────────────────────────────────
         self._panel = NotePanel(NOTES_FILE)
+        self._panel.posting_reload_requested.connect(self._reload_posting_info)
         self._panel.setMinimumHeight(280)
         lay.addWidget(self._panel, 1)
+
+    def _reload_posting_info(self):
+        if DEV_MODE:
+            return
+        main = self.parent()
+        if main is None:
+            return
+        if main._script_runner is not None:
+            QMessageBox.information(self, "Scripts running", "Wait for the current scripts to finish, then reload.")
+            return
+        main._start_scripts([{"name": "Posting info", "path": str(POSTING_INFO_SCRIPT), "args": ""}])
 
     def closeEvent(self, event) -> None:
         _SESSION_POS["note_window_pos"] = [self.x(), self.y()]
