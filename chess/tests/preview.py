@@ -62,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
                 events.clear()
             return self.respond(json.dumps(pending))
         name = "index.html" if self.path == "/" else self.path.lstrip("/")
-        if name not in ("index.html", "style.css", "app.js", "pieces.js", "review.js"):
+        if name not in ("index.html", "style.css", "app.js", "pieces.js", "review.js", "live-menu.js"):
             return self.send_error(404)
         data = (ROOT / "frontend" / name).read_text(encoding="utf-8")
         if name == "index.html":

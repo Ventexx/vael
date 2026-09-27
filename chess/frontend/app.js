@@ -721,6 +721,7 @@ function initTopbar() {
   el('btn-step-fwd').addEventListener('click', () => goToPly((boardState?.ply ?? 0) + 1));
 
   el('btn-live').addEventListener('click', () => {
+    if (liveActive) {toggleLiveMenu(); return;}
     el('section-live').hidden = false;
     el('section-live').classList.remove('collapsed');
     el('section-live').scrollIntoView({block:'nearest'});
@@ -949,6 +950,7 @@ window.onLiveStatus = function (payload) {
   el('live-source-status').textContent = (payload.source || 'No board connected') + (payload.updated ? ' · Updated ' + new Date(payload.updated * 1000).toLocaleTimeString() : '');
   modeSelect.disabled = liveActive; // mode is fixed for the duration of a Live session
   captureBtn.style.display = (liveActive && liveMode === 'manual') ? '' : 'none';
+  updateLiveMenu(liveActive, livePaused, liveMode);
 
   if (wasLocked !== boardLocked()) {
     clearSelection();

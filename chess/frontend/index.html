@@ -42,10 +42,13 @@
         <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
         Flip
       </button>
+      <div id="live-menu-anchor">
       <button class="tb-btn" id="btn-live" title="Connect a Lichess or Chess.com browser board">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.34 6.34l1.42 1.42M16.24 16.24l1.42 1.42M6.34 17.66l1.42-1.42M16.24 7.76l1.42-1.42"></path></svg>
         <span id="live-button-label">Live</span>
       </button>
+      <div id="live-menu" hidden role="group" aria-label="Live controls"><div id="live-menu-actions"></div><span id="live-menu-feedback" role="status" aria-live="polite"></span></div>
+      </div>
       <div class="tb-sep"></div>
       <button class="tb-btn" id="btn-import" title="Import PGN or FEN">
         <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -93,8 +96,7 @@
           <div id="live-notice" role="status" aria-live="polite">Connect a browser game.</div>
           <div class="hint" id="live-source-status">No board connected</div>
           <select id="live-mode-select" aria-label="Live source"><option value="browser">Browser board</option><option value="continuous">Screen · experimental</option><option value="manual">Screen · manual</option></select>
-          <div class="live-controls"><button class="small-btn primary" id="live-connect">Connect</button><button class="small-btn" id="live-pause" hidden>Pause & explore</button><button class="small-btn" id="live-disconnect" hidden>Stop</button></div>
-          <div class="live-controls"><button class="small-btn" id="live-pairing">Pairing & setup</button><button class="small-btn" id="live-switch" hidden>Switch browser/tab</button><button class="small-btn" id="btn-capture-now" style="display:none">Capture</button></div>
+          <div id="live-controls-home"><div id="live-actions" class="live-controls"><button class="small-btn primary" id="live-connect">Connect</button><button class="small-btn" id="live-pause" hidden>Pause & explore</button><button class="small-btn" id="live-disconnect" hidden>Stop</button><button class="small-btn" id="live-copy-code" hidden>Copy pairing code</button><button class="small-btn" id="live-pairing">Pairing & setup</button><button class="small-btn" id="live-switch" hidden>Switch browser/tab</button><button class="small-btn" id="btn-capture-now" style="display:none">Capture</button></div></div>
         </div>
       </div>
 
@@ -322,6 +324,7 @@
 </div>
 <script src="pieces.js"></script>
 <script src="review.js"></script>
+<script src="live-menu.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
