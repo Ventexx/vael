@@ -364,8 +364,8 @@ input[type="text"], input[type="number"], select { font-size: 13px; padding: 9px
 .move-row:nth-child(even) { background: #ffffff03; border-radius: 5px; }
 .move-cell, .move-num { padding: 7px 8px; }
 .tb-btn.mini { height: 28px; width: 28px; }
-#statusbar { gap: 24px; font-size: 11px; padding: 0 22px; }
-#status-left { flex-shrink: 0; }
+#statusbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(0, 1fr); gap: 16px; font-size: 11px; padding: 0 22px; }
+#status-left { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #status-right { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; opacity: .75; }
 #live-notice { margin: 0 0 6px; padding: 8px 10px; background: var(--accent-faint); border: 1px solid var(--accent-dim); border-radius: 6px; color: var(--accent); font-size: 12px; line-height: 1.5; }
 #live-notice.warning { color: #eac98e; background: #e8b84b0c; border-color: #796443; }
@@ -483,8 +483,8 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .line-moves { font-size:12px; line-height:18px; height:36px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .line-score { font-size:12px; }
 #section-moves .notation-move { padding:4px 6px; font-size:12px; }
-#activity-status { flex:1; min-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font-size:11px; }
-#status-right { max-width:25%; }
+#activity-status { min-width:0; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font-size:11px; }
+#status-right { text-align:right; }
 .engine-modal { width:460px; max-height:85vh; }
 .engine-modal .modal-body { overflow-y:auto; }
 #live-controls-home, #live-mode-select { display:none; }
