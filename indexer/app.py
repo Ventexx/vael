@@ -6708,18 +6708,29 @@ class GeneratedNoteCard(NoteEntryCard):
         super().__init__(name, value, POSTING_INFO_FILE, None)
         self._errors = errors
         self._ignore_callback = ignore_callback
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.setToolTip(f"{name}\n\n{value}" + ("\n\nRight-click to see errors." if errors else ""))
+        self._refresh_preview()
+
+    def _refresh_preview(self):
         for label in self.findChildren(QLabel):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setMinimumWidth(0)
-            label.setMaximumWidth(self.CARD_W - 8)
+            width = max(0, self.width() - 8)
+            label.setMaximumWidth(width)
             label.ensurePolished()
-            # Generated folder names are longer than ordinary note names. Keep
-            # the same card dimensions without cutting text in mid-glyph.
+            text = self._name if label.objectName() == "noteEntryName" else self._value
             label.setText("\n".join(label.fontMetrics().elidedText(
-                line, Qt.TextElideMode.ElideMiddle if label.objectName() == "noteEntryName"
-                else Qt.TextElideMode.ElideRight, self.CARD_W - 8)
-                for line in label.text().splitlines()))
+                line, Qt.TextElideMode.ElideRight, width) for line in text.split("\n")))
+
+    def resizeEvent(self, event):
+        # The inherited hover/copy paint uses CARD_W; keep its border aligned
+        # with the generated card's responsive width, without changing normal notes.
+        self.CARD_W = self.width()
+        self._refresh_preview()
+        super().resizeEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -6786,6 +6797,9 @@ class GeneratedNoteSection(NoteSection):
 
     def __init__(self, title, depth=0, reload_callback=None):
         super().__init__(title, depth=depth)
+        self._card_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        for column in range(3):
+            self._card_grid.setColumnStretch(column, 1)
         self._header.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self._reload_button = None
         if reload_callback is not None:
@@ -6820,7 +6834,11 @@ class GeneratedNoteSection(NoteSection):
         card = GeneratedNoteCard(name, value, errors, ignore_callback)
         index = len(self._cards)
         self._cards.append(card)
-        self._card_grid.addWidget(card, index // COLS, index % COLS)
+        self._card_grid.addWidget(card, index // 3, index % 3)
+
+    def _relayout_cards(self):
+        # Always three equal-width columns; Qt resizes the cards with the window.
+        self._current_cols = 3
 
 
 def _posting_section(reload_callback, query="", ignore_callback=None):
@@ -6850,8 +6868,14 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
                     if entry.get("status") != "complete" and not errors:
                         errors = [{"message": "Incomplete entry. Reload to retry."}]
                     texts = entry.get("texts") or [{"label": "Text", "value": ""}]
+                    # Also combine previously generated two-value entries so a
+                    # script rerun is not needed just to adopt the new display.
+                    if mode == "Mira" and destination == "Promote" and len(texts) == 2:
+                        texts = [{"label": "Tags", "value": "\n".join(item["value"] for item in texts)}]
                     for item in texts:
                         title = entry["name"]
+                        if destination == "Download" and title.lower().endswith(".zip"):
+                            title = title[:-4]
                         if len(texts) > 1:
                             title += "\n" + item["label"]
                         destination_section.add_generated_card(title, item["value"], errors, ignore_callback)
