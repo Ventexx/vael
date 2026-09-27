@@ -3118,7 +3118,7 @@ class ResultsPanel(QScrollArea):
             return
         segments, keys, scroll, generation = self._pending_query
         self._pending_query = None
-        self._query_restore = (keys, scroll)
+        self._query_restore = (keys, scroll, any(segment["text"].strip() for segment in segments))
         if self._db is None:
             self._folder_metadata = {}
             self._show_and_populate([], keys, scroll)
@@ -3134,8 +3134,8 @@ class ResultsPanel(QScrollArea):
         if generation != self._query_generation or self._closing:
             return
         self._folder_metadata = metadata
-        keys, scroll = self._query_restore
-        self._show_and_populate(assets, keys, scroll)
+        keys, scroll, expand_results = self._query_restore
+        self._show_and_populate(assets, keys, scroll, expand_results)
 
     def _on_query_failed(self, generation, error):
         if generation != self._query_generation:
@@ -3165,14 +3165,14 @@ class ResultsPanel(QScrollArea):
             return True
         return False
 
-    def _show_and_populate(self, assets, restore_keys=None, restore_scroll=0):
+    def _show_and_populate(self, assets, restore_keys=None, restore_scroll=0, expand_results=False):
         self._render_timer.stop()
         for section in self._building_sections:
             section.deleteLater()
         self._building_sections = []
         self.show_loading("Rendering results...")
         self._render_scroll = restore_scroll
-        self._render_steps = self._populate_steps(assets, restore_keys)
+        self._render_steps = self._populate_steps(assets, restore_keys, expand_results)
         self._render_timer.start(0)
 
     def _render_batch(self):
@@ -3251,7 +3251,7 @@ class ResultsPanel(QScrollArea):
 
         _apply(self._layout)
 
-    def _populate_steps(self, assets: list[dict], restore_keys: Optional[set[str]] = None):
+    def _populate_steps(self, assets: list[dict], restore_keys: Optional[set[str]] = None, expand_results: bool = False):
         # If no explicit keys provided, snapshot what's currently open so a
         # normal refresh (JSON edit, delete, etc.) preserves expanded state.
         if restore_keys is None:
@@ -3334,9 +3334,10 @@ class ResultsPanel(QScrollArea):
                 sections[fk].add_card(asset, self._db)
             yield
 
-        # Re-open any folder that was expanded before the refresh
+        # Searches reveal every matching folder, including its ancestors.
+        # Clearing the search still restores the pre-search expansion state.
         for fk, sec in sections.items():
-            if fk in restore_keys:
+            if expand_results or fk in restore_keys:
                 sec._set_expanded(True, focus=False)
             sec._update_tag_dot()
             yield
@@ -6707,6 +6708,7 @@ class NotePanel(QScrollArea):
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._current_query: str = ""
+        self._pre_search_state = None
 
     def _get_expanded_titles(self) -> set[str]:
         """Recursively collect the title text of every expanded NoteSection."""
@@ -6727,13 +6729,21 @@ class NotePanel(QScrollArea):
         return titles
 
     def reload(self, query: str = "") -> None:
-        self._current_query = query
+        query = query.strip()
         # Snapshot state before clearing so we can restore it after repopulating
         expanded_titles = self._get_expanded_titles()
         scroll_value = self.verticalScrollBar().value()
         data = _load_state(self._notes_file)
         if data._load_error:
             return
+        if query and self._pre_search_state is None:
+            self._pre_search_state = (expanded_titles, scroll_value)
+        if not query and self._pre_search_state is not None:
+            expanded_titles, scroll_value = self._pre_search_state
+            self._pre_search_state = None
+        elif query != self._current_query:
+            scroll_value = 0
+        self._current_query = query
         # Ensure the A-Z Sort flag exists; inserts it at the top if missing
         data = _ensure_az_sort_flag(data)
         az_sort = bool(data.get(_AZ_SORT_KEY, True))
@@ -6845,8 +6855,10 @@ class NotePanel(QScrollArea):
 
         self._layout.addStretch()
 
-        # Re-open any section that was expanded before the refresh
-        if expanded_titles:
+        # Searches reveal matches and their ancestors; clearing restores
+        # the expansion state from before the search.
+        expand_results = bool(query.strip())
+        if expand_results or expanded_titles:
 
             def _restore(layout) -> None:
                 for i in range(layout.count()):
@@ -6856,7 +6868,7 @@ class NotePanel(QScrollArea):
                     w = item.widget()
                     if (
                         isinstance(w, NoteSection)
-                        and w._header.text() in expanded_titles
+                        and (expand_results or w._header.text() in expanded_titles)
                     ):
                         if not w._expanded:
                             w._set_expanded(True, focus=False)
