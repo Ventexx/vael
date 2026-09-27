@@ -473,3 +473,24 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #live-menu .small-btn:hover::after, #live-menu .small-btn:focus-visible::after { content: attr(data-tooltip); position: absolute; top: calc(100% + 8px); right: -8px; z-index: 1; padding: 6px 9px; white-space: nowrap; border-radius: 5px; background: var(--bg); color: var(--text); border: 1px solid var(--border2); font: 11px/1.4 system-ui; pointer-events: none; }
 #live-menu-feedback:empty { display: none; }
 #live-menu-feedback { display: block; margin-top: 7px; font-size: 11px; color: var(--accent); max-width: 250px; }
+.titlebar-logo { display:flex; align-items:center; gap:6px; }
+.tb-btn.subtle { border-color:transparent; background:transparent; color:var(--text-dim); }
+#btn-engine-settings { font-size:20px; }
+#right-panel .panel-section-head { cursor:default; padding:10px 14px; }
+#right-panel .panel-section-body { padding:8px 14px; }
+#right-panel .panel-section-head-toggle { display:flex; align-items:center; }
+.line-row { padding:6px; height:48px; box-sizing:border-box; }
+.line-moves { font-size:12px; line-height:18px; height:36px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.line-score { font-size:12px; }
+#section-moves .notation-move { padding:4px 6px; font-size:12px; }
+#activity-status { flex:1; min-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); font-size:11px; }
+#status-right { max-width:25%; }
+.engine-modal { width:460px; max-height:85vh; }
+.engine-modal .modal-body { overflow-y:auto; }
+#live-controls-home, #live-mode-select { display:none; }
+.live-start-preference { margin-right:auto; display:flex; align-items:center; gap:7px; font-size:11px; color:var(--text-dim); }
+.live-start-preference input { width:auto; }
+#live-menu #live-disconnect { margin-left:5px; color:var(--red); border-color:var(--red-dim); background:#e0505010; }
+#live-menu #live-disconnect:hover { background:#e0505028; }
+#live-menu { min-width:260px; }
+#live-menu #live-review-ready { margin-top:8px; padding:8px 0 0; }

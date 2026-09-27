@@ -35,7 +35,7 @@ if "--finished-game" in sys.argv:
     api.live_active = True
     api._on_browser_position({"source": "lichess.org", "session": "preview-fixture", "fen": api._board().fen()})
 
-ALLOWED = {"get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review", "review_position", "deepen_review", "review_finished_game", "dismiss_live_review"}
+ALLOWED = {"connect_engine", "disconnect_engine", "set_engine_options", "get_state", "legal_moves", "engine_status", "get_saved_settings", "make_move", "new_game", "go_to_ply", "set_fen", "import_pgn", "export_pgn", "start_live", "stop_live", "get_live_status", "pause_live", "resume_live", "switch_live_tab", "set_view_preferences", "go_to_node", "get_review", "start_review", "cancel_review", "review_position", "deepen_review", "review_finished_game", "dismiss_live_review"}
 BRIDGE = """<script>
 window.pywebview={api:new Proxy({}, {get:(_,name)=>async(...args)=>{
 const r=await fetch('/api/'+name,{method:'POST',headers:{'X-Vael-Preview':'1'},body:JSON.stringify(args)});return r.json();}})};
@@ -62,6 +62,12 @@ class Handler(BaseHTTPRequestHandler):
                 events.clear()
             return self.respond(json.dumps(pending))
         name = "index.html" if self.path == "/" else self.path.lstrip("/")
+        if name == "icon.png":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.end_headers()
+            self.wfile.write((ROOT / "icon.png").read_bytes())
+            return
         if name not in ("index.html", "style.css", "app.js", "pieces.js", "review.js", "live-menu.js"):
             return self.send_error(404)
         data = (ROOT / "frontend" / name).read_text(encoding="utf-8")

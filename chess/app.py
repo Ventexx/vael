@@ -95,7 +95,7 @@ class Api:
         self.state_lock = threading.RLock()
         self.study = Study()
         self.session_store = SessionStore(session_path or SESSION_PATH)
-        self.view_preferences = {"flipped": False, "show_arrows": True}
+        self.view_preferences = {"flipped": False, "show_arrows": True, "skip_live_setup": False}
         self.recovery_note = None
         self.review_result = {"status": "idle", "rows": [], "points": []}
         self.review_route = None
@@ -103,6 +103,9 @@ class Api:
         self.reviewer = GameReview(self._on_review)
         self.engine_mgr = EngineManager(self._push_info)
         self.settings = load_settings()
+        self.settings.pop("browser_pair_token", None)
+        self.settings.pop("browser_session", None)
+        self.settings["live_enabled"] = False
         self.live_active = False
         self.live_paused = False
         self.live_board = None
@@ -125,12 +128,6 @@ class Api:
             if self.review_result.get("deep", {}).get("status") == "running":
                 self.review_result["deep"]["status"] = "cancelled"
             self.recovery_note = "Previous session restored."
-            if recovered.get("live_study"):
-                try:
-                    self.live_board = Study.restore(recovered["live_study"]).node.board()
-                    self.live_paused = bool(recovered.get("live_paused"))
-                except (ValueError, KeyError, TypeError):
-                    pass
         self.browser_live = BrowserLive(self._on_browser_position, self._push_live_status)
         self.live_watcher = capture.LiveWatcher(
             self._board, self._on_live_move, self._on_live_status, self._on_live_resync
@@ -170,7 +167,7 @@ class Api:
 
     def set_view_preferences(self, preferences):
         with self.state_lock:
-            for key in ("flipped", "show_arrows"):
+            for key in ("flipped", "show_arrows", "skip_live_setup"):
                 if key in preferences:
                     self.view_preferences[key] = bool(preferences[key])
             self._save_session()
@@ -571,8 +568,11 @@ class Api:
         self.live_watcher.stop()
         self.live_active = False
         self.live_paused = False
+        self.live_board = None
+        self.live_source = None
+        self.live_updated = None
         self.settings["live_enabled"] = False
-        # Explicit stops release ownership; ordinary app shutdown preserves pairing.
+        # Explicit stops revoke the pairing and release browser ownership.
         self.settings.pop("browser_pair_token", None)
         self.settings.pop("browser_session", None)
         save_settings(self.settings)
@@ -841,6 +841,12 @@ class Api:
 def main():
     global window
     api = Api()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Vael.Chess.Desktop")
+        except OSError:
+            pass
 
     # easy_drag=True (pywebview's default) makes the ENTIRE frameless window
     # draggable from any point, completely ignoring page CSS. We only want
@@ -865,8 +871,6 @@ def main():
     )
 
     def on_shown():
-        if api.settings.get("live_enabled"):
-            api.start_live(mode="browser")
         saved = api.settings.get("engine_path")
         path = saved if saved and os.path.exists(saved) else find_stockfish()
         try:

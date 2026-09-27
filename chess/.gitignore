@@ -3,3 +3,5 @@
 .vael_chess_session.backup.json
 tests/.preview-session.json*
 tests/.preview-session.backup.json
+
+logs/

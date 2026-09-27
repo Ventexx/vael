@@ -1,29 +1,14 @@
 @echo off
-
-REM Check if Python exists
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Python is not installed. Please install it first.
-    exit /b
-)
-
-REM Create virtual environment if it doesn't exist
-if not exist venv (
-    echo Creating virtual environment...
+setlocal
+cd /d "%~dp0"
+if not exist "venv\Scripts\pythonw.exe" (
     python -m venv venv
+    if errorlevel 1 exit /b 1
 )
-
-REM Activate virtual environment
-echo Activating virtual environment...
-call venv\Scripts\activate
-
-REM Upgrade pip
-python -m pip install --upgrade pip
-
-REM Install dependencies
-echo Installing dependencies...
-pip install -r requirements.txt
-
-REM Run the app
-echo Starting app...
-python app.py
+"venv\Scripts\python.exe" -c "import webview, chess, mss, numpy, PIL" >nul 2>&1
+if errorlevel 1 (
+    "venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 exit /b 1
+)
+start "" "venv\Scripts\pythonw.exe" "%~dp0launch.pyw"
+exit /b

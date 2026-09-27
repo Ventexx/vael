@@ -85,7 +85,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn('c5', self.api.export_pgn())
         self.assertEqual(list(self.api.study.game.mainline_moves())[-1].uci(), 'e7e5')
 
-    def test_session_restores_branches_cursor_preferences_and_paused_live(self):
+    def test_session_restores_study_but_not_live_connection(self):
         self.api.import_pgn('1. e4 e5 (1... c5) 2. Nf3 *')
         self.api.go_to_node('e2e4 c7c5')
         self.api.live_board = chess.Board()
@@ -96,17 +96,19 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(restored._board().fen(), self.api._board().fen())
         self.assertEqual(restored.export_pgn(), self.api.export_pgn())
         self.assertTrue(restored.view_preferences['flipped'])
-        self.assertTrue(restored.live_paused)
-        self.assertEqual(restored.live_board.fen(), self.api.live_board.fen())
+        self.assertFalse(restored.live_paused)
+        self.assertIsNone(restored.live_board)
 
-    def test_pairing_survives_shutdown_but_stop_disables_automatic_start(self):
+    def test_app_restart_starts_disconnected_with_fresh_pairing(self):
         with patch('browser_live.PORT', 0):
             token = self.api.start_live()['token']
         self.api.shutdown()
         self.assertTrue(self.settings['live_enabled'])
         restored = app.Api(self.path)
         with patch('browser_live.PORT', 0):
-            self.assertEqual(restored.start_live()['token'], token)
+            self.assertFalse(restored.live_active)
+            self.assertNotIn('browser_session', restored.settings)
+            self.assertNotEqual(restored.start_live()['token'], token)
         restored.stop_live()
         self.assertFalse(self.settings['live_enabled'])
 
@@ -126,6 +128,12 @@ class WorkspaceTests(unittest.TestCase):
             replacement = self.api.switch_live_tab()
             self.assertNotEqual(replacement['token'], result['token'])
             self.assertFalse(replacement['paired'])
+
+    def test_live_setup_preference_survives_restart(self):
+        self.api.set_view_preferences({'skip_live_setup': True})
+        restored = app.Api(self.path)
+        self.assertTrue(restored.view_preferences['skip_live_setup'])
+        self.assertFalse(restored.live_active)
 
     def test_stale_review_cannot_replace_new_game_results(self):
         old_job = self.api.review_job

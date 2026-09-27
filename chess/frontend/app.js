@@ -1,3 +1,4 @@
+let lastLiveNotice = "";
 /* vael. chess -- frontend logic. Talks to the Python backend exclusively
  * through window.pywebview.api.* (calls) and window.onEngineInfo /
  * window.onBoardState (pushes from Python). No network calls -- everything
@@ -374,9 +375,6 @@ function applyBundle(res) {
 function updateStatusbar() {
   if (!boardState) return;
   let liveTag = '';
-  el('turn-indicator').textContent = boardState.game_over
-    ? (boardState.status || 'Game over').replaceAll('_', ' ')
-    : (boardState.turn === 'w' ? 'White' : 'Black') + ' to move' + (boardState.in_check ? ' · Check' : '');
   if (liveActive) {
     const modeLabel = liveMode === 'manual' ? 'LIVE (manual)' : 'LIVE';
     liveTag = `<span class="status-live-tag">&#9679; ${modeLabel} &middot; ${liveMode === 'browser' ? 'browser board' : 'screen capture'}</span> &middot; `;
@@ -591,9 +589,11 @@ function initEnginePanelEvents() {
     if (res.ok) {
       setEngineConnectedUI(true, res.identity);
       applyEngineOptions();
+      setActivity('Engine connected. Analysing the position.');
     } else {
       setEngineConnectedUI(false, null);
       el('engine-id-box').innerHTML = `<span class="bad">Failed:</span> ${res.error}`;
+      setActivity('Could not connect the engine. Check Engine settings.');
     }
   });
   el('btn-disconnect-engine').addEventListener('click', async () => {
@@ -645,12 +645,11 @@ function initEnginePanelEvents() {
 
 // ---------------------------------------------------------------- collapsible panel sections
 function initPanelSections() {
-  document.querySelectorAll('.panel-section-head').forEach((head) => {
-    head.addEventListener('click', (e) => {
-      if (e.target.closest('.no-collapse')) return;
-      head.closest('.panel-section').classList.toggle('collapsed');
-    });
-  });
+  const close = () => { el('modal-engine').classList.remove('open'); el('btn-engine-settings').focus(); };
+  el('btn-engine-settings').addEventListener('click', () => {el('modal-engine').classList.add('open'); el('engine-close').focus();});
+  el('engine-close').addEventListener('click', close);
+  el('modal-engine').addEventListener('click', e => {if (e.target === el('modal-engine')) close();});
+  el('modal-engine').addEventListener('keydown', e => {if(e.key === 'Escape') close();});
 }
 
 // ---------------------------------------------------------------- titlebar window controls
@@ -710,55 +709,59 @@ function initTopbar() {
   el('btn-new-game').addEventListener('click', async () => {
     const res = await window.pywebview.api.new_game();
     applyBundle(res);
+    setActivity('New game ready.');
   });
   el('btn-flip').addEventListener('click', () => {
     flipped = !flipped;
     window.pywebview.api.set_view_preferences({flipped});
     buildSquares();
     renderAll();
+    setActivity('Board flipped.');
   });
   el('btn-step-back').addEventListener('click', () => goToPly((boardState?.ply ?? 1) - 1));
   el('btn-step-fwd').addEventListener('click', () => goToPly((boardState?.ply ?? 0) + 1));
 
-  el('btn-live').addEventListener('click', () => {
-    if (liveActive) {toggleLiveMenu(); return;}
-    el('section-live').hidden = false;
-    el('section-live').classList.remove('collapsed');
-    el('section-live').scrollIntoView({block:'nearest'});
-  });
-  el('live-connect').addEventListener('click', async () => {
-    const btn = el('live-connect');
+  async function beginLive(reconnect = false) {
+    const btn = el('btn-live');
     btn.disabled = true;
+    el('live-connect').disabled = true;
+    setLiveMenuOpen(false);
     try {
-      if (liveActive) { await window.pywebview.api.stop_live(); }
-      clearSelection();
-      hidePromoPicker();
-      const chosenMode = el('live-mode-select').value;
-      const res = await window.pywebview.api.start_live(flipped, chosenMode);
-      if (!res.ok && res.error !== 'cancelled') throw new Error(res.error);
-      if (res.ok && chosenMode === 'browser') {
-        el('live-token').value = res.token;
-        el('extension-path').value = res.extension_path;
-        if (!res.paired) {
+      if (liveActive) await window.pywebview.api.stop_live();
+      clearSelection(); hidePromoPicker();
+      const res = await window.pywebview.api.start_live(flipped, 'browser');
+      if (!res.ok) throw new Error(res.error);
+      el('live-token').value = res.token;
+      el('extension-path').value = res.extension_path;
+      if (reconnect) {
+        el('modal-live').classList.remove('open');
+        try {
+          await navigator.clipboard.writeText(res.token);
+          setActivity('New pairing code copied. Paste it into the extension.');
+        } catch { setActivity('New code ready. Open Live settings to copy it.'); }
+      } else {
+        setActivity('Live started. Connect your browser with the pairing code.');
+        if (!el('live-skip-setup').checked) {
           el('modal-live').classList.add('open');
           el('copy-live-token').focus();
         }
       }
-    } catch (error) {
-      showLiveNotice(error.message, true);
-    } finally {
-      btn.disabled = false;
-      btn.title = 'Start a fresh browser connection with a new pairing code';
-    }
+    } catch (error) { showLiveNotice(error.message, true); setActivity(error.message); }
+    finally { btn.disabled = false; el('live-connect').disabled = false; }
+  }
+  el('btn-live').addEventListener('click', () => {
+    if (liveActive) toggleLiveMenu(); else beginLive();
   });
-  el('live-disconnect').addEventListener('click', () => window.pywebview.api.stop_live());
+  el('live-connect').addEventListener('click', () => beginLive(true));
+  el('live-skip-setup').addEventListener('change', () => window.pywebview.api.set_view_preferences({skip_live_setup: el('live-skip-setup').checked}));
+  el('live-disconnect').addEventListener('click', async () => {await window.pywebview.api.stop_live(); setActivity('Live stopped. Browser disconnected.');});
   el('live-pause').addEventListener('click', async () => {
     const res = await window.pywebview.api[livePaused ? 'resume_live' : 'pause_live']();
-    if (res.error) showLiveNotice(res.error, true); else applyBundle(res);
+    if (res.error) showLiveNotice(res.error, true); else {applyBundle(res); setActivity(livePaused ? 'Live paused. Explore the board freely.' : 'Following the browser board.');}
   });
   el('live-pairing').addEventListener('click', async () => {
     const state = await window.pywebview.api.get_live_status();
-    if (!state.token) {el('live-connect').click(); return;}
+    if (!state.token) {await beginLive(); return;}
     el('live-token').value = state.token;
     el('extension-path').value = state.extension_path;
     el('modal-live').classList.add('open');
@@ -778,6 +781,7 @@ function initTopbar() {
     el(buttonId).addEventListener('click', async () => {
       try {
         await navigator.clipboard.writeText(el(inputId).value);
+        setActivity(buttonId === 'copy-live-token' ? 'Pairing code copied.' : 'Extension folder path copied.');
         const label = el(buttonId).textContent;
         el(buttonId).textContent = 'Copied';
         setTimeout(() => {el(buttonId).textContent = label;}, 1600);
@@ -922,26 +926,28 @@ function showLiveNotice(message, warning = false) {
   el('live-notice').textContent = message;
   el('live-notice').classList.toggle('warning', warning);
   el('live-setup-status').textContent = message;
+  if (message && message !== lastLiveNotice) setActivity(message);
+  lastLiveNotice = message || '';
 }
 
 window.onLiveStatus = function (payload) {
   updateLiveReviewOffer(payload.review_offer);
   const wasLocked = boardLocked();
+  const wasLive = liveActive;
   liveActive = !!payload.live;
   livePaused = !!payload.paused;
   if (payload.mode) liveMode = payload.mode;
   if ('low_confidence' in payload) liveLowConfidence = !!payload.low_confidence;
   if (!liveActive) liveLowConfidence = false;
+  if (wasLive && !liveActive) setActivity('Live stopped. Browser disconnected.');
 
   const btn = el('btn-live');
   const modeSelect = el('live-mode-select');
   const captureBtn = el('btn-capture-now');
   document.getElementById('app').classList.toggle('live-mode', boardLocked());
   btn.classList.toggle('active', liveActive);
-  el('live-button-label').textContent = livePaused ? 'Live · paused' : 'Live';
-  btn.title = 'Open Live controls';
-  if (liveActive) el('section-live').hidden = false;
-  el('live-tag').textContent = !liveActive ? 'off' : payload.warning ? 'waiting' : livePaused ? 'explore' : 'on';
+  el('live-button-label').textContent = !liveActive ? 'Start Live' : livePaused ? 'Live · paused' : 'Live';
+  btn.removeAttribute('title');
   el('live-connect').textContent = liveActive ? 'Reconnect' : 'Connect';
   el('live-disconnect').hidden = !liveActive;
   el('live-switch').hidden = !liveActive || liveMode !== 'browser';
@@ -996,6 +1002,7 @@ async function boot() {
   boardState = state;
   flipped = !!state.view?.flipped;
   showArrows = state.view?.show_arrows !== false;
+  el('live-skip-setup').checked = !!state.view?.skip_live_setup;
   el('toggle-arrows').checked = showArrows;
   buildSquares();
   legalMoves = legal;

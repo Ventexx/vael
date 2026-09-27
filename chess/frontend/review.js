@@ -242,7 +242,7 @@ function updateLiveReviewOffer(offer) {
   liveReviewOffer = offer || null;
   el('live-review-ready').hidden = !offer;
   if (offer) {
-    el('section-live').hidden = false;
+    if (!liveMenuEnabled && typeof setActivity === 'function') setActivity('Game finished. Open Live to review it.');
     el('live-finished-label').textContent = offer.result === 'finished' ? 'Game finished' : 'Finished · ' + offer.result;
     el('live-review-game').textContent = offer.partial ? 'Review captured moves' : 'Review this game';
   }
@@ -279,7 +279,7 @@ function initReview() {
     if (!result.ok) {el('review-status').textContent=result.error; el('review-start').disabled=false; return;}
     reviewState=result.review; renderReview();
   });
-  el('review-cancel').addEventListener('click',async()=>{reviewState=await window.pywebview.api.cancel_review();renderReview();});
+  el('review-cancel').addEventListener('click',async()=>{reviewState=await window.pywebview.api.cancel_review();renderReview();setActivity('Review stopped. Previous results are kept.');});
   el('review-tour').addEventListener('click',async()=>{
     const tour=reviewTour();
     const fallback=reviewState.rows.find(r=>reviewSide==='all'||r.turn===reviewSide);
@@ -301,6 +301,7 @@ function initReview() {
 window.onReview=data=>{
   if ((data.job_id ?? 0) < (reviewState.job_id ?? 0)) return;
   const refreshed = data.deep?.status === 'complete' && reviewState.deep?.status === 'running' && data.deep.ply === reviewPly;
+  if (typeof setActivity === 'function') setActivity(data.deep?.status === 'running' ? 'Checking this move more deeply…' : data.status === 'running' ? `Reviewing game: ${data.completed || 0} of ${data.total || 0} moves.` : data.status === 'complete' ? 'Game review ready.' : data.status === 'cancelled' ? 'Review stopped. Analysed moves are saved.' : data.error || 'Review updated.');
   reviewState=data;renderReview();
   if(refreshed && reviewOpen) previewReviewLine('before',0);
 };

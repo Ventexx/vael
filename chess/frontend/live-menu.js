@@ -1,3 +1,7 @@
+function setActivity(message) {
+  const status = document.getElementById('activity-status');
+  if (status) {status.textContent = message; status.title = message;}
+}
 // Move the existing controls rather than duplicating their actions or state.
 const liveMenuAnchor = document.getElementById('live-menu-anchor');
 const liveMenu = document.getElementById('live-menu');
@@ -31,12 +35,16 @@ function updateLiveMenu(active, paused, mode) {
   const icons = {...liveIcons, 'live-pause': [paused ? '▶' : 'Ⅱ', paused ? 'Return to live' : 'Pause & explore']};
   for (const [id, [icon, label]] of Object.entries(icons)) {
     const button = document.getElementById(id);
-    button.title = label;
+    button.removeAttribute('title');
     button.setAttribute('aria-label', label);
     button.dataset.tooltip = label;
     button.textContent = active ? icon : id === 'live-connect' ? 'Connect' : label;
   }
   if (!active) setLiveMenuOpen(false);
+  const order = ['live-connect','live-copy-code','live-pause','btn-capture-now','live-switch','live-pairing','live-disconnect'];
+  if (Array.from(actions.children).map(node => node.id).join() !== order.join()) {
+    for (const id of order) actions.appendChild(document.getElementById(id));
+  }
 }
 liveMenuAnchor.addEventListener('mouseenter', () => setLiveMenuOpen(true));
 liveMenuAnchor.addEventListener('mouseleave', () => {
@@ -67,8 +75,20 @@ document.getElementById('live-copy-code').addEventListener('click', async () => 
     const state = await window.pywebview.api.get_live_status();
     if (!state.live || !state.token) throw new Error('Start Live to get a pairing code.');
     await navigator.clipboard.writeText(state.token);
-    feedback.textContent = 'Pairing code copied';
+    setActivity('Pairing code copied.');
   } catch (error) {
-    feedback.textContent = 'Could not copy. Open Pairing & setup to copy the code.';
+    setActivity('Could not copy. Open Live settings to copy the code.');
   }
+});
+
+const actionMessages = {
+  'btn-connect-engine': 'Connecting the engine…', 'btn-disconnect-engine': 'Engine disconnected.',
+  'btn-apply-engine': 'Engine settings applied. Updating analysis…',
+  'review-start': 'Reviewing the game…', 'review-deeper': 'Checking this move more deeply…',
+  'review-cancel': 'Stopping review…', 'import-go': 'Loading the position…',
+  'live-switch': 'New connection ready. Pair the browser tab you want to use.',
+};
+document.addEventListener('click', event => {
+  const id = event.target.closest('button')?.id;
+  if (actionMessages[id]) setActivity(actionMessages[id]);
 });

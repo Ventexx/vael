@@ -1,6 +1,7 @@
 """Cancellable local review. Scores and grades are Vael estimates, not Elo."""
 import math
 import threading
+from engine_process import engine_process_options
 import chess
 import chess.engine
 
@@ -292,7 +293,7 @@ class GameReview:
             with self.run_lock:
                 if event.is_set():
                     return
-                with chess.engine.SimpleEngine.popen_uci(path, timeout=10) as engine:
+                with chess.engine.SimpleEngine.popen_uci(path, timeout=10, **engine_process_options()) as engine:
                     engine.configure({k: v for k, v in {"Threads": 1, "Hash": 128, "UCI_LimitStrength": False, "Skill Level": 20}.items() if k in engine.options})
                     row = analyse_move(engine, board, move, route, event, seconds, previous_best)
                     if not event.is_set():
@@ -323,7 +324,7 @@ class GameReview:
         try:
             with self.run_lock:
                 check()
-                with chess.engine.SimpleEngine.popen_uci(path, timeout=10) as engine:
+                with chess.engine.SimpleEngine.popen_uci(path, timeout=10, **engine_process_options()) as engine:
                     engine.configure({k: v for k, v in {"Threads": 1, "Hash": 128, "UCI_LimitStrength": False, "Skill Level": 20}.items() if k in engine.options})
                     result["engine"] = getattr(engine, "id", {}).get("name", "Local engine")
                     board, route = chess.Board(fen), []

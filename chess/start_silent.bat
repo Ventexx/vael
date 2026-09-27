@@ -1,26 +1,14 @@
 @echo off
-
-REM Generate timestamp (YYYY-MM-DD_HH-MM)
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm"') do set TIMESTAMP=%%i
-
-REM Ensure logs folder exists
-if not exist logs (
-    mkdir logs
-)
-
-REM Set log file path
-set LOGFILE=logs\%TIMESTAMP%.log
-
-REM Create venv if missing
-if not exist venv (
+setlocal
+cd /d "%~dp0"
+if not exist "venv\Scripts\pythonw.exe" (
     python -m venv venv
+    if errorlevel 1 exit /b 1
 )
-
-REM Activate venv
-call venv\Scripts\activate
-
-REM Install dependencies (silent)
-pip install -r requirements.txt >nul 2>&1
-
-REM Run app silently with logging
-start "" venv\Scripts\pythonw.exe app.py > "%LOGFILE%" 2>&1
+"venv\Scripts\python.exe" -c "import webview, chess, mss, numpy, PIL" >nul 2>&1
+if errorlevel 1 (
+    "venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 exit /b 1
+)
+start "" "venv\Scripts\pythonw.exe" "%~dp0launch.pyw"
+exit /b

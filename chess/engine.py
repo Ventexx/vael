@@ -11,6 +11,7 @@ messages that were in flight when the position changed.
 """
 
 import threading
+from engine_process import engine_process_options
 import chess
 import chess.engine
 
@@ -40,7 +41,7 @@ class EngineManager:
     def connect(self, path):
         with self.lock:
             self._disconnect_locked()
-            self.engine = chess.engine.SimpleEngine.popen_uci(path)
+            self.engine = chess.engine.SimpleEngine.popen_uci(path, **engine_process_options())
             self.engine_path = path
             self._apply_options_locked()
             return dict(self.engine.id)

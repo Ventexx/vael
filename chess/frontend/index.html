@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>vael. // chess</title>
+<link rel="icon" type="image/png" href="../icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,7 +22,7 @@
 
   <!-- TITLEBAR -->
   <div id="titlebar" class="pywebview-drag-region">
-    <div class="titlebar-logo">vael. <span>chess</span></div>
+    <div class="titlebar-logo"><img src="../icon.png" alt="" width="18" height="18"> vael. <span>chess</span></div>
     <div id="titlebar-winctl">
       <button class="winbtn" id="win-min" title="Minimize"><svg viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5"></line></svg></button>
       <button class="winbtn" id="win-max" title="Maximize"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7"></rect></svg></button>
@@ -34,21 +35,20 @@
     <span class="status-dot off" id="engine-dot"></span>
     <span id="engine-status-text">Engine not connected</span>
     <div id="topbar-actions">
-      <button class="tb-btn" id="btn-new-game" title="New game">
+      <button class="tb-btn icon-only subtle" aria-label="New game" id="btn-new-game" title="New game">
         <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"></path><polyline points="12 1 12 5 16 5"></polyline></svg>
-        New
       </button>
-      <button class="tb-btn" id="btn-flip" title="Flip board">
+      <button class="tb-btn icon-only subtle" aria-label="Flip board" id="btn-flip" title="Flip board">
         <svg viewBox="0 0 24 24"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-        Flip
       </button>
       <div id="live-menu-anchor">
       <button class="tb-btn" id="btn-live" title="Connect a Lichess or Chess.com browser board">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.34 6.34l1.42 1.42M16.24 16.24l1.42 1.42M6.34 17.66l1.42-1.42M16.24 7.76l1.42-1.42"></path></svg>
         <span id="live-button-label">Live</span>
       </button>
-      <div id="live-menu" hidden role="group" aria-label="Live controls"><div id="live-menu-actions"></div><span id="live-menu-feedback" role="status" aria-live="polite"></span></div>
+      <div id="live-menu" hidden role="group" aria-label="Live controls"><div id="live-menu-actions"></div>        <div id="live-review-ready" hidden><span id="live-finished-label">Game finished</span><button class="small-btn primary" id="live-review-game">Review this game</button><button class="small-btn" id="live-review-dismiss" aria-label="Dismiss finished-game review">×</button></div><span id="live-menu-feedback" role="status" aria-live="polite"></span></div>
       </div>
+      <button class="tb-btn icon-only subtle" id="btn-engine-settings" aria-label="Engine settings" title="Engine settings">&#9881;</button>
       <div class="tb-sep"></div>
       <button class="tb-btn" id="btn-import" title="Import PGN or FEN">
         <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -89,26 +89,51 @@
 
     <!-- RIGHT PANEL -->
     <div id="right-panel">
-      <div class="panel-section collapsed" id="section-live" hidden>
-        <button class="panel-section-head"><svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg><span class="panel-section-title">Live</span><span class="panel-section-tag" id="live-tag">off</span></button>
-        <div id="live-review-ready" hidden><span id="live-finished-label">Game finished</span><button class="small-btn primary" id="live-review-game">Review this game</button><button class="small-btn" id="live-review-dismiss" aria-label="Dismiss finished-game review">×</button></div>
+      <!-- ANALYSIS LINES -->
+      <div class="panel-section" id="section-lines">
+        <div class="panel-section-head">
+          <span class="panel-section-title">Engine lines</span>
+          <span class="panel-section-tag" id="lines-depth-tag">&mdash;</span>
+        </div>
         <div class="panel-section-body">
-          <div id="live-notice" role="status" aria-live="polite">Connect a browser game.</div>
-          <div class="hint" id="live-source-status">No board connected</div>
-          <select id="live-mode-select" aria-label="Live source"><option value="browser">Browser board</option><option value="continuous">Screen · experimental</option><option value="manual">Screen · manual</option></select>
-          <div id="live-controls-home"><div id="live-actions" class="live-controls"><button class="small-btn primary" id="live-connect">Connect</button><button class="small-btn" id="live-pause" hidden>Pause & explore</button><button class="small-btn" id="live-disconnect" hidden>Stop</button><button class="small-btn" id="live-copy-code" hidden>Copy pairing code</button><button class="small-btn" id="live-pairing">Pairing & setup</button><button class="small-btn" id="live-switch" hidden>Switch browser/tab</button><button class="small-btn" id="btn-capture-now" style="display:none">Capture</button></div></div>
+          <div class="lines-meta" id="lines-meta">&mdash;</div>
+          <div id="lines-list"><div class="lines-empty">Connect an engine to see live analysis lines here.</div></div>
         </div>
       </div>
 
-      <!-- ENGINE SETTINGS -->
-      <div class="panel-section collapsed" id="section-engine">
-        <button class="panel-section-head">
-          <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="color:var(--text-dim); flex-shrink:0;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-          <span class="panel-section-title">Engine</span>
-          <span class="panel-section-tag" id="engine-tag">off</span>
-        </button>
-        <div class="panel-section-body" id="engine-body">
+      <!-- MOVE LIST / NOTATION -->
+      <div class="panel-section" id="section-moves">
+        <div class="panel-section-head">
+          <div class="panel-section-head-toggle">
+            <span class="panel-section-title">Notation</span>
+          </div>
+          <div class="moves-nav no-collapse">
+            <button class="small-btn" id="btn-review" title="Review the main game">Review</button>
+            <button class="tb-btn icon-only mini" id="btn-step-back" title="Previous move">
+              <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+            <button class="tb-btn icon-only mini" id="btn-step-fwd" title="Next move">
+              <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </button>
+          </div>
+          <span class="panel-section-tag" id="moves-count-tag">0</span>
+        </div>
+        <div class="panel-section-body">
+          <div id="moves-table"><div class="moves-empty">No moves played yet.</div></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- STATUS BAR -->
+  <div id="statusbar">
+    <div id="status-left">&mdash;</div><span id="activity-status" role="status" aria-live="polite">Ready.</span>
+    <div id="status-right"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal-engine" role="dialog" aria-modal="true" aria-labelledby="engine-settings-title"><div class="modal engine-modal"><div class="modal-head"><h2 id="engine-settings-title" class="modal-title">Engine settings</h2><span id="engine-tag" hidden>off</span><button class="modal-close" id="engine-close" aria-label="Close engine settings">&times;</button></div><div class="modal-body">        <div class="panel-section-body" id="engine-body">
 
           <div class="engine-id" id="engine-id-box">No engine connected. Point this at your local Stockfish binary.</div>
 
@@ -187,54 +212,7 @@
           <button class="small-btn primary" id="btn-apply-engine" style="width:100%;">Apply settings</button>
           <div class="hint">Changes apply immediately and restart analysis on the current position.</div>
         </div>
-      </div>
-
-      <!-- ANALYSIS LINES -->
-      <div class="panel-section" id="section-lines">
-        <button class="panel-section-head">
-          <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          <span class="panel-section-title">Engine lines</span>
-          <span class="panel-section-tag" id="lines-depth-tag">&mdash;</span>
-        </button>
-        <div class="panel-section-body">
-          <div class="lines-meta" id="lines-meta">&mdash;</div>
-          <div id="lines-list"><div class="lines-empty">Connect an engine to see live analysis lines here.</div></div>
-        </div>
-      </div>
-
-      <!-- MOVE LIST / NOTATION -->
-      <div class="panel-section" id="section-moves">
-        <div class="panel-section-head">
-          <button class="panel-section-head-toggle">
-            <svg class="chev" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            <span class="panel-section-title">Notation</span>
-          </button>
-          <div class="moves-nav no-collapse">
-            <button class="small-btn" id="btn-review" title="Review the main game">Review</button>
-            <button class="tb-btn icon-only mini" id="btn-step-back" title="Previous move">
-              <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
-            </button>
-            <button class="tb-btn icon-only mini" id="btn-step-fwd" title="Next move">
-              <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
-            </button>
-          </div>
-          <span class="panel-section-tag" id="moves-count-tag">0</span>
-        </div>
-        <div class="panel-section-body">
-          <div id="moves-table"><div class="moves-empty">No moves played yet.</div></div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- STATUS BAR -->
-  <div id="statusbar">
-    <div id="status-left">&mdash;</div><span id="turn-indicator">White to move</span>
-    <div id="status-right"></div>
-  </div>
-</div>
-
+</div></div></div>
 <!-- IMPORT MODAL -->
 <div class="modal-backdrop" id="modal-import">
   <div class="modal">
@@ -281,6 +259,10 @@
   <div class="modal live-modal">
     <div class="modal-head"><h2 class="modal-title" id="live-dialog-title">Connect your browser board</h2><button class="modal-close" id="live-close" aria-label="Close">×</button></div>
     <div class="modal-body">
+                <div id="live-notice" role="status" aria-live="polite">Connect a browser game.</div>
+          <div class="hint" id="live-source-status">No board connected</div>
+          <select id="live-mode-select" aria-label="Live source"><option value="browser">Browser board</option><option value="continuous">Screen · experimental</option><option value="manual">Screen · manual</option></select>
+          <div id="live-controls-home"><div id="live-actions" class="live-controls"><button class="small-btn primary" id="live-connect">Connect</button><button class="small-btn" id="live-pause" hidden>Pause & explore</button><button class="small-btn" id="live-disconnect" hidden>Stop</button><button class="small-btn" id="live-copy-code" hidden>Copy pairing code</button><button class="small-btn" id="live-pairing">Pairing & setup</button><button class="small-btn" id="live-switch" hidden>Switch browser/tab</button><button class="small-btn" id="btn-capture-now" style="display:none">Capture</button></div></div>
       <p class="live-intro">Lichess or Chess.com. Your choice of pieces and board.</p>
       <ol class="setup-steps">
         <li><strong>Add the companion extension</strong>
@@ -291,10 +273,10 @@
         <li><strong>Open the game you want to mirror</strong><p>On Lichess, keep the game's move list available. Click the Vael Chess Live extension in that tab.</p></li>
         <li><strong>Pair with this workspace</strong><p>Paste this code into the extension and choose Connect to Vael. If asked, allow access to <code>127.0.0.1</code> — that is Vael on your own computer.</p><div class="pairing-row"><input id="live-token" readonly aria-label="Pairing code"><button class="small-btn primary" id="copy-live-token">Copy code</button></div></li>
       </ol>
-      <p class="hint">The selected game reconnects after tab refreshes and app restarts. Stop or Reconnect resets pairing; copy the new code when starting again. Allow chess-site access in the extension for automatic reconnection. Use Switch browser/tab in Live to pair a different browser.</p>
+      <p class="hint">The selected game reconnects after tab refreshes. Each app launch starts disconnected. Stop or Reconnect resets pairing; copy the new code when starting again. Allow chess-site access in the extension for automatic reconnection. Use Switch browser/tab in Live to pair a different browser.</p>
       <p id="live-setup-status" role="status">Waiting for browser…</p>
     </div>
-    <div class="modal-foot"><button class="btn-secondary" id="live-stop">Stop Live</button><button class="btn-primary" id="live-done">Done</button></div>
+    <div class="modal-foot"><label class="live-start-preference"><input type="checkbox" id="live-skip-setup"> Do not show when starting Live</label><button class="btn-secondary" id="live-stop">Stop Live</button><button class="btn-primary" id="live-done">Done</button></div>
   </div>
 </div>
 <div class="modal-backdrop" id="modal-review" role="dialog" aria-modal="true" aria-labelledby="review-title">
