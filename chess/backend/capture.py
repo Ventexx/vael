@@ -82,6 +82,7 @@ import chess.svg
 import numpy as np
 from mss import mss
 from PIL import Image
+from .paths import TEMPLATE_DIR
 
 try:
     import cairosvg
@@ -101,7 +102,7 @@ TEMPLATE_MIN_IOU = 0.35          # shape match below this is treated as "unknown
 # lowercase piece symbols. Checked before falling back to the bundled
 # cburnett SVG render for any type that isn't present. Switch board
 # skins by changing ACTIVE_TEMPLATE_SET to another subfolder name.
-_TEMPLATE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "piece_templates")
+_TEMPLATE_ROOT = str(TEMPLATE_DIR)
 ACTIVE_TEMPLATE_SET = "chesscom"
 _PIECE_SYMBOL = {
     chess.PAWN: "p", chess.KNIGHT: "n", chess.BISHOP: "b",

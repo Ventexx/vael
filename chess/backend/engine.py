@@ -11,7 +11,7 @@ messages that were in flight when the position changed.
 """
 
 import threading
-from engine_process import engine_process_options
+from .engine_process import engine_process_options
 import chess
 import chess.engine
 

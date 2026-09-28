@@ -1,7 +1,7 @@
 # chess
 
 <!-- cover -->
-<img src="./icon.png" alt="chess icon" width="128">
+<img src="./cover.png" alt="chess cover">
 
 ---
 
@@ -31,9 +31,9 @@ A desktop chess board for exploring positions and reviewing games with a local a
 1. Install [Python](https://www.python.org/downloads/). Enable **Add Python to PATH** if the installer offers it.
 2. Download Vael using **Code → Download ZIP** on GitHub, then extract it.
 3. Open the `chess` folder and double-click `start.bat`. It downloads the required packages into a local `venv` folder and opens the app. Allow time for the initial setup.
-4. For engine analysis, download and extract [Stockfish](https://stockfishchess.org/download/). In Chess's engine panel, choose **Browse**, select the Stockfish executable, then **Connect**.
+4. For engine analysis, download and extract [Stockfish](https://stockfishchess.org/download/). In Chess's top-bar Engine settings, choose **Browse**, select the Stockfish executable, then **Connect**.
 
-Use `start.bat` or `start_silent.bat` to launch later. Both open `launch.pyw` with Python’s windowless interpreter; first-run setup may show a console while dependencies install. Application errors go to `logs/desktop.log`. Engine and review subprocesses also run without consoles on Windows. A browser alone cannot run this app's Python and engine functions.
+Use `start.bat` or `start_silent.bat` to launch later. Both open `app.py` with Python’s windowless interpreter; first-run setup may show a console while dependencies install. Application errors go to `logs/desktop.log`. Engine and review subprocesses also run without consoles on Windows. A browser alone cannot run this app's Python and engine functions.
 
 **Uninstall**
 
@@ -74,23 +74,27 @@ The summary shows separate White and Black accuracy estimates, a move-quality br
 
 Before each move, a green arrow shows the preferred move and a dashed amber arrow shows the played move. **Try …** previews the preferred position; the continuation buttons step through the engine's replies. **Played move** compares the original choice and its engine continuation. These previews never change your saved game or variations, and closing Review restores your original position. Review arrows remain visible independently of the normal engine-arrow setting.
 
-Explanations use verified board facts and engine lines. The system assigns Great, Best, Excellent, Good, Inaccuracy, Mistake, Blunder, and Forced; it does not invent Brilliant labels or human skill ratings. See `review-roadmap.md` for the scoring method and remaining work.
+Explanations use verified board facts and engine lines. The system assigns Great, Best, Excellent, Good, Inaccuracy, Mistake, Blunder, and Forced; it does not invent Brilliant labels or human skill ratings. See `docs/review-roadmap.md` for the scoring method and remaining work.
 
 ## file structure
 
 ```text
-app.py                — desktop app, board rules, and saved settings
-engine.py             — connection to the chess analysis engine
-capture.py            — recognition of boards in a selected screen area
-browser_live.py       — authenticated local browser connection and position validation
-browser-extension/    — Chrome/Edge/Zen/Firefox companion
-frontend/index.html   — the visible interface
-frontend/style.css    — colors and layout
-frontend/app.js       — board controls and interactions
-frontend/pieces.js    — piece artwork
-requirements.txt      — packages needed by the app
-start.bat             — Windows setup and launch
-start_silent.bat      — alternate Windows launcher
+app.py                — small desktop entry point, including windowless logging
+backend/              — Python application code
+  application.py      — desktop bridge, board actions, settings, and startup
+  paths.py            — project paths shared by backend modules
+  engine.py           — continuous engine analysis
+  engine_process.py   — platform-specific engine process options
+  review.py           — game review and move explanations
+  study.py            — variation tree and saved-session storage
+  browser_live.py     — authenticated local browser connection
+  capture.py          — experimental screen-board recognition
+frontend/             — interface HTML, CSS, JavaScript, and piece artwork
+browser-extension/    — Chrome/Edge companion and generated Firefox package
+docs/review-roadmap.md — scoring method and unfinished review refinements
+requirements.txt      — Python dependencies
+start.bat             — Windows setup and windowless launch
+start_silent.bat      — compatibility shortcut to start.bat
 chess.md              — this guide
 icon.png / .ico       — app icons
 ```
@@ -99,10 +103,12 @@ icon.png / .ico       — app icons
 
 Use **Check deeper** on a move for a three-second search per candidate, then **Check further** for six seconds. Cancelling keeps the previous verdict. **See the threat and reply** jumps to concrete positions in the analysed lines without changing your game.
 
-A completed connected game offers **Review this game** in the Live toolbar menu. It stops Live and starts the review; dismissing the offer keeps it quiet. Checkmate and automatic draws are detected from the board. Resignations and clock results depend on the site's visible result data; detection is covered by fixtures but has not been verified against every current site layout or language.
+A completed connected game offers **Review this game** in the Live toolbar menu. It stops Live and starts the review; dismissing the offer keeps it quiet. Checkmate and automatic draws are detected from the board. Resignations and clock results depend on the site's visible result data; detection was checked with fixtures before the test-suite cleanup but has not been verified against every current site layout or language.
 
-The Chrome/Edge extension uses the root `browser-extension` folder. Zen/Firefox uses the generated `browser-extension/firefox` package. After editing shared companion sources, run `python browser-extension/build_firefox.py`; tests verify both packages stay in sync.
+The Chrome/Edge extension uses the root `browser-extension` folder. Zen/Firefox uses the generated `browser-extension/firefox` package. After editing shared companion sources, run `python browser-extension/build_firefox.py`. Regenerate the Firefox package whenever shared extension files change.
 
 Engine settings are available from the top-bar gear. The sidebar contains only Engine Lines and Notation, always expanded. Each recommended line reserves two text lines and clips longer continuations. The Windows window uses `icon.ico` and a dedicated taskbar app identity; other platforms use `icon.png`, also used as the browser favicon. The in-app title bar stays text-only.
 
 Notation uses compact rows with a move-number column and aligned White/Black moves; alternatives remain expandable beneath the relevant move pair.
+
+The test suite and its preview/calibration fixtures have been removed. Local settings, saved sessions, templates, and logs remain at the project root so existing installations retain their data.

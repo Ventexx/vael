@@ -22,7 +22,7 @@ A local backup tool for keeping selected folders together in a compressed archiv
 A minimal browser-based to-do app for tasks, notes, and reusable lists. Organize work into sections, switch between saved profiles, and pick up unfinished drafts in a clean, distraction-free interface.
 
 ### [chess ›](./chess/chess.md)
-<img src="./chess/icon.png" alt="chess icon" width="128">
+![chess cover](./chess/cover.png)
 
 A desktop chess board for exploring positions and reviewing games. Connect a local analysis engine, step through moves, or mirror a board from a selected area of your screen.
 
