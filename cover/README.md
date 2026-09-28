@@ -1,7 +1,7 @@
 # cover
 
 <!-- cover -->
-<img src="./icon.png" alt="cover icon" width="128">
+![Cover cover](./cover.png)
 
 ---
 
@@ -88,7 +88,7 @@ app.py                       — the desktop app
 requirements.txt             — packages needed by the app
 start.bat / start.sh          — Windows / Linux setup and launch
 start_silent.bat / .sh        — alternate launchers
-cover.md                     — this guide
+README.md                     — this guide
 icon.png / .ico               — app icons
 workflows_config.json        — your saved settings; created locally
 venv/                        — downloaded Python packages; created by the launcher

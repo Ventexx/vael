@@ -182,7 +182,7 @@ app.py                       — the desktop app
 requirements.txt             — packages needed by the app
 start.bat / start.sh          — Windows / Linux setup and launch
 start_silent.bat / .sh        — alternate launchers
-indexer.md                   — this guide
+README.md                   — this guide
 icon.png / .ico               — app icons
 cover.png                    — the cover image above
 venv/                        — downloaded Python packages; created by the launcher

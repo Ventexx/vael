@@ -95,7 +95,7 @@ docs/review-roadmap.md — scoring method and unfinished review refinements
 requirements.txt      — Python dependencies
 start.bat             — Windows setup and windowless launch
 start_silent.bat      — compatibility shortcut to start.bat
-chess.md              — this guide
+README.md              — this guide
 icon.png / .ico       — app icons
 ```
 

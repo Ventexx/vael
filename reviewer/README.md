@@ -78,7 +78,7 @@ previews.js         — thumbnail loading and caching
 preview-worker.js   — background thumbnail generation
 package.json        — app information and launch/package commands
 package-lock.json   — exact dependency versions
-reviewer.md         — this guide
+README.md         — this guide
 icon.png / .ico     — app icons
 cover.png           — the cover image above
 ```

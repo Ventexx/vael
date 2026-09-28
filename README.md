@@ -17,29 +17,29 @@ These apps are primarily built for myself to solve specific workflow challenges.
 
 A local backup tool for keeping selected folders together in a compressed archive. Create or update backups, check their integrity, and keep a readable history of each run.
 
-### [checklist ›](./checklist/checklist.md)
+### [checklist ›](./checklist/README.md)
 ![checklist cover](./checklist/cover.png)
 A minimal browser-based to-do app for tasks, notes, and reusable lists. Organize work into sections, switch between saved profiles, and pick up unfinished drafts in a clean, distraction-free interface.
 
-### [chess ›](./chess/chess.md)
+### [chess ›](./chess/README.md)
 ![chess cover](./chess/cover.png)
 
 A desktop chess board for exploring positions and reviewing games. Connect a local analysis engine, step through moves, or mirror a board from a selected area of your screen.
 
-### [cover ›](./cover/cover.md)
-<img src="./cover/icon.png" alt="cover icon" width="128">
+### [cover ›](./cover/README.md)
+![Cover cover](./cover/cover.png)
 
 A desktop companion for ComfyUI. Browse image folders, assign inputs to saved workflows, and run individual jobs or a queue from one compact workspace.
 
-### [editor ›](./editor/editor.md)
+### [editor ›](./editor/README.md)
 ![editor cover](./editor/cover.png)
 A dark desktop image editor built for one job: pixelating or blurring parts of a large batch of images, fast. Organize images into categories, reuse filter presets, and save in PNG, JPEG, or WebP.
 
-### [indexer ›](./indexer/indexer.md)
+### [indexer ›](./indexer/README.md)
 ![indexer cover](./indexer/cover.png)
 A desktop library for images and their accompanying information. Turn folders of image + JSON pairs into a searchable visual collection, with tags, identifiers, reusable notes, and quick access to the original files.
 
-### [reviewer ›](./reviewer/reviewer.md)
+### [reviewer ›](./reviewer/README.md)
 ![reviewer cover](./reviewer/cover.png)
 A desktop image reviewer for sorting through generated variations. Group repeated versions of an image, compare them, and decide what to keep, move to the trash, or flag for another run.
 

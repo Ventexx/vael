@@ -81,7 +81,7 @@ thumbnail-queue.js    — background preview scheduling
 thumbnail-worker.js   — background preview generation
 package.json          — app information and launch/package commands
 package-lock.json     — exact dependency versions
-editor.md             — this guide
+README.md             — this guide
 icon.png / .ico       — app icons
 cover.png             — the cover image above
 ```

@@ -53,7 +53,7 @@ Changing browsers, using a different browser profile, or moving the HTML file ma
 
 ```text
 vael.html          — the complete app; open this file to use it
-checklist.md       — this guide
+README.md       — this guide
 icon.png           — browser-tab icon
 cover.png          — the cover image above
 ```
