@@ -6701,6 +6701,21 @@ class NoteSection(QWidget):
 # ── Note Panel ─────────────────────────────────────────────────────────────────
 
 
+class PostingErrorMenu(QMenu):
+    """Error rows copy on click; their submenus still open on hover."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.actionAt(event.pos())
+        if (event.button() == Qt.MouseButton.LeftButton and action is not None
+                and action.menu() is not None and action.property("postingErrorMessage") is not None):
+            QApplication.clipboard().setText(action.property("postingErrorMessage"))
+            action.menu().close()
+            self.close()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class GeneratedNoteCard(NoteEntryCard):
     """Normal click-to-copy notes, with read-only error menus instead of editing."""
 
@@ -6746,7 +6761,7 @@ class GeneratedNoteCard(NoteEntryCard):
             painter.end()
 
     def _error_menu(self):
-        menu = QMenu(self)
+        menu = PostingErrorMenu(self)
         menu.setObjectName("cardMenu")
         menu.setToolTipsVisible(True)
         for error in self._errors:
@@ -6756,14 +6771,15 @@ class GeneratedNoteCard(NoteEntryCard):
                     and self._ignore_callback is not None):
                 submenu = menu.addMenu(title)
                 submenu.setObjectName("cardMenu")
-                submenu.menuAction().setToolTip(message)
+                error_action = submenu.menuAction()
                 action = submenu.addAction("Ignore Error")
                 action.setToolTip("Permanently ignore metadata errors for this folder")
                 action.triggered.connect(lambda checked=False, p=error["folder_path"]: self._ignore_callback(p))
             else:
-                action = menu.addAction(title)
-                action.setToolTip(message)
-                # Informational row only: no copy, select-all, or edit actions.
+                error_action = menu.addAction(title)
+            error_action.setToolTip(message)
+            error_action.setProperty("postingErrorMessage", message)
+            error_action.triggered.connect(lambda checked=False, text=message: QApplication.clipboard().setText(text))
         return menu
 
     def contextMenuEvent(self, event):
@@ -6830,6 +6846,20 @@ class GeneratedNoteSection(NoteSection):
             label.setStyleSheet("color: #ed9292; background: rgba(180, 45, 45, 22); padding: 5px;")
         self._body_lay.addWidget(label)
 
+    def add_location_warning(self, messages):
+        message = "\n\n".join(messages)
+        indicator = QToolButton()
+        indicator.setText("!")
+        indicator.setObjectName("postingLocationWarning")
+        indicator.setFixedSize(12, 18)
+        indicator.setCursor(Qt.CursorShape.PointingHandCursor)
+        indicator.setStyleSheet("color: #ed9292; background: transparent; border: none; padding: 0; font-weight: bold;")
+        indicator.setToolTip(message)
+        indicator.setAccessibleName("Location unavailable")
+        indicator.setAccessibleDescription(message)
+        indicator.clicked.connect(lambda: QApplication.clipboard().setText(message))
+        self.layout().itemAt(0).widget().layout().insertWidget(1, indicator)
+
     def add_generated_card(self, name, value, errors, ignore_callback):
         card = GeneratedNoteCard(name, value, errors, ignore_callback)
         index = len(self._cards)
@@ -6851,15 +6881,22 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
         data = _json_object(POSTING_INFO_FILE.read_text(encoding="utf-8"))
         if data.get("version") != 1 or not isinstance(data.get("modes"), dict):
             raise ValueError("Unsupported posting-info format")
-        for error in data.get("errors", []):
-            if error.get("code") == "location":
-                section.add_message(error["message"], error=True)
+        location_errors = [error for error in data.get("errors", []) if error.get("code") == "location"]
+        matched_errors = set()
         for mode, destinations in data["modes"].items():
             mode_section = GeneratedNoteSection(mode, depth=1)
             mode_section._expansion_key = ("posting", mode)
             for destination in ("Download", "Promote"):
                 destination_section = GeneratedNoteSection(destination, depth=2)
                 destination_section._expansion_key = ("posting", mode, destination)
+                warnings = []
+                for index, error in enumerate(location_errors):
+                    if ((error.get("mode"), error.get("destination")) == (mode, destination)
+                            or error["message"].startswith(f"{mode} / {destination}:")):
+                        warnings.append(error["message"])
+                        matched_errors.add(index)
+                if warnings:
+                    destination_section.add_location_warning(warnings)
                 for key, entry in destinations.get(destination, {}).items():
                     if query and query.casefold() not in json.dumps(
                             [mode, destination, key, entry], ensure_ascii=False).casefold():
@@ -6881,6 +6918,9 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
                         destination_section.add_generated_card(title, item["value"], errors, ignore_callback)
                 mode_section.add_child_section(destination_section)
             section.add_child_section(mode_section)
+        unmatched = [error["message"] for index, error in enumerate(location_errors) if index not in matched_errors]
+        if unmatched:
+            section.add_location_warning(unmatched)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         # Never rewrite a malformed generated file from the UI.
         section.add_message(f"Cannot read posting info: {exc}", error=True)
