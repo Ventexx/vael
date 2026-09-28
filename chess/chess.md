@@ -103,4 +103,6 @@ A completed connected game offers **Review this game** in the Live toolbar menu.
 
 The Chrome/Edge extension uses the root `browser-extension` folder. Zen/Firefox uses the generated `browser-extension/firefox` package. After editing shared companion sources, run `python browser-extension/build_firefox.py`; tests verify both packages stay in sync.
 
-Engine settings are available from the top-bar gear. The sidebar contains only Engine Lines and Notation, always expanded. Each recommended line reserves two text lines and clips longer continuations. The Windows window uses `icon.ico` and a dedicated taskbar app identity; other platforms use `icon.png`, also used by the HTML title bar.
+Engine settings are available from the top-bar gear. The sidebar contains only Engine Lines and Notation, always expanded. Each recommended line reserves two text lines and clips longer continuations. The Windows window uses `icon.ico` and a dedicated taskbar app identity; other platforms use `icon.png`, also used as the browser favicon. The in-app title bar stays text-only.
+
+Notation uses compact rows with a move-number column and aligned White/Black moves; alternatives remain expandable beneath the relevant move pair.

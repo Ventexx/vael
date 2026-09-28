@@ -191,18 +191,28 @@ function renderMovesList() {
     return;
   }
   const opened = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.branch));
-  const moveButton = node => `<button class="notation-move${node.id === boardState.selected_node ? ' active' : ''}" data-node="${node.id}">${node.number}${node.turn === 'w' ? '.' : '…'} ${node.san}</button>`;
+  const moveButton = node => `<button class="notation-move${node.id === boardState.selected_node ? ' active' : ''}" data-node="${node.id}" aria-label="${node.number}${node.turn === 'w' ? '.' : '…'} ${node.san}"${node.id === boardState.selected_node ? ' aria-current="step"' : ''}>${node.san}</button>`;
   function line(children) {
-    let html = '';
+    let html = '', row = null;
+    const flush = () => {
+      if (!row) return;
+      html += `<div class="notation-row"><span class="notation-number">${row.number}</span>${row.white || '<span class="notation-empty" aria-hidden="true">…</span>'}${row.black || '<span></span>'}</div>` + row.branches;
+      row = null;
+    };
     while (children?.length) {
       const main = children[0];
-      html += moveButton(main);
+      if (!row || row.number !== main.number || main.turn === 'w') {
+        flush();
+        row = {number: main.number, white: '', black: '', branches: ''};
+      }
+      row[main.turn === 'w' ? 'white' : 'black'] = moveButton(main);
       for (const branch of children.slice(1)) {
         const open = opened.has(branch.id) || boardState.selected_node === branch.id || boardState.selected_node.startsWith(branch.id + ' ');
-        html += `<details class="variation" data-branch="${branch.id}" ${open ? 'open' : ''}><summary>Alternative: ${branch.number}${branch.turn === 'w' ? '.' : '…'} ${branch.san}</summary><div>${line([branch])}</div></details>`;
+        row.branches += `<details class="variation" data-branch="${branch.id}" ${open ? 'open' : ''}><summary>Alternative: ${branch.number}${branch.turn === 'w' ? '.' : '…'} ${branch.san}</summary><div>${line([branch])}</div></details>`;
       }
       children = main.children;
     }
+    flush();
     return html;
   }
   box.innerHTML = line(boardState.notation);

@@ -473,7 +473,6 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #live-menu .small-btn:hover::after, #live-menu .small-btn:focus-visible::after { content: attr(data-tooltip); position: absolute; top: calc(100% + 8px); right: -8px; z-index: 1; padding: 6px 9px; white-space: nowrap; border-radius: 5px; background: var(--bg); color: var(--text); border: 1px solid var(--border2); font: 11px/1.4 system-ui; pointer-events: none; }
 #live-menu-feedback:empty { display: none; }
 #live-menu-feedback { display: block; margin-top: 7px; font-size: 11px; color: var(--accent); max-width: 250px; }
-.titlebar-logo { display:flex; align-items:center; gap:6px; }
 .tb-btn.subtle { border-color:transparent; background:transparent; color:var(--text-dim); }
 #btn-engine-settings { font-size:20px; }
 #right-panel .panel-section-head { cursor:default; padding:10px 14px; }
@@ -494,3 +493,19 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 #live-menu #live-disconnect:hover { background:#e0505028; }
 #live-menu { min-width:260px; }
 #live-menu #live-review-ready { margin-top:8px; padding:8px 0 0; }
+
+/* Compact notation: one move number and two aligned half-moves per row. */
+#right-panel .panel-section-head { min-height:30px; padding:4px 12px; gap:7px; }
+#right-panel .panel-section-head:hover { background:transparent; }
+#right-panel .panel-section-body { padding:4px 10px 8px; }
+#right-panel .panel-section-title { font-size:10px; }
+#right-panel .panel-section-tag { font-size:10px; padding:1px 5px; }
+#right-panel .lines-meta { font-size:10px; line-height:14px; padding:0 4px 3px; }
+#right-panel .moves-empty, #right-panel .lines-empty { padding:6px 2px; font-size:12px; }
+.notation-row { display:grid; grid-template-columns:28px minmax(0,1fr) minmax(0,1fr); align-items:center; min-height:25px; }
+.notation-number, .notation-empty { color:var(--text-dim); font-size:11px; font-variant-numeric:tabular-nums; }
+.notation-number { text-align:right; padding-right:9px; }
+#section-moves .notation-move { display:block; text-align:left; margin:0; padding:4px 7px; min-width:0; font-size:13px; line-height:17px; border-radius:3px; }
+.variation { margin:2px 0 4px 27px; padding-left:6px; }
+.variation summary { padding:3px 0; font-size:11px; }
+#section-moves .variation .notation-move { font-size:12px; }
