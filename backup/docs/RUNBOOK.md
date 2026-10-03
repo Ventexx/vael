@@ -135,12 +135,12 @@ its self-test.
 
 ---
 
-## A `.<archive>.<hex>.dellist.txt` file
+## A `vael-delete-*.txt` temporary file
 
-**What it is:** A short-lived scratch file listing paths to delete, used
-with 7-Zip's `-i@listfile`. Created right before a delete call and removed
-right after — seeing one at rest means a run was interrupted at that exact
-moment.
+**What it is:** A short-lived scratch file in the system temporary directory,
+listing paths to delete, used with 7-Zip's `-i@listfile`. Created right before a
+delete call and removed right after. Older versions put
+`.<archive>.<hex>.dellist.txt` beside the archive. Either may remain after a crash.
 
 **What to do:** Same as the `.new` file above. Confirm `--verify` passes,
 then delete it. It's a plain list of paths, one per line, UTF-8.
@@ -200,10 +200,54 @@ full absolute source path of every configured item (e.g.
 re-locate and re-sync each item on every update. Nothing is transmitted
 anywhere; it's only written locally.
 
-If you ever share `backup_history.txt`, the archive, or `backup.log`
+If you ever share `backup_history.txt`, an unencrypted archive, or `backup.log`
 somewhere semi-public (forum post, bug report, public repo), your folder
 structure — including your username, if it's in the path — goes with it in
 plain text. Redact paths first if you don't want that shared.
+
+Protected archives encrypt the manifest and member names. External history,
+pending history records, and logs are still plaintext. Keep them local and upload
+only the completed encrypted archive. See [Protect](ENCRYPTION.md).
+
+---
+
+## Encrypted archive: wrong password or failed verification
+
+Retry with the correct password in a terminal. No password reset exists. A wrong
+password and damaged encrypted data may produce the same archiver error; do not
+assume one solely from the message. Try a known-good copy and, if needed, ordinary
+7-Zip. Do not overwrite a damaged archive with a failed conversion or restore.
+
+`protect.py` must be beside `backup.py` for automatic encrypted updates. If it is
+missing or incompatible, restore the matching companion. Plain backup operations
+still work independently. Install both scripts from a trusted source.
+
+An encrypted update never deliberately removes protection. The encrypted working
+copy is checked before replacement. A `.new` file left by an interrupted
+protected create/update is not automatically promoted; verify it with the password
+before treating it as a recoverable backup.
+
+## Conversion or restore was interrupted
+
+Standalone conversion retains its input. Look for `vael-protect-*` directories in
+the system temp folder or your selected `--work-dir`, and `.restore-*` beside the
+restore destination. These may contain **decrypted files**. Confirm no process is
+using them, preserve anything needed for recovery, then remove leftover scratch.
+New manifest scratch uses `vael-manifest-*` in system temp. Older `.manifest_scratch`
+folders may remain beside the app from earlier versions.
+
+A failed final restore placement can leave partial files in the requested new
+directory; the error says so. Choose another new directory for retrying rather
+than merging into that partial result. Original archives are never deleted by
+Protect. Cleanup is not secure erasure and cannot remove cloud version history.
+
+## Password changed / archive converted, but history says unknown
+
+Conversion rebuilds the archive, changing its checksum while retaining its backup
+manifest. The old checksum no longer matches. Use Protect to verify integrity and
+protection; then a successful normal backup update records a new version in the
+chosen backup history. Keep using the original history location if you want the
+full run history. Old password-protected copies still use the old password.
 
 ---
 

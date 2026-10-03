@@ -71,6 +71,7 @@ import contextlib
 import dataclasses
 import datetime as _dt
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -113,6 +114,21 @@ COMPRESSION_LEVEL = 7  # 0-9, see Section 20
 HISTORY_FILENAME = "backup_history.txt"
 MANIFEST_FILENAME = "manifest.json"
 SEVEN_ZIP_PATH: Optional[str] = None  # None = auto-detect on PATH
+COMPANION_API_VERSION = 1
+
+
+def load_protection():
+    """Load only the installed sibling, never a module found on the search path."""
+    path = Path(__file__).resolve().with_name("protect.py")
+    if not path.is_file():
+        raise BackupError("This operation needs protect.py beside backup.py. Plain backups still work without it.")
+    spec = importlib.util.spec_from_file_location("_vael_protection_companion", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    if getattr(module, "COMPANION_API_VERSION", None) != COMPANION_API_VERSION:
+        raise BackupError("Incompatible protect.py; update both scripts together.")
+    return module
 
 TIMESTAMP_TOLERANCE_NS = 2_000_000_000  # Section 19.1
 
@@ -183,6 +199,8 @@ def setup_logging(app_dir: Path, level: str = "INFO", log_file: Optional[Path] =
     target = log_file or (app_dir / LOG_FILENAME)
 
     logger.setLevel(resolved_level)
+    for handler in logger.handlers:
+        handler.close()
     logger.handlers.clear()
     logger.propagate = False
 
@@ -413,11 +431,12 @@ class SevenZipRunner:
     argument lists to subprocess (Section 21).
     """
 
-    def __init__(self, exe: Optional[str] = None):
+    def __init__(self, exe: Optional[str] = None, protection=None):
         """`exe` overrides auto-detection (used by the CLI's --sevenzip
         flag). Raises DependencyError immediately if no working 7-Zip
         binary can be found — callers don't need to check separately."""
-        self.exe = exe or self._detect()
+        self.exe = exe or (protection.exe if protection is not None else self._detect())
+        self.protection = protection
 
     @staticmethod
     def _detect() -> str:
@@ -435,17 +454,21 @@ class SevenZipRunner:
             "and SEVEN_ZIP_PATH). Install 7-Zip or set SEVEN_ZIP_PATH."
         )
 
-    def _run(self, args: list[str]) -> SevenZipResult:
+    def _run(self, args: list[str], cwd=None) -> SevenZipResult:
         """Run `self.exe` with `args` as a subprocess argument list (never
         shell-interpolated) and capture stdout/stderr as text."""
-        logger.debug("7z %s", " ".join(args))
-        proc = subprocess.run(
-            [self.exe, *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        logger.debug("7z operation: %s", args[0] if args else "version")
+        if self.protection is not None:
+            try:
+                proc = self.protection.run(args, cwd=cwd)
+            except Exception as exc:
+                raise BackupError("Encrypted archive operation failed; the archive was not published.") from exc
+        else:
+            proc = subprocess.run(
+                [self.exe, *args, "-sccUTF-8", "-bsp0"], cwd=cwd,
+                input="", capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
         if proc.returncode != 0:
             logger.debug("7z exit=%s stderr=%s", proc.returncode, proc.stderr.strip()[:2000])
         return SevenZipResult(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
@@ -506,32 +529,16 @@ class SevenZipRunner:
         to correctly implement the non-mutating `!newArchiveName` form,
         this method can be restored to use it and avoid the copy.
         """
-        args = ["u", str(working_archive), source_basename, f"-mx={compression_level}", "-sse"]
+        args = ["u", str(working_archive), "./" + source_basename, "-t7z", "-spd", f"-mx={compression_level}", "-sse"]
         # -sse: stop archive creation if unable to open an input file, rather
         # than silently continuing and returning exit code 1 (Section 21.2).
         args.extend(SEVENZIP_UPDATE_SWITCHES)
-        proc = subprocess.run(
-            [self.exe, *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return SevenZipResult(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        return self._run(args, cwd=str(cwd))
 
     def add_files(self, archive: Path, files: list[Path], cwd: Path, compression_level: int) -> SevenZipResult:
         """Add specific files (used for manifest.json at archive root)."""
         args = ["a", str(archive), *[str(f) for f in files], f"-mx={compression_level}"]
-        proc = subprocess.run(
-            [self.exe, *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        return SevenZipResult(args=args, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        return self._run(args, cwd=str(cwd))
 
     def rename(self, archive: Path, old_path: str, new_path: str) -> SevenZipResult:
         """`7z rn <archive> old new` — Section 37.2 Technique B."""
@@ -552,10 +559,12 @@ class SevenZipRunner:
         """
         if not logical_paths:
             return SevenZipResult(args=[], returncode=0, stdout="", stderr="")
-        listfile = archive.parent / f".{archive.name}.{uuid.uuid4().hex[:8]}.dellist.txt"
+        handle, filename = tempfile.mkstemp(prefix="vael-delete-", suffix=".txt")
+        os.close(handle)
+        listfile = Path(filename)
         try:
             listfile.write_text("\n".join(logical_paths), encoding="utf-8")
-            return self._run(["d", str(archive), f"-i@{listfile}"])
+            return self._run(["d", str(archive), "-spd", "-scsUTF-8", f"-i@{listfile}"])
         finally:
             with contextlib.suppress(OSError):
                 listfile.unlink()
@@ -1243,6 +1252,12 @@ class ArchiveTransactionManager:
 
         archive_entries = parse_archive_listing(listing.stdout)
 
+        if self.runner.protection is not None:
+            try:
+                load_protection().assert_protected(self.runner.protection, new_archive)
+            except Exception:
+                problems.append("Encryption validation failed: every file and the archive headers must remain protected.")
+
         managed = {k: v for k, v in expected_source_inventory.items()}
         archive_managed = {k: v for k, v in archive_entries.items() if k != MANIFEST_FILENAME}
 
@@ -1352,11 +1367,11 @@ class ArchiveManager:
     def write_manifest(self, archive: Path, manifest: Manifest, scratch_dir: Path) -> SevenZipResult:
         """Write `manifest.json` into `archive`'s root, via a scratch
         copy on disk (7-Zip adds files by path, not from an in-memory
-        string) — each invocation gets a private directory beneath
-        `scratch_dir`, then adds its manifest at compression level 1
+        string) — each invocation gets a private system-temp directory,
+        then adds its manifest at compression level 1
         (metadata; not worth compressing harder)."""
-        scratch_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="manifest-", dir=scratch_dir) as private:
+        # Private local temp avoids source-path metadata in a cloud destination.
+        with tempfile.TemporaryDirectory(prefix="vael-manifest-") as private:
             work_dir = Path(private)
             (work_dir / MANIFEST_FILENAME).write_text(manifest.to_json(), encoding="utf-8")
             return self.runner.add_files(archive, [Path(MANIFEST_FILENAME)], cwd=work_dir, compression_level=1)
@@ -1401,6 +1416,7 @@ class _CrossPlatformLock:
         immediately if blocking=False and it's already held. Uses
         msvcrt.locking on Windows, fcntl.flock elsewhere."""
         self._fh = open(self.lock_path, "a+")
+        self._fh.seek(0)
         try:
             if platform.system() == "Windows":
                 import msvcrt
@@ -1977,6 +1993,8 @@ class BackupManager:
         app_dir: Path,
         compression_level: int = COMPRESSION_LEVEL,
         history_dir: Optional[Path] = None,
+        protection=None,
+        output: Optional[Path] = None,
     ):
         """`history_dir` (Roadmap 2.4) lets the audit log live somewhere
         other than beside app.py/the archive — the spec's documented
@@ -1986,7 +2004,8 @@ class BackupManager:
         app_dir, matching every prior version's behavior."""
         self.app_dir = app_dir.resolve()
         self.compression_level = compression_level
-        self.runner = SevenZipRunner()
+        self.runner = SevenZipRunner(protection=protection)
+        self.output = output.resolve() if output else None
         self.inventory_mgr = SourceInventoryManager()
         self.manifest_mgr = ManifestManager()
         self.archive_mgr = ArchiveManager(self.runner)
@@ -2005,6 +2024,13 @@ class BackupManager:
         if missing:
             details = "\n".join(f"  {i.name} -> {i.path}" for i in missing)
             raise BackupError(f"Required source(s) unavailable:\n{details}\nNo archive modifications were performed.")
+
+    @staticmethod
+    def _validate_destination(archive: Path, items: list[BackupItem]) -> None:
+        for item in items:
+            root = item.path.resolve()
+            if archive == root or root in archive.parents:
+                raise BackupError("The backup destination must be outside every source folder; otherwise the backup would include itself.")
 
     def _write_history(self, entry_text: str, meta: dict) -> bool:
         """Thin wrapper around HistoryManager.record() — kept as its own
@@ -2095,7 +2121,11 @@ class BackupManager:
         case, nothing is left behind except the log/history entry
         recording what happened.
         """
-        archive = (self.app_dir / ARCHIVE_NAME).resolve()
+        archive = self.output or (self.app_dir / ARCHIVE_NAME).resolve()
+        try:
+            self._validate_destination(archive, items)
+        except BackupError as exc:
+            return ProcessResult(False, 1, str(exc))
         return self._with_archive_lock(archive, "NEW", lambda: self._new_backup_locked(items, archive))
 
     def _new_backup_locked(self, items: list[BackupItem], archive: Path) -> ProcessResult:
@@ -2114,6 +2144,7 @@ class BackupManager:
             logger.warning(w)
         logger.info("run #%s: starting NEW backup -> %s (%d source item(s))", run_id, archive, len(items))
 
+        txn_archive = None
         try:
             validate_configuration(items)
             if archive.exists():
@@ -2143,7 +2174,7 @@ class BackupManager:
 
             manifest = self.manifest_mgr.create(items)
             manifest_result = self.archive_mgr.write_manifest(txn_archive, manifest, self.app_dir / ".manifest_scratch")
-            if manifest_result.fatal:
+            if not manifest_result.ok:
                 self.txn_mgr.cleanup(txn_archive)
                 raise BackupError("Failed to write manifest.json into the new archive.")
 
@@ -2167,6 +2198,10 @@ class BackupManager:
 
         except (BackupError, OSError) as exc:
             return self._record_failure(run_id, "NEW", archive, start, exc)
+        finally:
+            if txn_archive is not None:
+                with contextlib.suppress(OSError):
+                    txn_archive.unlink()
 
     # -- Dry run -------------------------------------------------------
 
@@ -2234,6 +2269,10 @@ class BackupManager:
         path leaves the existing archive untouched.
         """
         resolved = archive.resolve() if archive.exists() else archive.absolute()
+        try:
+            self._validate_destination(resolved, items)
+        except BackupError as exc:
+            return ProcessResult(False, 1, str(exc))
         return self._with_archive_lock(
             resolved, "UPDATE",
             lambda: self._update_backup_locked(resolved, items, accept_config_changes, interactive_confirm),
@@ -2257,6 +2296,7 @@ class BackupManager:
         run_id = self.history.next_run_id()
         logger.info("run #%s: starting UPDATE -> %s (%d source item(s))", run_id, archive, len(items))
 
+        txn_archive = None
         try:
             validate_configuration(items)
             if not archive.exists():
@@ -2360,7 +2400,7 @@ class BackupManager:
 
             manifest = self.manifest_mgr.update(previous_manifest, items)
             manifest_result = self.archive_mgr.write_manifest(txn_archive, manifest, self.app_dir / ".manifest_scratch")
-            if manifest_result.fatal:
+            if not manifest_result.ok:
                 self.txn_mgr.cleanup(txn_archive)
                 raise BackupError("Failed to update manifest.json in the new archive.")
 
@@ -2383,6 +2423,10 @@ class BackupManager:
 
         except (BackupError, OSError) as exc:
             return self._record_failure(run_id, "UPDATE", archive, start, exc)
+        finally:
+            if txn_archive is not None:
+                with contextlib.suppress(OSError):
+                    txn_archive.unlink()
 
     @staticmethod
     def _dir_size(path: Path) -> int:
@@ -2510,13 +2554,12 @@ def _prompt_archive_path(prompt: str) -> Optional[Path]:
     return Path(raw)
 
 
-def _interactive_menu(app_dir: Path) -> int:
+def _interactive_menu(app_dir: Path, options=None) -> int:
     """No-arguments entry point: prints the menu, reads one choice, and
     dispatches to new/update/verify. Ctrl+C/Ctrl+D during any prompt
     here (including the nested config-change confirm callback) is
     caught at main()'s top level, not here — see main()'s
     KeyboardInterrupt/EOFError handling."""
-    setup_logging(app_dir)
     print("Backup Utility\n")
     print("What would you like to do?\n")
     print("[1] Create new backup")
@@ -2525,45 +2568,28 @@ def _interactive_menu(app_dir: Path) -> int:
     print("[Q] Quit")
     choice = input("> ").strip().lower()
 
-    manager = BackupManager(app_dir)
-
+    options = options or []
     if choice == "1":
-        result = manager.new_backup(BACKUP_ITEMS)
-        print(result.message)
-        return result.exit_code
+        return main(["--new", *options], interactive=True)
     elif choice == "2":
         archive = _prompt_archive_path("Path to backup archive:\n> ")
         if archive is None:
             return 1
 
-        def confirm(plan):
-            print("The following configuration changes were detected:")
-            print(format_config_change_plan(plan))
-            return input("Continue? [y/N] ").strip().lower() == "y"
-
-        result = manager.update_backup(archive, BACKUP_ITEMS, accept_config_changes=False, interactive_confirm=confirm)
-        print(result.message)
-        return result.exit_code
+        return main(["--update", str(archive), *options], interactive=True)
     elif choice == "3":
         archive = _prompt_archive_path("Path to backup archive:\n> ")
         if archive is None:
             return 1
-        runner = SevenZipRunner()
-        verifier = VerificationManager(runner, ManifestManager())
-        history_dir = app_dir
-        if not (app_dir / HISTORY_FILENAME).exists():
+        if "--history" not in options and not (app_dir / HISTORY_FILENAME).exists():
             print(f"\n{HISTORY_FILENAME} could not be found beside app.py.")
             print("Historical checksum comparison is unavailable.")
             alt = input(
                 "Path to backup_history.txt (leave blank to continue without history):\n> "
             ).strip().strip('"')
             if alt:
-                alt_path = Path(alt)
-                history_dir = alt_path.parent if alt_path.name == HISTORY_FILENAME else alt_path
-        history = HistoryManager(history_dir)
-        result = verifier.verify(archive, history)
-        _print_verification(result)
-        return 0 if result.ok else 4
+                options += ["--history", alt]
+        return main(["--verify", str(archive), *options], interactive=True)
     else:
         print("Goodbye.")
         return 0
@@ -2586,6 +2612,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Print the configuration-change plan / source-availability check without "
                               "modifying the archive (--update only).")
     parser.add_argument("--sevenzip", metavar="PATH", help="Path to the 7-Zip executable.")
+    protection = parser.add_mutually_exclusive_group()
+    protection.add_argument("--encrypt", action="store_true", help="Protect a NEW backup; prompt privately for a password (requires protect.py).")
+    protection.add_argument("--plain", action="store_true", help="Create a NEW unencrypted backup without asking.")
+    parser.add_argument("--output", type=Path, help="Destination for --new (default: Backup.7z beside this script).")
     parser.add_argument("--history", metavar="PATH", help="Path to backup_history.txt (defaults beside app.py).")
     parser.add_argument("--compression", type=int, metavar="LEVEL", default=COMPRESSION_LEVEL,
                          help="Compression level 0-9 (default: %(default)s).")
@@ -2602,7 +2632,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: Optional[list[str]] = None, interactive=False) -> int:
     """CLI entry point. Dispatches to --check, --new, --update, --verify,
     or (no mode flag given) the interactive menu, and maps every outcome
     to the exit-code contract documented in EXIT_CODES.md. `argv=None`
@@ -2622,30 +2652,57 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(result.message)
         return result.exit_code
 
-    try:
-        validate_configuration(BACKUP_ITEMS)
-    except ConfigError as exc:
-        print(f"CONFIGURATION ERROR: {exc}", file=sys.stderr)
+    if ((args.encrypt or args.plain or args.output) and not args.new
+            or args.dry_run and not args.update
+            or args.accept_config_changes and not args.update
+            or not 0 <= args.compression <= 9):
+        print("Invalid options: --encrypt/--plain/--output require --new; --dry-run/--accept-config-changes require --update; compression must be 0–9.", file=sys.stderr)
         return 2
 
     history_dir = _resolve_history_dir(args.history, app_dir)
 
+    session = None
     try:
+        companion = None
+        if args.new and not args.plain:
+            encrypt = args.encrypt
+            if not encrypt and (interactive or sys.stdin.isatty()) and app_dir.joinpath("protect.py").is_file():
+                encrypt = input("Protect the new backup with a password? [y/N] ").strip().lower() == "y"
+            if encrypt:
+                companion = load_protection()
+                session = companion.PasswordSession(SevenZipRunner().exe, companion.prompt_password(confirm=True))
+        if args.update or args.verify:
+            archive = Path(args.update or args.verify).resolve()
+            if not archive.is_file():
+                raise BackupError(f"Archive does not exist: {archive}")
+            runner = SevenZipRunner()
+            listing = runner.list_technical(archive)
+            if not listing.ok or "Encrypted = +" in listing.stdout:
+                if not app_dir.joinpath("protect.py").is_file():
+                    raise BackupError("Archive is encrypted or unreadable. Install protect.py beside backup.py to unlock encrypted archives.")
+                companion = load_protection()
+                session = companion.open_session(runner.exe, archive)
         if args.new:
-            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir)
+            print("Creating encrypted backup..." if session else "Creating backup...")
+            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir, protection=session, output=args.output)
             result = manager.new_backup(BACKUP_ITEMS)
             print(result.message)
             return result.exit_code
 
         if args.update:
-            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir)
+            if not args.dry_run:
+                print("Updating encrypted backup..." if session else "Updating backup...")
+            manager = BackupManager(app_dir, compression_level=args.compression, history_dir=history_dir, protection=session)
             if args.dry_run:
                 result = manager.dry_run_update(Path(args.update), BACKUP_ITEMS)
                 print(result.message)
                 return result.exit_code
-            result = manager.update_backup(
-                Path(args.update), BACKUP_ITEMS, accept_config_changes=args.accept_config_changes
-            )
+            def confirm(plan):
+                print(format_config_change_plan(plan))
+                return input("Apply these configuration changes? [y/N] ").strip().lower() == "y"
+            result = manager.update_backup(Path(args.update), BACKUP_ITEMS,
+                accept_config_changes=args.accept_config_changes,
+                interactive_confirm=confirm if interactive else None)
             print(result.message)
             return result.exit_code
 
@@ -2654,7 +2711,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
         if args.verify:
-            runner = SevenZipRunner()
+            print("Verifying backup...")
+            runner = SevenZipRunner(protection=session)
             verifier = VerificationManager(runner, ManifestManager())
             history = HistoryManager(history_dir)
             result = verifier.verify(Path(args.verify), history)
@@ -2662,7 +2720,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0 if result.ok else 4
 
         # No command given -> interactive mode (Section 29).
-        return _interactive_menu(app_dir)
+        options = ["--compression", str(args.compression), "--log-level", args.log_level]
+        for option in ("history", "sevenzip", "log_file"):
+            if getattr(args, option):
+                options += ["--" + option.replace("_", "-"), str(getattr(args, option))]
+        return _interactive_menu(app_dir, options)
 
     except DependencyError as exc:
         print(f"DEPENDENCY ERROR: {exc}", file=sys.stderr)
@@ -2670,6 +2732,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ConfigError as exc:
         print(f"CONFIGURATION ERROR: {exc}", file=sys.stderr)
         return 2
+    except (BackupError, OSError) as exc:
+        print(f"Operation failed: {exc}", file=sys.stderr)
+        return 4 if args.verify else 1
     except KeyboardInterrupt:
         # Covers every input() call reachable from here: the menu choice,
         # both archive-path prompts, and the config-change confirm
@@ -2683,6 +2748,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         # unexpectedly) — same treatment as Ctrl+C, not a traceback.
         print("\nInput ended unexpectedly. Cancelled.")
         return 1
+    except Exception as exc:
+        if companion is not None and isinstance(exc, companion.ProtectionError):
+            print(f"Protection failed: {exc}", file=sys.stderr)
+            return 4 if args.verify else 1
+        raise
+    finally:
+        if session is not None:
+            session.close()
 
 
 if __name__ == "__main__":

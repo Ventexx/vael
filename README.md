@@ -17,6 +17,12 @@ These apps are primarily built for myself to solve specific workflow challenges.
 
 A local backup tool for keeping selected folders together in a compressed archive. Create or update backups, check their integrity, and keep a readable history of each run.
 
+Optional password protection is available through its standalone companion, Protect. Together they create and update encrypted backups without a manual decrypt/re-encrypt step.
+
+### [protect ›](./backup/docs/ENCRYPTION.md)
+
+A standalone tool for encrypting files and 7z archives, restoring files, checking protection, and creating copies with a new password. It works independently or connects to Backup when both scripts share a folder. Protected archives can also be recovered with ordinary 7-Zip and the password.
+
 ### [checklist ›](./checklist/README.md)
 ![checklist cover](./checklist/cover.png)
 A minimal browser-based to-do app for tasks, notes, and reusable lists. Organize work into sections, switch between saved profiles, and pick up unfinished drafts in a clean, distraction-free interface.

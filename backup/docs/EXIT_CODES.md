@@ -6,10 +6,10 @@ Anything else is an unexpected crash, not a designed outcome.
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Success. | Nothing. |
-| 1 | `BackupError` — missing source, 7-Zip error, post-sync validation failed, insufficient disk space, config change not confirmed, interrupted mid-transaction, or another backup process already running against this archive. Archive was not modified. | Investigate. Do not treat this as success. |
+| 1 | Backup/protection failure — missing source, 7-Zip error, wrong password, unavailable hidden password input, missing/incompatible companion, failed validation, insufficient disk space, unconfirmed configuration change, interruption, or busy archive. Previous archive was not replaced. | Investigate. Do not treat this as success. |
 | 2 | `ConfigError` — invalid configuration (empty `BACKUP_ITEMS`, name collisions, relative or overlapping paths, `--dry-run` used without `--update`). | Fix the config. Retrying without fixing it will fail the same way. |
 | 3 | `DependencyError` — 7-Zip not found on `PATH` or at `--sevenzip`. | Check the 7-Zip install / `PATH` / `--sevenzip` argument. |
-| 4 | Verification failed or incomplete (`--verify` only): integrity or manifest failure, busy archive, read failure, or change during verification. | Read the reason; retry busy/incomplete checks after the writer finishes. |
+| 4 | Verification failed or incomplete (`--verify` only): integrity or manifest failure, wrong/unavailable password, busy archive, read failure, or change during verification. | Read the reason; retry busy/incomplete checks after the writer finishes. |
 | 5 | Partial success — archive created/updated and published, but the entry could not be written to `backup_history.txt`. | Not a hard failure. See "Exit code 5" below. |
 | 6 | Archive published, but neither history nor its pending recovery record could be saved. | Preserve the printed archive path, version, checksum, and operational log. Repair history storage; automatic recovery is not assured. |
 
@@ -27,6 +27,10 @@ reading. A busy verification exits with code 4; a backup blocked by verification
 exits with code 1. Unrelated archives can run concurrently. Shared history run IDs
 are reserved under the history lock before work starts; interrupted runs may leave
 gaps. Keep `.backup_history.txt.sequence` with the history directory.
+
+Protect's conversions, restores, and verification use the same archive lock.
+Password detection may read the header before acquiring the backup operation's
+lock; a busy or externally changing archive can fail that preliminary check.
 
 ## `--check`
 
@@ -76,3 +80,16 @@ writable. Save the console output separately and repair storage before retrying.
   trail. Source of truth for `--verify`.
 - **`backup.log`** — timestamped operational log for debugging. `--log-level`
   controls verbosity, `--log-file` sets its location.
+
+## Protect companion
+
+Standalone `protect.py` actions return 0 on success, 1 for operation, password,
+dependency, or cancellation errors, and 2 for invalid command syntax. No input is
+deleted or overwritten. A failed final restore placement can leave partial output
+files; read the message before retrying. `--new-backup` and `--update-backup` return
+the backup codes above, including published-with-history-problem codes 5 and 6.
+
+Passwords are not accepted on the command line or from environment variables.
+Encrypted operations require a terminal for hidden password entry and fail when
+it is unavailable. An unattended plain `backup.py --new` remains unencrypted;
+`--encrypt` must be explicit for that intended mode (and still needs a terminal).

@@ -7,6 +7,8 @@
 
 A local backup tool for keeping selected folders together in a compressed archive. Create a backup, update it as your files change, and check that the archive can still be read.
 
+Optional password protection is provided by the separate [Protect tool](docs/ENCRYPTION.md), included as `protect.py` beside the backup script. Both tools work independently; together they create, update, verify, and restore standard encrypted `.7z` backups.
+
 ---
 
 ## features
@@ -20,6 +22,8 @@ A local backup tool for keeping selected folders together in a compressed archiv
 - keep a readable history of runs, versions, and file checksums
 - recover history entries that could not be saved immediately
 - prevent simultaneous operations from interfering with the same archive
+- optionally create encrypted backups with protected file names, using the companion
+- update encrypted backups after entering the password once; no manual decryption step
 
 ---
 
@@ -30,7 +34,7 @@ A local backup tool for keeping selected folders together in a compressed archiv
 1. Download Vael using **Code → Download ZIP** on GitHub, then extract it.
 2. Install [Python](https://www.python.org/downloads/) and a [7-Zip](https://www.7-zip.org/) command-line tool.
 3. Open `backup.py` in a text editor. In the clearly marked configuration section, replace the example source folders in `BACKUP_ITEMS` with your own. This app currently requires that one-time text-file setup.
-4. Open a terminal in the `backup` folder: on Windows, open the folder in File Explorer, type `powershell` in its address bar, and press Enter.
+4. Keep `protect.py` beside `backup.py` if you want optional encryption. Open a terminal in the `backup` folder: on Windows, open the folder in File Explorer, type `powershell` in its address bar, and press Enter.
 5. Run `python backup.py --check` to check the setup, then `python backup.py` to open the text menu. There is no separate graphical window.
 
 If the archiver is not found, use `python backup.py --sevenzip "C:\path\to\7z.exe"` with its actual location. On systems where Python is called `python3`, use that name instead.
@@ -60,21 +64,30 @@ Replace the example folders; do not leave entries for drives you do not have. Ea
 
 The nearby `ARCHIVE_NAME` setting controls the new archive's name; the default is `Backup.7z` beside the app. `COMPRESSION_LEVEL` sets the default compression level, from 0 to 9; the default is 7. These settings remain in the file between runs.
 
+Keep the archive destination outside all selected source folders. A backup cannot include itself; creation/update refuses such a destination.
+
 ### menu or direct commands
 
 Run `python backup.py` for the text menu: **1** creates a backup, **2** updates one, **3** verifies one, and **Q** quits. For update and verify, paste the full archive path when asked. The menu uses the configured defaults. Use an explicit command below when supplying options such as compression or a different history folder.
+
+When creating a backup from a terminal, the app offers password protection if the compatible companion is present. It asks **before** creation so an encrypted backup never needs an unencrypted archive published first. Choose No to keep the original plain-backup workflow. Updating, previewing, or verifying an encrypted archive automatically asks for its password. Save the password elsewhere: there is no reset or recovery key.
 
 | Command | What it does |
 | --- | --- |
 | `python backup.py --help` | Lists all commands and options. |
 | `python backup.py --check` | Checks the archiver, folder access, locking, and available space; does not create a backup. |
 | `python backup.py --new` | Creates a new backup from the configured sources. Refuses to overwrite an existing archive at the destination. |
+| `python backup.py --new --encrypt` | Creates a password-protected backup, including encrypted file names. Requires `protect.py` and a terminal for hidden password entry. |
+| `python backup.py --new --plain` | Creates an unencrypted backup without offering encryption; suitable for existing unattended jobs. |
+| `python backup.py --new --encrypt --output "D:\Backups\Private.7z"` | Creates a protected backup at a chosen destination. The containing folder must exist. |
 | `python backup.py --update "D:\Backups\Backup.7z"` | Updates the selected archive from the currently configured sources. |
 | `python backup.py --verify "D:\Backups\Backup.7z"` | Checks archive integrity, its internal record of sources/version, and its checksum against available history. |
 
 Choose one command at a time. For a fresh backup when the default archive already exists, move or rename the previous archive first, or change `ARCHIVE_NAME`.
 
 **Updating mirrors your configured sources:** it adds and updates files, and removes archived files that have disappeared from those sources. It does not retain a separate older version automatically. An unavailable source stops the update.
+
+This behavior is the same for encrypted backups. Updates work on an encrypted temporary archive and verify that the replacement's file contents and names are still protected before publication. Wrong passwords, cancelled runs, and failed checks do not replace the existing backup. Normal creation/update does not extract the full backup into a decrypted working folder; small source-path metadata and deletion lists use the system temporary directory.
 
 ### preview and approve configuration changes
 
@@ -113,7 +126,7 @@ python backup.py --new --compression 5 --history "D:\Backup History"
 python backup.py --verify "D:\Backups\Backup.7z" --history "D:\Backup History"
 ```
 
-Keep using the same history location when you move an archive. Verification can check an archive without matching history, but cannot identify it as a known latest version. These options do not select a new archive destination: `--new` uses `ARCHIVE_NAME`, and `--update` uses the archive path you provide.
+Keep using the same history location when you move an archive. Verification can check an archive without matching history, but cannot identify it as a known latest version. `--new` uses `ARCHIVE_NAME` unless `--output` is provided; `--update` uses the archive path you provide. `--output`, `--encrypt`, and `--plain` are for `--new` only. In a noninteractive run, `--new` retains its plain-backup behavior; protected operations require interactive password entry and fail rather than waiting for input or silently using an empty password.
 
 ### understand the result
 
@@ -129,7 +142,13 @@ The printed message explains the outcome. For scheduled commands, the exit code 
 | 5 | Backup was saved; its history is waiting in a recovery record. |
 | 6 | Backup was saved, but neither its history nor the recovery record could be saved. Preserve the printed details. |
 
-Backup and verification cannot run against the same archive at the same time; retry a busy operation after the other finishes. Interrupted runs can leave temporary files. See the [recovery runbook](docs/RUNBOOK.md) for recovery and the [exit-code guide](docs/EXIT_CODES.md) for details. To restore files, open the archive in your archiver and extract them to your chosen folder; this app has no separate restore command.
+Backup, verification, and companion operations share archive locks; retry a busy operation after the other finishes. Interrupted runs can leave temporary files. See the [recovery runbook](docs/RUNBOOK.md) and [exit-code guide](docs/EXIT_CODES.md). To restore files, open the archive with 7-Zip, enter its password if protected, and extract it. You can also use `python protect.py --restore "D:\Backups\Private.7z" --output "D:\Restored"` with a new destination folder. The backup script itself has no restore command.
+
+### standalone encryption and recovery
+
+Run `python protect.py` for its own menu. It can protect an existing `.7z` archive, wrap another file in an encrypted `.7z`, restore files, export an unencrypted archive, change a password by creating a new copy, and verify protection. It also offers create/update backup actions when `backup.py` is beside it.
+
+Conversion retains the input and refuses existing output paths. Converting an existing archive or changing its password temporarily extracts its contents in the system temp folder (or a private folder selected with `--work-dir`). Use a private local work folder on an encrypted disk, outside cloud sync. See the [Protect guide](docs/ENCRYPTION.md) for commands, recovery, privacy, disk-space needs, and compatibility limits.
 
 ---
 
@@ -145,6 +164,8 @@ By default, the following are stored beside `backup.py`:
 
 The source-folder configuration is in `backup.py`. Each archive contains a `manifest.json` describing its sources and version. Source paths are recorded in the archive and history.
 
+In protected archives, the manifest and member names are encrypted too. **The external history, pending history records, and diagnostic logs remain unencrypted** and can include source paths. Keep the scripts, history, logs, and temporary work folder local; upload only the finished encrypted archive. The outer archive name, size, and timestamps remain visible. Encryption does not erase earlier plaintext uploads or preserve deleted files as older versions.
+
 Updates modify the archive you select. Archive lock and temporary files sit beside that archive; history can be placed elsewhere with `--history`. Nothing is uploaded by this tool. See the [recovery runbook](docs/RUNBOOK.md) and [exit-code guide](docs/EXIT_CODES.md) if an operation reports a problem.
 
 ---
@@ -153,8 +174,14 @@ Updates modify the archive you select. Archive lock and temporary files sit besi
 
 ```text
 backup.py          — the app and your source-folder configuration
+protect.py         — optional standalone encryption/recovery tool
 pyproject.toml     — Python project information
 README.md          — this guide
 docs/              — recovery instructions and command outcomes
+tests/             — integration tests using disposable files and real 7-Zip
 icon.png / .ico    — app icons
 ```
+
+## development checks
+
+From the repository root, run `python -m unittest discover -s backup/tests -v` with a working 7-Zip executable on `PATH`. `VAEL_TEST_7ZIP` can select a different executable. The suite exercises encrypted and plain backups, updates/deletions, configuration changes, both companion directions, standard-tool recovery, conversion, password changes, wrong passwords, cancellation, corruption, locks, and no-overwrite behavior. No real backup data is used. Integration tests are skipped when no archiver is available; a skipped run is not encryption validation.

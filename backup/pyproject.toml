@@ -1,7 +1,7 @@
 [project]
 name = "backup-utility"
-version = "1.0.0"
-description = "Single-file 7-Zip-based backup utility"
+version = "1.1.0"
+description = "7-Zip backup utility with an optional standalone encryption companion"
 requires-python = ">=3.9"
 dependencies = []
 
@@ -11,3 +11,4 @@ dependencies = []
 # 7-Zip version
 # Verified: 7-Zip 23.01 on Linux, and NanaZip 6.5 on Windows 11
 # (NanaZip is a Windows Store app wrapping the 7-Zip core)
+# Encryption companion integration: NanaZip 7.0 (2609.2), Windows 11, Python 3.14.
