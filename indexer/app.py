@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 import threading
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from script_messages import read_messages, show_messages
+from folder_metadata import resolve_folder_metadata
 
 # ruff: noqa
 # Uncomment next 2 lines to force XWayland if Wayland causes issues:
@@ -567,11 +569,9 @@ def _check_index_cancel(cancel_cb) -> None:
 def _refresh_folder_metadata(conn: sqlite3.Connection, folder: Path, cancel_cb=None) -> None:
     seen = set()
     for directory, files in _walk_library(folder, cancel_cb):
-        expected = f"!f-{directory.name}.json".casefold()
-        name = next((name for name in files if name.casefold() == expected), None)
-        if name is None:
+        meta_file = resolve_folder_metadata(directory, files)
+        if meta_file.name not in files:
             continue
-        meta_file = directory / name
         try:
             data = _read_metadata(meta_file)
             value = str(next(iter(data.values()))) if data else ""
@@ -2223,12 +2223,23 @@ class ThumbnailCard(QWidget):
             k: v for k, v in data.items() if k.lower() not in _EXCLUDED_COPY_KEYS
         }
 
-        # "Copy Name" copies the asset's filename without its extension. Both
-        # the .png and its sibling .json share this same stem, so either works.
-        name_stem = Path(self.asset.get("image_path", "")).stem
+        # Numeric suffixes identify alternate versions, not character names.
+        name_stem = re.sub(r"_\d+$", "", Path(self.asset.get("image_path", "")).stem)
         if name_stem:
-            copy_name_act = menu.addAction("Copy Name")
+            name_menu = menu.addMenu("Copy Name")
+            copy_name_act = name_menu.addAction("Copy Name")
             copy_name_act.setData(name_stem)
+            name_menu.addSeparator()
+            genre = (self.asset.get("folder", "") or "").replace("\\", "/").split("/")[0]
+            for label, text in (
+                ("[Genre]-[Character]", f"{genre}-{name_stem}"),
+                ("[Character];[Genre]", f"{name_stem};{genre}"),
+            ):
+                action = name_menu.addAction(label)
+                action.setData(text)
+                action.setEnabled(bool(genre))
+                if not genre:
+                    action.setToolTip("This entry has no top-level genre folder.")
             menu.addSeparator()
 
         for key, value in copy_data.items():
@@ -2796,12 +2807,9 @@ class FolderSection(QWidget):
             QMessageBox.warning(self, APP_NAME, "Could not locate folder on disk.")
             return
 
-        # The meta file for a folder named "Foo" is: Foo/!F-Foo.json
-        folder_name = folder_dir.name
-        meta_filename = f"!F-{folder_name}.json"
-        meta_path = folder_dir / meta_filename
-
+        meta_path = folder_dir
         try:
+            meta_path = resolve_folder_metadata(folder_dir)
             data, expected = _read_metadata_snapshot(meta_path, allow_missing=True)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, APP_NAME, f"Cannot edit {meta_path}:\n{exc}")
@@ -2842,13 +2850,11 @@ class FolderSection(QWidget):
             QMessageBox.warning(self, APP_NAME, "Could not locate folder on disk.")
             return
 
-        folder_name = folder_dir.name
-        meta_filename = f"!F-{folder_name}.json"
-        meta_path = folder_dir / meta_filename
-
+        meta_path = folder_dir
         try:
+            meta_path = resolve_folder_metadata(folder_dir)
             raw = meta_path.read_text(encoding="utf-8") if meta_path.exists() else "{}"
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not read {meta_path}:\n{exc}")
             return
 
@@ -2857,7 +2863,7 @@ class FolderSection(QWidget):
             "image_path": "",
             "json_path": str(meta_path),
             "json_data": raw,
-            "name": meta_filename,
+            "name": meta_path.name,
             "allow_create": True,
         }
         dlg = EditJsonDialog(fake_asset, None, self)
@@ -5378,6 +5384,8 @@ class MainWindow(QMainWindow):
         self._pre_search_expanded: Optional[set[str]] = None
         self._pre_search_scroll: int = 0
         self._script_runner: Optional[ScriptRunner] = None
+        self._last_script_messages: list[dict] = []
+        self._script_notification_dialog = None
         self._note_window: Optional[NoteWindow] = None
         self._img_viewer: Optional[ImgViewerOverlay] = None
         self._size_grip: Optional[QSizeGrip] = None
@@ -5700,6 +5708,10 @@ class MainWindow(QMainWindow):
         messages = list(runner.notifications)
         if runner.error and messages:
             messages.append({"source": "Script runner", "level": "error", "message": runner.error})
+        self._last_script_messages = [dict(message) for message in messages]
+        if runner.error and not messages:
+            self._last_script_messages.append(
+                {"source": "Script runner", "level": "error", "message": runner.error})
         self._script_notification_dialog = show_messages(self, messages)
         if runner.cancelled or runner.isInterruptionRequested() or runner.error:
             self._set_status("Startup script failed" if runner.error else "Scripts cancelled")
@@ -5929,6 +5941,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         tagged_label = "Hide Tagged" if self._show_tagged else "Show Tagged"
         menu.addAction(tagged_label, self._action_toggle_tagged)
+        messages_action = menu.addAction("Script Messages", self._action_script_messages)
+        messages_action.setEnabled(bool(self._last_script_messages))
         menu.addSeparator()
         menu.addAction("Startup Scripts", self._action_startup_scripts)
         menu.addAction("Manage ID", self._action_manage_identifiers)
@@ -6000,6 +6014,10 @@ class MainWindow(QMainWindow):
         """
         self._show_tagged = not self._show_tagged
         self._results.set_tagged_mode(self._show_tagged)
+
+    def _action_script_messages(self) -> None:
+        """Replay the last script run's notifications without executing scripts."""
+        self._script_notification_dialog = show_messages(self, self._last_script_messages)
 
     def _action_startup_scripts(self) -> None:
         # ── DEV MODE: open dialog in readonly mode - fully interactive but
@@ -6726,7 +6744,7 @@ class GeneratedNoteCard(NoteEntryCard):
         self.setMinimumWidth(0)
         self.setMaximumWidth(16777215)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setToolTip(f"{name}\n\n{value}" + ("\n\nRight-click to see errors." if errors else ""))
+        self.setToolTip(f"{name}\n\n{value}" + ("\n\nRight-click to see warnings or errors." if errors else ""))
         self._refresh_preview()
 
     def _refresh_preview(self):
@@ -6754,7 +6772,9 @@ class GeneratedNoteCard(NoteEntryCard):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(225, 85, 85, 190), 1))
+            has_error = any(e.get("level", "error") == "error" for e in self._errors)
+            color = QColor(225, 85, 85, 190) if has_error else QColor(232, 184, 75, 190)
+            painter.setPen(QPen(color, 1))
             path = QPainterPath()
             path.addRoundedRect(1, 1, self.CARD_W - 2, self.CARD_H - 2, 7, 7)
             painter.drawPath(path)
@@ -6766,6 +6786,8 @@ class GeneratedNoteCard(NoteEntryCard):
         menu.setToolTipsVisible(True)
         for error in self._errors:
             message = error["message"]
+            if error.get("level") == "warning":
+                message = "Warning: " + message
             title = (message[:110] + "…" if len(message) > 110 else message).replace("&", "&&")
             if (error.get("code") == "folder_metadata" and error.get("folder_path")
                     and self._ignore_callback is not None):
