@@ -33,7 +33,9 @@ A desktop chess board for exploring positions and reviewing games with a local a
 3. Open the `chess` folder and double-click `start.bat`. It downloads the required packages into a local `venv` folder and opens the app. Allow time for the initial setup.
 4. For engine analysis, download and extract [Stockfish](https://stockfishchess.org/download/). In Chess's top-bar Engine settings, choose **Browse**, select the Stockfish executable, then **Connect**.
 
-Use `start.bat` or `start_silent.bat` to launch later. Both open `app.py` with Python’s windowless interpreter; first-run setup may show a console while dependencies install. Application errors go to `logs/desktop.log`. Engine and review subprocesses also run without consoles on Windows. A browser alone cannot run this app's Python and engine functions.
+Use `start.bat` for first-time setup or manual dependency maintenance. It prepares the environment, upgrades pip, installs required packages, and opens the app with console output. Setup needs internet access.
+
+Use `start_silent.bat` for everyday launches, including through Rovyl. It uses the installed environment and Python's windowless interpreter directly, without activation, dependency checks, or updates. If setup is missing, it asks you to run `start.bat`. If the app fails to open, run `start.bat` to see the error. Silent application errors go to `logs/desktop.log`. Engine and review subprocesses also run without consoles on Windows. A browser alone cannot run this app's Python and engine functions.
 
 **Uninstall**
 

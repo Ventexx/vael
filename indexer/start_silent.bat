@@ -1,26 +1,13 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 
-REM Generate timestamp (YYYY-MM-DD_HH-MM)
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HH-mm"') do set TIMESTAMP=%%i
-
-REM Ensure logs folder exists
-if not exist logs (
-    mkdir logs
+REM Everyday launch: reuse the installed environment without setup or updates.
+if not exist "venv\Scripts\pythonw.exe" (
+    echo Run start.bat once to set up this app, then use start_silent.bat.
+    pause
+    exit /b 1
 )
 
-REM Set log file path
-set LOGFILE=logs\%TIMESTAMP%.log
-
-REM Create venv if missing
-if not exist venv (
-    python -m venv venv
-)
-
-REM Activate venv
-call venv\Scripts\activate
-
-REM Install dependencies (silent)
-pip install -r requirements.txt >nul 2>&1
-
-REM Run app silently with logging
-start "" venv\Scripts\pythonw.exe app.py > "%LOGFILE%" 2>&1
+start "" "venv\Scripts\pythonw.exe" "%~dp0app.py"
+exit /b

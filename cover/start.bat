@@ -1,29 +1,35 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 
-REM Check if Python exists
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Python is not installed. Please install it first.
-    exit /b
-)
-
-REM Create virtual environment if it doesn't exist
-if not exist venv (
-    echo Creating virtual environment...
+REM First-time setup or manual dependency maintenance, followed by launch.
+if not exist "venv\Scripts\python.exe" (
+    python --version >nul 2>&1
+    if errorlevel 1 goto missing_python
     python -m venv venv
+    if errorlevel 1 goto setup_failed
 )
 
-REM Activate virtual environment
-echo Activating virtual environment...
-call venv\Scripts\activate
+"venv\Scripts\python.exe" -m pip install --upgrade pip
+if errorlevel 1 goto setup_failed
+"venv\Scripts\python.exe" -m pip install -r requirements.txt
+if errorlevel 1 goto setup_failed
 
-REM Upgrade pip
-python -m pip install --upgrade pip
+"venv\Scripts\python.exe" "app.py"
+if errorlevel 1 goto launch_failed
+exit /b 0
 
-REM Install dependencies
-echo Installing dependencies...
-pip install -r requirements.txt
+:missing_python
+echo Python is not installed or is not on PATH. Install Python, then run start.bat again.
+pause
+exit /b 1
 
-REM Run the app
-echo Starting app...
-python app.py
+:setup_failed
+echo Setup failed. Check the error above, then run start.bat again.
+pause
+exit /b 1
+
+:launch_failed
+echo The app stopped with an error. See the details above.
+pause
+exit /b 1
