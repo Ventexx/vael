@@ -58,6 +58,24 @@ Cover is designed around **ComfyUI workflows that take one or more image inputs 
 - Connect the workflow to a **Save Image** node to keep the result on disk. A preview alone does not put a saved image in Cover's output folder.
 - Keep the workflow focused on the intended single-image result. Cover checks that ComfyUI produced an image, but it does not enforce exactly one output or choose among multiple outputs for you.
 
+### folder workflows and settings
+
+Settings has three sections that start collapsed: **Image Selection**, **Ignored Folder Names**, and **Folder Workflows**. Click a section to expand it; hover over the small **?** beside a label for help.
+
+In **Folder Workflows**, click **Add Rule**, type a folder-name pattern, and choose an existing workflow. Each `[]` stands for any non-empty text (including numbers, spaces, or punctuation). Everything outside the placeholders is literal; matching covers the entire folder name and ignores letter case. A leading dot is optional for promotion folders.
+
+| Pattern | Example folder |
+| --- | --- |
+| `[]-[]_[]` | `Fantasy-Alice_Beach` |
+| `[];[]` | `Alice;Fantasy` |
+| `[]-OC_[]p` | `20261005-OC_20p` |
+| `[]-OC_[]p-[]` | `20261005-OC_20p-2` |
+| `Favorites` | `Favorites` (exact name) |
+
+Rules run from top to bottom; the first matching rule with an available workflow wins. Use **Move Up / Move Down** to put specific patterns above broader ones, and **Remove** to delete a selected rule. Type a folder name into the preview field to see which workflow would be selected. Click **Save** to keep changes; **Close** discards them. Existing preset assignments are converted to editable patterns.
+
+Opening a matching folder, including with the sibling-folder shortcuts, selects its assigned workflow. Unmatched folders keep the current workflow. This only selects the workflow; image inputs and running jobs are unchanged. Assignments survive workflow reordering and edits. Deleted workflows appear as unavailable and their rules are skipped until reassigned.
+
 ### load and run
 
 1. Start ComfyUI. In Cover's **Settings**, enter that server's address and select the local output folder you want to browse.

@@ -12,6 +12,7 @@ are still created next to this script at runtime.
 import os
 import sys
 import copy
+import re
 import time
 import uuid
 import json
@@ -75,11 +76,55 @@ DEFAULTS = {
     # skipped during scanning entirely (not shown, not recursed into).
     # [{"pattern": str, "mode": "starts_with" | "contains"}, ...]
     "ignore_folder_patterns": [],
+    "folder_workflows": [],
     # Height (in px) of the bottom Input Roster pane within the center
     # splitter; the Image Browser gets the rest. None until the user drags
     # the handle for the first time, at which point it's remembered.
     "center_split_roster_height": None,
 }
+
+
+def folder_pattern_regex(pattern):
+    """[] is non-empty text; everything else is literal (never raw regex)."""
+    if not pattern.strip():
+        raise ValueError("Enter a folder pattern.")
+    literals = pattern.split("[]")
+    if any("[" in part or "]" in part for part in literals):
+        raise ValueError("Use [] for text placeholders; other brackets are not supported.")
+    if "[][]" in pattern:
+        raise ValueError("Put a separator between [] placeholders.")
+    return re.compile(".+?".join(re.escape(part) for part in literals), re.IGNORECASE | re.DOTALL)
+
+
+def folder_workflow_rules(config):
+    """Read ordered rules, migrating assignments from the initial preset UI."""
+    saved = config.get("folder_workflows", [])
+    if isinstance(saved, list):
+        return [dict(rule) for rule in saved]
+    legacy_patterns = (
+        ("oc", ("[]-OC_[]p", "[]-OC_[]p-[]")),
+        ("character_genre", ("[];[]",)),
+        ("scene_collection", ("[]_[]_[]",)),
+        ("character_scene", ("[]-[]_[]",)),
+    )
+    return [{"pattern": pattern, "workflow_id": saved[key]}
+            for key, patterns in legacy_patterns if saved.get(key)
+            for pattern in patterns]
+
+
+def matching_folder_workflow(name, rules, available_ids):
+    """First matching available assignment wins; missing workflows are skipped."""
+    for rule in rules:
+        workflow_id = rule.get("workflow_id")
+        if workflow_id not in available_ids:
+            continue
+        try:
+            matcher = folder_pattern_regex(rule.get("pattern", ""))
+        except ValueError:
+            continue
+        if matcher.fullmatch(name) or matcher.fullmatch(name.removeprefix(".")):
+            return workflow_id
+    return None
 
 
 # Set by load_config()/save_config() instead of failing silently -- see
@@ -1336,6 +1381,7 @@ class WorkflowState(QObject):
         super().__init__()
         self.main_window = main_window
         data = data or {}
+        self.workflow_id = data.get("workflow_id") or str(uuid.uuid4())
         self.workflow_path = data.get("workflow_path")
         self.optional_identifier = data.get("optional_identifier", "")
         self.saved_slot_node_order = data.get("slot_node_order") or []
@@ -1415,6 +1461,7 @@ class WorkflowState(QObject):
 
     def to_dict(self):
         return {
+            "workflow_id": self.workflow_id,
             "workflow_path": self.workflow_path,
             "optional_identifier": self.optional_identifier,
             "slot_node_order": [s["node_id"] for s in self.slots],
@@ -3133,6 +3180,7 @@ class ImageBrowser(QWidget):
         changes the layout (new cards/children appear) after this call
         returns, and the scroll target needs the settled geometry."""
         self._focused_path = section.path
+        self.main_window.select_folder_workflow(section.path)
         QTimer.singleShot(0, lambda s=section: self._scroll_section_into_view(s))
 
     def _scroll_section_into_view(self, section):
@@ -4578,10 +4626,9 @@ class SettingsDialog(QDialog):
         self.main_window = main_window
         self.setWindowTitle("Settings")
         self.setMinimumWidth(560)
-        self.resize(620, 720)
+        self.resize(620, 480)
 
-        # The whole settings menu scrolls as one unit (form fields, folder
-        # tables, and the Close/Save row all live inside), but the
+        # Settings content scrolls while Close/Save stay visible, but the
         # scrollbar itself stays hidden -- the mouse wheel / trackpad still
         # scrolls it fine via QScrollArea's default wheel handling, it's
         # just not drawn. Hotkeys now live in their own dialog (see
@@ -4614,23 +4661,15 @@ class SettingsDialog(QDialog):
         out_row.addWidget(browse_btn)
         out_wrap = QWidget()
         out_wrap.setLayout(out_row)
-        form.addRow("Output folder:", out_wrap)
+        form.addRow(self._label_with_help("Output folder:",
+            "Your workflow's Save Image node writes images to disk. Choose that same "
+            "folder here so the Outputs sidebar can list and preview them."), out_wrap)
         layout.addLayout(form)
 
-        out_hint = QLabel(
-            "The app doesn't save images itself -- your workflow's own "
-            "Save Image node is what writes the file to disk. Point this "
-            "at that same folder so the app can list and preview them here "
-            "in the Outputs sidebar."
-        )
-        out_hint.setObjectName("hint")
-        out_hint.setWordWrap(True)
-        layout.addWidget(out_hint)
-
-        # -- Image Selection (spec section 4) --------------------------
-        img_title = QLabel("Image Selection")
-        img_title.setObjectName("sectionTitle")
-        layout.addWidget(img_title)
+        section_layout = layout
+        layout = self._section(section_layout, "Image Selection",
+            "Folder order sets the Image Browser tab order. Every folder is searched "
+            "recursively, including all nested folders.")
 
         self.folders = [dict(f) for f in main_window.config_data.get("image_selection_folders", [])]
 
@@ -4657,14 +4696,6 @@ class SettingsDialog(QDialog):
         folder_btns.addWidget(down_btn)
         layout.addLayout(folder_btns)
 
-        folder_hint = QLabel(
-            "Order here sets the order of tabs in the Image Browser. Every folder\n"
-            "is always searched fully recursively, however deeply nested it is."
-        )
-        folder_hint.setObjectName("hint")
-        folder_hint.setWordWrap(True)
-        layout.addWidget(folder_hint)
-
         # Soft warning only (spec section 9, resolved) — never blocks adding
         # more folders, just flags when things may get hard to navigate.
         self.folder_warning_lbl = QLabel("")
@@ -4677,9 +4708,9 @@ class SettingsDialog(QDialog):
         self._refresh_folder_table()
 
         # -- Ignored folder names ---------------------------------------
-        ignore_title = QLabel("Ignored Folder Names")
-        ignore_title.setObjectName("sectionTitle")
-        layout.addWidget(ignore_title)
+        layout = self._section(section_layout, "Ignored Folder Names",
+            "Folders whose names start with or contain a listed value are skipped "
+            "entirely, including everything inside them.")
 
         self.ignore_patterns = [
             dict(p) for p in main_window.config_data.get("ignore_folder_patterns", [])
@@ -4709,16 +4740,47 @@ class SettingsDialog(QDialog):
         add_ignore_row.addWidget(add_ignore_btn)
         layout.addLayout(add_ignore_row)
 
-        ignore_hint = QLabel(
-            "Any folder whose name starts with, or contains, one of these is skipped\n"
-            "entirely while scanning \u2014 it and everything inside it is never shown."
-        )
-        ignore_hint.setObjectName("hint")
-        ignore_hint.setWordWrap(True)
-        layout.addWidget(ignore_hint)
-
         self._refresh_ignore_table()
 
+        mapping_layout = self._section(section_layout, "Folder Workflows",
+            "Opening a folder selects the first matching rule from top to bottom. "
+            "Rules with unavailable workflows are skipped. A leading dot is optional. "
+            "This selects a workflow without running it or changing image inputs.")
+        mapping_layout.addWidget(self._label_with_help("Folder patterns",
+            "Each [] matches one or more characters, including spaces, numbers and "
+            "punctuation. Everything outside [] is literal. Matches cover the whole "
+            "folder name and ignore letter case. Example: []-[]_[] matches "
+            "Fantasy-Alice_Beach. Use []-OC_[]p for a more specific rule. "
+            "Without [], the rule matches an exact name. Put specific rules first."))
+        self.workflow_rules = folder_workflow_rules(main_window.config_data)
+        self.rule_table = QTableWidget(0, 2)
+        self.rule_table.setHorizontalHeaderLabels(["Pattern", "Workflow"])
+        self.rule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.rule_table.verticalHeader().hide()
+        self.rule_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.rule_table.setMaximumHeight(190)
+        mapping_layout.addWidget(self.rule_table)
+        rule_buttons = QHBoxLayout()
+        for title, callback in (("Add Rule", self._add_workflow_rule),
+                                ("Remove", self._remove_workflow_rule),
+                                ("Move Up", lambda: self._move_workflow_rule(-1)),
+                                ("Move Down", lambda: self._move_workflow_rule(1))):
+            button = QPushButton(title)
+            button.clicked.connect(callback)
+            rule_buttons.addWidget(button)
+        rule_buttons.addStretch(1)
+        mapping_layout.addLayout(rule_buttons)
+        self.rule_preview_edit = QLineEdit()
+        self.rule_preview_edit.setPlaceholderText("Try a folder name, e.g. Fantasy-Alice_Beach")
+        self.rule_preview_edit.textChanged.connect(self._update_rule_preview)
+        mapping_layout.addWidget(self.rule_preview_edit)
+        self.rule_preview_label = QLabel()
+        self.rule_preview_label.setObjectName("hint")
+        self.rule_preview_label.setWordWrap(True)
+        mapping_layout.addWidget(self.rule_preview_label)
+        self._refresh_workflow_rules()
+
+        layout = section_layout
         layout.addStretch(1)
 
         btns = QHBoxLayout()
@@ -4730,7 +4792,141 @@ class SettingsDialog(QDialog):
         save_btn.setObjectName("accentButton")
         save_btn.clicked.connect(self._save)
         btns.addWidget(save_btn)
-        layout.addLayout(btns)
+        footer = QWidget()
+        footer.setLayout(btns)
+        btns.setContentsMargins(16, 8, 16, 16)
+        outer.addWidget(footer)
+
+    @staticmethod
+    def _help_label(text):
+        label = QLabel("?")
+        label.setObjectName("hint")
+        label.setToolTip(text)
+        label.setAccessibleName("Help: " + text)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return label
+
+    def _label_with_help(self, title, text):
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        row.addWidget(QLabel(title))
+        row.addWidget(self._help_label(text))
+        row.addStretch(1)
+        return widget
+
+    def _section(self, parent_layout, title, help_text):
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        toggle = QToolButton()
+        toggle.setText(title)
+        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.ArrowType.RightArrow)
+        toggle.setCheckable(True)
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setStyleSheet("QToolButton { border: none; background: transparent; padding: 2px 0px; }")
+        header.addWidget(toggle)
+        header.addWidget(self._help_label(help_text))
+        header.addStretch(1)
+        parent_layout.addLayout(header)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 4, 0, 12)
+        parent_layout.addWidget(body)
+        body.hide()
+        toggle.toggled.connect(body.setVisible)
+        toggle.toggled.connect(lambda opened: toggle.setArrowType(
+            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
+        return body_layout
+
+    def _refresh_workflow_rules(self):
+        self.rule_table.setRowCount(len(self.workflow_rules))
+        self.rule_table.setFixedHeight(min(170, max(64,
+            self.rule_table.horizontalHeader().sizeHint().height()
+            + len(self.workflow_rules) * self.rule_table.verticalHeader().defaultSectionSize() + 2)))
+        for row, rule in enumerate(self.workflow_rules):
+            pattern = QLineEdit(rule.get("pattern", ""))
+            pattern.setPlaceholderText("[]-[]_[]")
+            pattern.textChanged.connect(
+                lambda value, r=rule: self._change_workflow_rule(r, "pattern", value))
+            self.rule_table.setCellWidget(row, 0, pattern)
+            combo = QComboBox()
+            combo.addItem("Choose workflow", "")
+            for index, state in enumerate(self.main_window.workflow_states):
+                combo.addItem(f"{index + 1}. {state.name}", state.workflow_id)
+                combo.setItemData(combo.count() - 1, state.workflow_path, Qt.ToolTipRole)
+            saved = rule.get("workflow_id", "")
+            if saved and combo.findData(saved) < 0:
+                combo.addItem("Unavailable workflow", saved)
+            combo.setCurrentIndex(max(0, combo.findData(saved)))
+            combo.currentIndexChanged.connect(
+                lambda _index, r=rule, c=combo: self._change_workflow_rule(r, "workflow_id", c.currentData()))
+            self.rule_table.setCellWidget(row, 1, combo)
+            # Editing a cell also selects its row for Remove / Move actions.
+            pattern.installEventFilter(self)
+            combo.installEventFilter(self)
+        self._update_rule_preview()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.FocusIn and hasattr(self, "rule_table"):
+            for row in range(self.rule_table.rowCount()):
+                for column in range(2):
+                    if self.rule_table.cellWidget(row, column) is watched:
+                        self.rule_table.setCurrentCell(row, column)
+        return super().eventFilter(watched, event)
+
+    def _change_workflow_rule(self, rule, key, value):
+        rule[key] = value
+        self._update_rule_preview()
+
+    def _add_workflow_rule(self):
+        self.workflow_rules.append({"pattern": "", "workflow_id": ""})
+        self._refresh_workflow_rules()
+        row = len(self.workflow_rules) - 1
+        self.rule_table.setCurrentCell(row, 0)
+        self.rule_table.cellWidget(row, 0).setFocus()
+
+    def _remove_workflow_rule(self):
+        row = self.rule_table.currentRow()
+        if 0 <= row < len(self.workflow_rules):
+            del self.workflow_rules[row]
+            self._refresh_workflow_rules()
+
+    def _move_workflow_rule(self, delta):
+        row = self.rule_table.currentRow()
+        target = row + delta
+        if 0 <= row < len(self.workflow_rules) and 0 <= target < len(self.workflow_rules):
+            self.workflow_rules[row], self.workflow_rules[target] = (
+                self.workflow_rules[target], self.workflow_rules[row])
+            self._refresh_workflow_rules()
+            self.rule_table.setCurrentCell(target, 0)
+
+    def _workflow_rule_error(self):
+        for row, rule in enumerate(self.workflow_rules):
+            try:
+                folder_pattern_regex(rule.get("pattern", ""))
+            except ValueError as error:
+                return f"Rule {row + 1}: {error}"
+            if not rule.get("workflow_id"):
+                return f"Rule {row + 1}: Choose a workflow."
+        return ""
+
+    def _update_rule_preview(self):
+        error = self._workflow_rule_error()
+        if error:
+            self.rule_preview_label.setText(error)
+            return
+        name = self.rule_preview_edit.text()
+        if not name:
+            self.rule_preview_label.setText("")
+            return
+        states = {state.workflow_id: state for state in self.main_window.workflow_states}
+        matched = matching_folder_workflow(name, self.workflow_rules, states)
+        if matched:
+            self.rule_preview_label.setText(f"Selects: {states[matched].name}")
+        else:
+            self.rule_preview_label.setText("No matching available workflow — keeps the current selection.")
 
     def _browse_output(self):
         path = QFileDialog.getExistingDirectory(self, "Select output folder", self.output_edit.text())
@@ -4837,9 +5033,14 @@ class SettingsDialog(QDialog):
             self.ignore_patterns[row]["mode"] = combo.currentData()
 
     def _save(self):
+        error = self._workflow_rule_error()
+        if error:
+            QMessageBox.warning(self, "Check folder rules", error)
+            return
         self.main_window.server = self.server_edit.text().strip() or DEFAULT_SERVER
         self.main_window.output_dir = self.output_edit.text().strip() or DEFAULT_OUTPUT_DIR
         self.main_window.config_data["image_selection_folders"] = self.folders
+        self.main_window.config_data["folder_workflows"] = [dict(rule) for rule in self.workflow_rules]
         self.main_window.config_data["ignore_folder_patterns"] = self.ignore_patterns
         self.main_window.persist_all()
         self.main_window.image_browser.reload_folders()
@@ -5829,6 +6030,17 @@ class MainWindow(QMainWindow):
             item.setText(name)
         if state is self.active_workflow:
             self.roster_bar._update_roster_label()
+
+    def select_folder_workflow(self, path):
+        workflow_id = matching_folder_workflow(
+            Path(path).name, folder_workflow_rules(self.config_data),
+            {state.workflow_id for state in self.workflow_states})
+        if not workflow_id:
+            return
+        for row, state in enumerate(self.workflow_states):
+            if state.workflow_id == workflow_id:
+                self.workflow_sidebar.list.setCurrentRow(row)
+                return
 
     def _on_workflow_selected(self, row):
         if row < 0 or row >= len(self.workflow_states):
