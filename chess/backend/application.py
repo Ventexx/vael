@@ -189,6 +189,8 @@ class Api:
 
     # ------------------------------------------------------------ push helpers (Python -> JS)
     def _push_info(self, payload):
+        if payload.get("gen") != self.engine_mgr.generation:
+            return
         if window is None:
             return
         try:
@@ -225,6 +227,7 @@ class Api:
 
         return {
             "fen": b.fen(),
+            "analysis_gen": self.engine_mgr.generation,
             "turn": "w" if b.turn == chess.WHITE else "b",
             "in_check": b.is_check(),
             "game_over": b.is_game_over(claim_draw=True),

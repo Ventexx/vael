@@ -4,9 +4,9 @@ continuous background analysis on a position and streams incremental
 updates (one per depth / multipv line) back to a callback.
 
 Only one analysis run is ever active at a time. Calling analyze() again
-stops whatever is running (sends the UCI "stop" command, joins the worker
-thread) before starting a fresh one on the new position. Every emitted
-result carries a "gen" (generation) counter so a caller can discard stale
+invalidates the previous search and sends UCI "stop" without waiting for
+the worker. Engine startup and search transitions happen in background threads.
+Every emitted result carries a "gen" (generation) counter so a caller can discard stale
 messages that were in flight when the position changed.
 """
 
@@ -23,7 +23,8 @@ class EngineManager:
         self.engine_path = None
         self.lock = threading.RLock()
         self.analysis_thread = None
-        self.stop_flag = threading.Event()
+        self.search_lock = threading.RLock()
+        self.active_analysis = None
         self.generation = 0
 
         self.options = {
@@ -106,25 +107,29 @@ class EngineManager:
 
     # ------------------------------------------------------------ analysis
     def stop(self):
-        self.stop_flag.set()
-        t = self.analysis_thread
-        if t and t.is_alive():
-            t.join(timeout=3)
-        self.analysis_thread = None
+        # Never join a worker on the board's request path. It may be waiting
+        # for engine output or for the webview to consume its last callback.
+        with self.search_lock:
+            self.generation += 1
+            analysis = self.active_analysis
+            self.active_analysis = None
+            self.analysis_thread = None
+            if analysis is not None:
+                try:
+                    analysis.stop()
+                except chess.engine.EngineTerminatedError:
+                    pass
 
     def analyze(self, board: chess.Board):
-        self.stop()
-        if not self.engine:
-            return
-        self.stop_flag.clear()
-        with self.lock:
-            self.generation += 1
+        with self.search_lock:
+            self.stop()
+            if not self.engine:
+                return
             gen = self.generation
-        b = board.copy()
-        self.analysis_thread = threading.Thread(
-            target=self._run_analysis, args=(b, gen), daemon=True
-        )
-        self.analysis_thread.start()
+            self.analysis_thread = threading.Thread(
+                target=self._run_analysis, args=(board.copy(), gen), daemon=True
+            )
+            self.analysis_thread.start()
 
     def _run_analysis(self, board, gen):
         if board.is_game_over(claim_draw=True):
@@ -140,18 +145,26 @@ class EngineManager:
 
         try:
             with self.lock:
-                if not self.engine:
+                if not self.engine or gen != self.generation:
                     return
                 analysis = self.engine.analysis(board, limit=limit, multipv=multipv)
             with analysis:
+                with self.search_lock:
+                    if gen != self.generation:
+                        return
+                    self.active_analysis = analysis
                 for info in analysis:
-                    if self.stop_flag.is_set() or gen != self.generation:
+                    if gen != self.generation:
                         break
                     self._emit(board, info, gen)
         except chess.engine.EngineTerminatedError:
             pass
         except Exception as e:
             print("[engine] analysis error:", e)
+        finally:
+            with self.search_lock:
+                if gen == self.generation:
+                    self.active_analysis = None
 
     def _emit(self, board, info, gen):
         pv = info.get("pv")
@@ -178,6 +191,7 @@ class EngineManager:
 
         payload = {
             "type": "info",
+            "fen": board.fen(),
             "gen": gen,
             "multipv": info.get("multipv", 1),
             "depth": info.get("depth"),

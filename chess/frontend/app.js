@@ -897,6 +897,7 @@ window.onEngineInfo = function (payload) {
   if (reviewOpen) return;
   if (payload.type === 'gameover') return;
   if (payload.type !== 'info') return;
+  if (!boardState || payload.gen < boardState.analysis_gen || payload.fen !== boardState.fen) return;
   engineLines[payload.multipv] = payload;
   scheduleEngineRender();
 };
