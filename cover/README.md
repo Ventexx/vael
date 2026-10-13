@@ -76,7 +76,7 @@ In **Folder Workflows**, click **Add Rule**, type a folder-name pattern, and cho
 
 Rules run from top to bottom; the first matching rule with an available workflow wins. Use **Move Up / Move Down** to put specific patterns above broader ones, and **Remove** to delete a selected rule. Type a folder name into the preview field to see which workflow would be selected. Click **Save** to keep changes; **Close** discards them. Existing preset assignments are converted to editable patterns.
 
-Opening a matching folder, including with the sibling-folder shortcuts, selects its assigned workflow. Unmatched folders keep the current workflow. This only selects the workflow; image inputs and running jobs are unchanged. Assignments survive workflow reordering and edits. Deleted workflows appear as unavailable and their rules are skipped until reassigned.
+Opening a matching folder, including with the sibling-folder shortcuts, selects its assigned workflow. To gather images from different folders without switching workflows, click the lock beside the Input Roster title. Click it again to unlock; manually selecting a workflow always resets the lock. The lock starts off each session. Unmatched folders keep the current workflow. This only selects the workflow; image inputs and running jobs are unchanged. Assignments survive workflow reordering and edits. Deleted workflows appear as unavailable and their rules are skipped until reassigned.
 
 ### load and run
 

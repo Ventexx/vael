@@ -635,7 +635,7 @@ QTabWidget#browserTabs QTabBar::tab:hover:!selected {
 QWidget#browserStatusBar {
     background: transparent;
 }
-QToolButton#browserSettingsBtn {
+QToolButton#browserSettingsBtn, QToolButton#workflowLockBtn {
     background: transparent;
     border: none;
     color: rgba(200,200,200,0.45);
@@ -643,7 +643,7 @@ QToolButton#browserSettingsBtn {
     padding: 1px 2px;
     margin: -2px 0px 0px 0px;
 }
-QToolButton#browserSettingsBtn:hover {
+QToolButton#browserSettingsBtn:hover, QToolButton#workflowLockBtn:hover {
     color: rgba(220,220,220,0.85);
 }
 QToolButton#browserSettingsBtn:pressed {
@@ -3688,6 +3688,25 @@ class _RunIndicator(QWidget):
         p.drawRoundedRect(QRectF(x, 0, pill_w, r.height()), radius, radius)
 
 
+def _workflow_lock_icon(locked):
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor("#858585"), 1.2))
+    painter.drawRoundedRect(3, 6, 8, 7, 1, 1)
+    shackle = QPainterPath()
+    shackle.moveTo(5, 6)
+    shackle.lineTo(5, 4)
+    shackle.cubicTo(5, 0.5, 10, 0.5, 10, 4)
+    if locked:
+        shackle.lineTo(10, 6)
+    painter.drawPath(shackle)
+    painter.drawLine(7, 9, 7, 10)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class RosterBar(QWidget):
     # Roster icons scale with the bottom bar's height, but stay within a
     # sane range so they never disappear or take over the whole window.
@@ -3712,6 +3731,13 @@ class RosterBar(QWidget):
         self.roster_label = QLabel("INPUT ROSTER")
         self.roster_label.setObjectName("hint")
         toolbar.addWidget(self.roster_label)
+        self.workflow_lock_btn = QToolButton()
+        self.workflow_lock_btn.setObjectName("workflowLockBtn")
+        self.workflow_lock_btn.setCheckable(True)
+        self.workflow_lock_btn.setIconSize(QSize(14, 14))
+        self.workflow_lock_btn.setCursor(Qt.PointingHandCursor)
+        self.workflow_lock_btn.toggled.connect(self._update_workflow_lock)
+        toolbar.addWidget(self.workflow_lock_btn)
         toolbar.addStretch(1)
         self.clear_btn = QPushButton("Clear")
         self.clear_btn.setObjectName("dangerButton")
@@ -3832,6 +3858,9 @@ class RosterBar(QWidget):
                 pass
 
         self.state = state
+        self.workflow_lock_btn.setChecked(False)
+        self.workflow_lock_btn.setEnabled(state is not None)
+        self._update_workflow_lock()
         self.armed_index = None
 
         if state is not None:
@@ -3856,6 +3885,29 @@ class RosterBar(QWidget):
             self.run_btn.setEnabled(not state.running)
             self._on_status_changed(state.status_text, state.status_error)
             self._set_running(state.running)
+
+    @property
+    def workflow_locked(self):
+        return self.workflow_lock_btn.isChecked()
+
+    def _update_workflow_lock(self):
+        locked = self.workflow_locked
+        self.workflow_lock_btn.setIcon(_workflow_lock_icon(locked))
+        text = "Unlock Workflow" if locked else "Lock Workflow"
+        self.workflow_lock_btn.setToolTip(text)
+        self.workflow_lock_btn.setAccessibleName(text)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._size_param_fields()
+
+    def _size_param_fields(self):
+        # Keep each extra field at roughly a third of the former available width.
+        label_width = max((self.param_form.labelForField(w).sizeHint().width()
+                           for w in self.param_widgets.values()), default=0)
+        width = max(60, (self.width() - 28 - label_width - self.param_form.horizontalSpacing()) // 3)
+        for widget in self.param_widgets.values():
+            widget.setFixedWidth(width)
 
     def _update_roster_label(self):
         """Keeps the "INPUT ROSTER" header in sync with whichever workflow
@@ -3920,8 +3972,11 @@ class RosterBar(QWidget):
             else:
                 w = QLineEdit(str(value))
                 w.textChanged.connect(lambda v, k=key: self._on_param_changed(k, v))
+            if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                w.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             self.param_form.addRow(key, w)
             self.param_widgets[key] = w
+        self._size_param_fields()
         self.param_form_widget.show()
 
     def _on_param_changed(self, key, value):
@@ -6090,6 +6145,9 @@ class MainWindow(QMainWindow):
             self.roster_bar._update_roster_label()
 
     def select_folder_workflow(self, path):
+        roster = getattr(self, "roster_bar", None)
+        if roster is not None and roster.workflow_locked:
+            return
         workflow_id = matching_folder_workflow(
             Path(path).name, folder_workflow_rules(self.config_data),
             {state.workflow_id for state in self.workflow_states})
