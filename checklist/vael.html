@@ -883,7 +883,8 @@ function mkSpacer(item) {
     showItemContextMenu(e, [
       { label: hasHeader ? 'Remove Header' : 'Add Header', onClick: () => toggleHeader(item) },
       { divider: true },
-      { label: item.collapsed ? 'Expand section' : 'Collapse section', onClick: () => toggleSection(item) }
+      { label: item.collapsed ? 'Expand section' : 'Collapse section', onClick: () => toggleSection(item) },
+      { label: 'Add Task', onClick: () => addTaskToSection(item) }
     ]);
   });
 
@@ -1133,6 +1134,24 @@ function setupDrag(el, item) {
     pushHistory(b);
     render();
   });
+}
+
+function addTaskToSection(section) {
+  const index = items.indexOf(section);
+  if (index < 0 || section.type !== 'spacer') return;
+  const before = cloneItems();
+  let end = index + 1;
+  while (end < items.length && items[end].type !== 'spacer') end++;
+  const task = { id: ++idCounter, type: 'task', text: '', done: false };
+  if (section.collapsed) task.visibleWhileCollapsed = true;
+  items.splice(end, 0, task);
+  pushHistory(before);
+  render(task.id);
+  const text = list.querySelector(`[data-id="${task.id}"] .task-text`);
+  if (text) {
+    text.scrollIntoView({ block: 'nearest' });
+    editTask(task, text);
+  }
 }
 
 function addTask() {
