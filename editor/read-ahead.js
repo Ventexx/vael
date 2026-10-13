@@ -10,36 +10,52 @@ function workflowImages(images, categories) {
   return [...buckets.values()].flat();
 }
 
-function readAheadPlan(order, active, budget, estimate) {
-  const at = order.indexOf(active);
-  if (at < 0) return [];
-  const candidates = [...order.slice(at + 1, at + 9), ...order.slice(Math.max(0, at - 2), at).reverse()];
-  const plan = [];
-  let used = estimate(active);
-  for (const img of candidates) {
-    const bytes = estimate(img);
-    // Leave room for encoded sources, thumbnails and transient allocations.
-    if (used + bytes > budget * 0.75) break;
-    plan.push(img); used += bytes;
+function readAheadPlan(order, active) {
+  if (!active || !order.includes(active)) return [];
+  return order.filter(img => !img._disposed &&
+    (img.categoryId ?? null) === (active.categoryId ?? null));
+}
+
+function nextCategoryPlan(images, categories, active) {
+  const current = readAheadPlan(images, active);
+  if (!current.length) return [];
+  const order = workflowImages(images, categories);
+  const last = order.indexOf(current[current.length - 1]);
+  const first = order[last + 1];
+  if (!first) return [];
+  return readAheadPlan(images, first);
+}
+
+// Finish a category before exposing its first working frame. Recheck the
+// route between images so rapid category changes cancel obsolete work.
+async function prepareCategory({ plan, ready, prepare, cancelled, progress }) {
+  const failed = new Set(plan().filter(img => img._readAheadError));
+  while (!cancelled()) {
+    const images = plan();
+    progress(images.filter(ready).length, images.length, failed.size);
+    const next = images.find(img => !ready(img) && !failed.has(img));
+    if (!next) return failed;
+    try { await prepare(next); }
+    catch (error) { next._readAheadError = error.message; failed.add(next); }
   }
-  return plan;
+  return failed;
 }
 
 class ImageReadAhead {
-  constructor({ plan, ready, prepare, paused, progress }) {
-    Object.assign(this, { plan, ready, prepare, paused, progress });
+  constructor({ plan, ready, prepare, paused, progress, delay = 30 }) {
+    Object.assign(this, { plan, ready, prepare, paused, progress, delay });
     this.failed = new WeakSet();
     this.running = false;
     this.closed = false;
     this.timer = null;
   }
-  request() {
+  request(delay = this.delay) {
     if (this.closed || this.running || this.timer !== null) return;
-    this.timer = setTimeout(() => { this.timer = null; this.run(); }, 30);
+    this.timer = setTimeout(() => { this.timer = null; this.run(); }, delay);
   }
   async run() {
     if (this.closed) return;
-    if (this.paused()) { this.request(); return; }
+    if (this.paused()) { this.request(Math.max(50, this.delay)); return; }
     const plan = this.plan().filter(img => !img._disposed);
     this.progress(plan.filter(this.ready).length, plan.length);
     const next = plan.find(img => !this.ready(img) && !this.failed.has(img));
@@ -55,4 +71,4 @@ class ImageReadAhead {
   close() { this.closed = true; clearTimeout(this.timer); this.timer = null; }
 }
 
-if (typeof module !== 'undefined') module.exports = { workflowImages, readAheadPlan, ImageReadAhead };
+if (typeof module !== 'undefined') module.exports = { workflowImages, readAheadPlan, nextCategoryPlan, prepareCategory, ImageReadAhead };

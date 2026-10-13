@@ -16,7 +16,8 @@ A dark desktop image editor built for one job: pixelating or blurring parts of a
 - import individual images or folders and organize them into categories
 - reload folder categories with their ↻ button or “Reload from folder” menu item; pick up disk changes while keeping unsaved edits
 - background folder previews, with priority given to the visible category
-- prepare up to eight full-resolution images ahead and two behind, following filmstrip and category order within a bounded memory buffer
+- load the whole category at full resolution when you select an image, including when Auto Next enters a category; keep it ready throughout the batch
+- prepare the whole next category from the start of the current one, for both arrow navigation and Auto Next
 - drag thumbnails between categories
 - apply filters to selected images and save an entire category
 - per-image undo/redo, retained while moving between open images
@@ -65,6 +66,8 @@ Saved filter presets and their shortcuts live in the app folder's `Local Storage
 Images are written only when you choose **Save** or **Save As**. Saving can replace the source image; Save As lets you choose a separate file. Open categories and editing history are session-only.
 
 Temporary editing data is stored in your system's temporary directory in folders beginning `vael-editor-cache-`. Normal exit removes this cache; an unexpected crash can leave files behind. It is not automatic recovery after restarting.
+
+Entering a category waits for its images to load, with progress shown in the status bar. From the start of that category, the editor prepares the entire next category in the background, even with Auto Next off and while edits or background saves are running. Both categories stay in memory; the old 512 MB cache target only reclaims older categories. The status bar shows how many images in the next category are ready. Once preparation finishes, crossing into it needs no image loading. Jumping ahead faster than the files can be read still waits for any remaining images. This trades higher RAM use for smooth batch navigation.
 
 ---
 

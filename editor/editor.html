@@ -724,7 +724,7 @@
     <span id="sb-file" onclick="openMetaPanel()" title="Click for image info">—</span>
     <span id="sb-status">Ready</span>
     <span id="sb-import" role="status" style="color:var(--text-dim); white-space:nowrap"></span>
-    <span id="sb-read-ahead" role="status" style="color:var(--text-dim); white-space:nowrap" title="Full-resolution images prepared ahead of your position"></span>
+    <span id="sb-read-ahead" role="status" style="color:var(--text-dim); white-space:nowrap" title="Full-resolution images loaded for the active category"></span>
     <input id="sb-zoom" type="text" value="" onchange="setZoomInput(this.value)" title="Zoom %">
   </div>
 
@@ -968,6 +968,7 @@ function canvasToImageCoords(clientX, clientY) {
   return { x: (clientX - rect.left - state.panX) / state.zoom, y: (clientY - rect.top - state.panY) / state.zoom };
 }
 function onCanvasMouseDown(e) {
+  if (state.categoryLoading) return;
   // Ignore clicks that originate from floating UI overlaid on the canvas
   // (filter panels, drop-zone button) — without this, a click on e.g.
   // "Apply to selection" bubbles up and gets treated as "start a new
@@ -1767,6 +1768,7 @@ async function restoreHistoryState(img, idx) {
   }
 }
 async function jumpToHistory(idx) {
+  if (state.categoryLoading) return;
   if (state.saveBusy || state.filterBusy || state.historyBusy) return;
   const img = state.images[state.activeIdx];
   if (!img || idx === img.historyIndex || idx < 0 || idx >= img.history.length) return;
@@ -2026,6 +2028,7 @@ function setFiltersBusy(busy) {
 const BLUR_COOLDOWN_MS = 500;
 let _lastBlurAt = 0;
 async function runFilter(type, value) {
+  if (state.categoryLoading) { setStatus('Wait for the category to finish loading.', false); return; }
   if (state.filterBusy || state.saveBusy || state.historyBusy) return;
   if (value === undefined) value = getFilterValue(type);
   const isBlur = type !== 'pixelate';
@@ -2163,27 +2166,41 @@ const OPERATION_MEMORY_LIMIT = 1024 * 1024 * 1024;
 state._hydratedLRU = [];
 let memoryPass = Promise.resolve();
 let memoryTimer;
-function estimatedWorkingBytes(img) {
-  return img.w && img.h ? img.w * img.h * 12 + 1024 * 1024 : 32 * 1024 * 1024;
-}
 function plannedReadAhead() {
-  return readAheadPlan(workflowImages(state.images, state.categories), state.images[state.activeIdx],
-    state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET, estimatedWorkingBytes);
+  return readAheadPlan(state.images, state.images[state.activeIdx]);
+}
+function plannedNextCategory() {
+  // Arrow navigation and auto-save advance share the same category order.
+  // Prepare the entire next category as soon as work on this one begins.
+  return nextCategoryPlan(state.images, state.categories, state.images[state.activeIdx]);
+}
+function backgroundPreparationPlan() { return [...plannedReadAhead(), ...plannedNextCategory()]; }
+function keepImageResident(img) { return inActiveCategory(img) || plannedNextCategory().includes(img); }
+function inActiveCategory(img) {
+  const active = state.images[state.activeIdx];
+  return !!active && !img._disposed && (img.categoryId ?? null) === (active.categoryId ?? null);
+}
+function imageReady(img) {
+  return !img._lazy && !img._hydrating && !img._evicting && !!img.canvas;
 }
 const imageReadAhead = new ImageReadAhead({
-  plan: plannedReadAhead,
-  ready: img => !img._lazy && !img._hydrating && !img._evicting && !!img.canvas,
+  plan: backgroundPreparationPlan,
+  delay: 0,
+  ready: imageReady,
   paused: () => {
     const active = state.images[state.activeIdx];
-    return !!active && ((active._lazy && !active._loadFailed) || active._hydrating || active._evicting || state.filterBusy || state.saveBusy || state.historyBusy);
+    // Foreground loading owns the current category. Editing and worker saves
+    // must not starve preparation of the following category.
+    return state.categoryLoading || (!!active && ((active._lazy && !active._loadFailed) || active._hydrating || active._evicting));
   },
   prepare: async img => {
-    await enforceMemoryBudget(estimatedWorkingBytes(img));
-    if (img._disposed || !plannedReadAhead().includes(img)) return;
+    if (img._disposed || !backgroundPreparationPlan().includes(img)) return;
     await hydrateImage(img);
   },
-  progress: (ready, total) => {
-    $('sb-read-ahead').textContent = total ? `Ready nearby ${ready}/${total}` : '';
+  progress: () => {
+    const current = plannedReadAhead(), next = plannedNextCategory();
+    $('sb-read-ahead').textContent = current.length ? `Category ready ${current.filter(imageReady).length}/${current.length}` +
+      (next.length ? ` · Next ${next.filter(imageReady).length}/${next.length}` : '') : '';
   },
 });
 window.addEventListener('beforeunload', () => imageReadAhead.close());
@@ -2227,16 +2244,13 @@ function enforceMemoryBudget(reserve = 0) {
   const pass = memoryPass.then(async () => {
     const budget = Math.max(0, (state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET) - reserve);
     const lru = state._hydratedLRU = state._hydratedLRU.filter(img => state.images.includes(img));
-    const ahead = plannedReadAhead();
-    // Old images go first, then the far end of the buffer. Keep the next
-    // few images ready even when a recent image has a large undo history.
-    const evictionOrder = [...lru].sort((a, b) => {
-      const rank = img => ahead.includes(img) ? ahead.length - ahead.indexOf(img) : 0;
-      return rank(a) - rank(b);
-    });
+    // Both working and upcoming categories stay resident. Cleanup of older
+    // categories must not force the next category to be loaded a second time.
+    const upcoming = new Set(plannedNextCategory());
+    const evictionOrder = lru.filter(img => !inActiveCategory(img) && !upcoming.has(img));
     for (const img of evictionOrder) {
       if (residentImageBytes() <= budget) break;
-      if (img._hydrating || img._pinned) continue;
+      if (img._hydrating || img._pinned || keepImageResident(img)) continue;
       if (img !== state.images[state.activeIdx] && canReuseOriginalCache(img) && await evictImage(img)) {
         const at = lru.indexOf(img);
         if (at >= 0) lru.splice(at, 1);
@@ -2244,11 +2258,11 @@ function enforceMemoryBudget(reserve = 0) {
       }
       await spillHistory(img);
       // Full encoded previews can be rebuilt from the current canvas.
-      if (!img._lazy) { img.src = null; img._fullSrcDirty = true; }
+      if (!img._lazy && !keepImageResident(img)) { img.src = null; img._fullSrcDirty = true; }
     }
     for (const img of evictionOrder) {
       if (residentImageBytes() <= budget) break;
-      if (img === state.images[state.activeIdx] || img._pinned || img._hydrating) continue;
+      if (keepImageResident(img) || img._pinned || img._hydrating) continue;
       if (await evictImage(img)) {
         const at = lru.indexOf(img);
         if (at >= 0) lru.splice(at, 1);
@@ -2300,6 +2314,7 @@ async function spillHistory(img, keepCurrent = false) {
   if (!window.electronAPI?.cachePut) return;
   const pixelKeys = new Map(), maskKeys = new Map();
   for (const st of img.history || []) {
+    if (keepImageResident(img)) return;
     if (keepCurrent && st === img.history[img.historyIndex]) continue;
     const pixels = st.imageData, mask = st.mask;
     if (pixels) {
@@ -2315,6 +2330,7 @@ async function spillHistory(img, keepCurrent = false) {
   }
 }
 async function evictImage(img) {
+  if (keepImageResident(img)) return false;
   if (img._evicting) return img._evicting;
   if (img._lazy || !img.canvas || !window.electronAPI?.cachePut) return false;
   if (canReuseOriginalCache(img) && img !== state.images[state.activeIdx] && !img._pinned) {
@@ -2334,7 +2350,7 @@ async function evictImage(img) {
       const key = await cacheValue(img, { source, mask: img.mask });
       await spillHistory(img);
       // Selection or another operation may have claimed the image while writing.
-      if (img === state.images[state.activeIdx] || img._pinned || currentRevision(img) !== revision) return false;
+      if (keepImageResident(img) || img._pinned || currentRevision(img) !== revision) return false;
       img._sessionKey = key;
       img.canvas.width = img.canvas.height = 0;
       img.canvas = null; img.ctx = null; img.src = null; img.mask = null;
@@ -2366,13 +2382,17 @@ async function hydrateImage(img) {
       if (window.electronAPI?.cachePut) img._originalKey = await cacheValue(img, { source: dataUrl });
       else img._originalSrc = dataUrl;
     }
-    const tmpImg = new Image();
-    tmpImg.src = dataUrl;
-    await tmpImg.decode();
-    if (img._disposed) return;
-    const w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
-    if (w * h * 12 > OPERATION_MEMORY_LIMIT) throw new Error("Image dimensions exceed the editing memory budget.");
-    const { canvas, ctx } = makeCanvas(tmpImg, w, h);
+    // Decode without waiting for an HTML image's presentation lifecycle.
+    // Upcoming images are off-screen and must prepare independently of it.
+    const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+    const w = bitmap.width, h = bitmap.height;
+    let surface;
+    try {
+      if (img._disposed) return;
+      if (w * h * 12 > OPERATION_MEMORY_LIMIT) throw new Error("Image dimensions exceed the editing memory budget.");
+      surface = makeCanvas(bitmap, w, h);
+    } finally { bitmap.close(); }
+    const { canvas, ctx } = surface;
     if (img.revision == null) { img.revision = nextRevision++; img.savedRevision = img.revision; }
     img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
     img.src = dataUrl; img._fullSrcDirty = false;
@@ -2384,6 +2404,7 @@ async function hydrateImage(img) {
     if (cached) img.mask = cached.mask;
     updateUnsaved(img);
     img._lazy = false;
+    delete img._readAheadError;
     updateThumbCanvas(img);
     if (img._thumbWrap) {
       img._thumbWrap.style.width = `${Math.max(22, Math.min(160, Math.round(FS_THUMB_H * w / h)))}px`;
@@ -2443,7 +2464,7 @@ function updateThumbCanvas(img, source) {
 }
 function renderDisplay() {
   const img = state.images[state.activeIdx];
-  if (!img) { displayCanvas.style.display = 'none'; return; }
+  if (!img || !img.canvas || state.categoryLoading) { displayCanvas.style.display = 'none'; return; }
   if (displayCanvas.width !== img.w || displayCanvas.height !== img.h) {
     displayCanvas.width = img.w; displayCanvas.height = img.h;
   }
@@ -2845,6 +2866,8 @@ function selectImage(idx) {
   clearTimeout(selectionLoadTimer);
   state.activeIdx = idx;
   const img = state.images[idx];
+  delete img._readAheadError; // Explicit selection retries a previously failed image.
+  state.categoryLoading = !plannedReadAhead().every(item => imageReady(item) || item._readAheadError);
   img._loadFailed = false;
   // Keep the filmstrip's category filter following whatever image just
   // became active. Without this, the filmstrip only updates its highlight
@@ -2865,23 +2888,38 @@ function selectImage(idx) {
   fitImage(false);
   renderGallery();
   updateStatusBar();
-  if (img._lazy || img._evicting || img._hydrating) {
+  if (state.categoryLoading) {
     // Nothing to draw yet — keep the previous frame off-screen rather than
     // drawing null/stale pixels, and let the status line show it's working.
     displayCanvas.style.display = 'none';
-    setStatus(`Opening ${img.name}…`, true);
+    setStatus('Loading category…', true);
     // Coalesce rapid skips; already prepared images still display immediately.
-    selectionLoadTimer = setTimeout(() => hydrateImage(img).then(() => {
+    selectionLoadTimer = setTimeout(() => prepareCategory({
+      plan: plannedReadAhead,
+      ready: imageReady,
+      prepare: hydrateImage,
+      cancelled: () => myToken !== _selectToken || img._disposed,
+      progress: (ready, total, failed) => {
+        if (myToken === _selectToken) $('sb-read-ahead').textContent =
+          `Loading category ${ready}/${total}${failed ? ` (${failed} failed)` : ''}`;
+      },
+    }).then(failed => {
       if (myToken !== _selectToken || img._disposed) return; // superseded by a newer selection
+      state.categoryLoading = false;
+      if (!imageReady(img)) throw new Error(img._readAheadError || 'Image could not be loaded');
       fitImage(false);
       renderDisplay();
       renderHistoryPanel();
       updateStatusBar();
-      setStatus(`Opened ${img.name}`, true);
+      setStatus(failed.size ? `Category loaded with ${failed.size} failed image(s)` : `Category ready — ${img.name}`, !failed.size);
+      imageReadAhead.request();
     }).catch(err => {
       img._loadFailed = true;
       console.error(err);
-      if (myToken === _selectToken) setStatus(`Failed to open ${img.name}`, false);
+      if (myToken === _selectToken) {
+        state.categoryLoading = false;
+        setStatus(`Failed to open ${img.name}: ${err.message}`, false);
+      }
     }), 35);
   } else {
     touchHydrated(img);
@@ -2897,6 +2935,9 @@ function removeImage(idx) {
   state.multiSelected.forEach(i => { if (i !== idx) remapped.add(i > idx ? i - 1 : i); });
   state.multiSelected = remapped;
   if (state.images.length === 0) {
+    state.categoryLoading = false;
+    ++_selectToken;
+    clearTimeout(selectionLoadTimer);
     state.activeIdx = -1;
     displayCanvas.style.display = 'none';
     dropZone.classList.remove('has-image');
@@ -2986,6 +3027,9 @@ function removeImages(indices) {
   state.multiSelected = newMultiSelected;
 
   if (state.images.length === 0) {
+    state.categoryLoading = false;
+    ++_selectToken;
+    clearTimeout(selectionLoadTimer);
     state.activeIdx = -1;
     displayCanvas.style.display = 'none';
     dropZone.classList.remove('has-image');
@@ -3501,6 +3545,7 @@ async function encodeExport(img, filePath) {
   }, mime, quality));
 }
 async function persistImage(img, saveAs = false) {
+  if (state.categoryLoading) throw new Error('Wait for the category to finish loading.');
   if (state.filterBusy || state.saveBusy || state.historyBusy) throw new Error('Wait for the current image operation to finish.');
   state.saveBusy = true;
   img._pinned = true;
