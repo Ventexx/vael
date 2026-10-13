@@ -2245,32 +2245,90 @@ class _RubberBandArea(QWidget):
         super().__init__(parent)
         self._browser = browser
         self._dragging = False
-        self._origin_global = None
+        self._origin_content = None
+        self._pointer_global = None
+        self._selection_scroll = None
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(16)
+        self._edge_timer.timeout.connect(self._edge_scroll_tick)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._origin_global = event.globalPosition().toPoint()
+            scroll = self._browser.tabs.currentWidget()
+            if not isinstance(scroll, QScrollArea) or not scroll.isAncestorOf(self):
+                super().mousePressEvent(event)
+                return
+            self._selection_scroll = scroll
+            self._pointer_global = event.globalPosition().toPoint()
+            # Anchor in content coordinates so scrolling never moves the start
+            # of the selection relative to its original folder.
+            self._origin_content = scroll.widget().mapFromGlobal(self._pointer_global)
             additive = bool(event.modifiers() & Qt.ControlModifier)
             self._browser.begin_rubber_band_drag(additive)
             self._dragging = True
             self.grabMouse()
+            self._edge_timer.start()
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def _update_drag_selection(self):
+        origin = self._selection_scroll.widget().mapToGlobal(self._origin_content)
+        self._browser.update_rubber_band_drag(QRect(origin, self._pointer_global).normalized())
+
     def mouseMoveEvent(self, event):
         if self._dragging:
-            now_global = event.globalPosition().toPoint()
-            self._browser.update_rubber_band_drag(QRect(self._origin_global, now_global).normalized())
+            self._pointer_global = event.globalPosition().toPoint()
+            self._update_drag_selection()
             event.accept()
             return
         super().mouseMoveEvent(event)
 
+    def _edge_scroll_tick(self):
+        if not self._dragging:
+            return
+        if (not QApplication.mouseButtons() & Qt.LeftButton
+                or not self.isVisible()
+                or self._browser.tabs.currentWidget() is not self._selection_scroll):
+            self._finish_drag()
+            return
+        viewport = self._selection_scroll.viewport()
+        point = viewport.mapFromGlobal(self._pointer_global)
+        # Scroll only at the top/bottom, not when dragging into a sidebar.
+        if not 0 <= point.x() < viewport.width():
+            return
+        edge = min(48, max(1, viewport.height() // 4))
+        distance = 0
+        if point.y() < edge:
+            distance = point.y() - edge
+        elif point.y() >= viewport.height() - edge:
+            distance = point.y() - (viewport.height() - edge) + 1
+        if distance:
+            speed = max(1, min(24, abs(distance) // 2))
+            bar = self._selection_scroll.verticalScrollBar()
+            bar.setValue(bar.value() + (speed if distance > 0 else -speed))
+        # Update even with a stationary mouse, including after wheel scrolling.
+        self._update_drag_selection()
+
+    def _finish_drag(self):
+        if not getattr(self, "_dragging", False):
+            return
+        self._dragging = False
+        self._edge_timer.stop()
+        self.releaseMouse()
+        self._selection_scroll = None
+        self._browser.end_rubber_band_drag()
+
+    def event(self, event):
+        if event.type() in (QEvent.UngrabMouse, QEvent.Hide, QEvent.WindowDeactivate):
+            self._finish_drag()
+        return super().event(event)
+
     def mouseReleaseEvent(self, event):
-        if self._dragging:
-            self.releaseMouse()
-            self._dragging = False
-            self._browser.end_rubber_band_drag()
+        if self._dragging and event.button() == Qt.LeftButton:
+            self._pointer_global = event.globalPosition().toPoint()
+            self._update_drag_selection()
+            self._finish_drag()
             event.accept()
             return
         super().mouseReleaseEvent(event)

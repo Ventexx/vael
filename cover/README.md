@@ -58,6 +58,8 @@ Cover is designed around **ComfyUI workflows that take one or more image inputs 
 - Connect the workflow to a **Save Image** node to keep the result on disk. A preview alone does not put a saved image in Cover's output folder.
 - Keep the workflow focused on the intended single-image result. Cover checks that ComfyUI produced an image, but it does not enforce exactly one output or choose among multiple outputs for you.
 
+Drag across folder headers to select multiple folders. While holding the mouse button, move near the top or bottom of the Image Browser to scroll and extend the selection beyond the screen. Hold Ctrl when starting the drag to keep your existing selection.
+
 ### folder workflows and settings
 
 Settings has three sections that start collapsed: **Image Selection**, **Ignored Folder Names**, and **Folder Workflows**. Click a section to expand it; hover over the small **?** beside a label for help.

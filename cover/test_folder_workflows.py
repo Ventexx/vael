@@ -128,5 +128,78 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(app.WorkflowState(self.parent, state.to_dict()).workflow_id, state.workflow_id)
 
 
+class FolderDragScrollTests(unittest.TestCase):
+    def setUp(self):
+        self.scroll = app.QScrollArea()
+        self.scroll.resize(400, 300)
+        self.browser = SimpleNamespace(tabs=SimpleNamespace(currentWidget=lambda: self.scroll),
+                                       begin_rubber_band_drag=Mock(), end_rubber_band_drag=Mock(),
+                                       update_rubber_band_drag=Mock())
+        self.area = app._RubberBandArea(self.browser)
+        self.area.resize(380, 2400)
+        self.scroll.setWidget(self.area)
+        self.scroll.show()
+        _QT_APP.processEvents()
+
+    def tearDown(self):
+        self.area._finish_drag()
+        self.scroll.close()
+        self.scroll.deleteLater()
+        _QT_APP.sendPostedEvents(None, app.QEvent.DeferredDelete)
+
+    def begin(self, y=80, additive=False):
+        point = self.scroll.viewport().mapToGlobal(app.QPoint(120, y))
+        event = SimpleNamespace(button=lambda: app.Qt.LeftButton,
+                                globalPosition=lambda: SimpleNamespace(toPoint=lambda: point),
+                                modifiers=lambda: app.Qt.ControlModifier if additive else app.Qt.NoModifier,
+                                accept=Mock())
+        self.area.mousePressEvent(event)
+        self.anchor = app.QPoint(self.area._origin_content)
+
+    def tick_at(self, x, y, count=1):
+        self.area._pointer_global = self.scroll.viewport().mapToGlobal(app.QPoint(x, y))
+        with patch.object(app.QApplication, "mouseButtons", return_value=app.Qt.LeftButton):
+            for _ in range(count):
+                self.area._edge_scroll_tick()
+
+    def test_downward_scroll_keeps_original_anchor_and_extends_selection(self):
+        self.begin(additive=True)
+        self.browser.begin_rubber_band_drag.assert_called_once_with(True)
+        self.tick_at(120, self.scroll.viewport().height() - 1, 25)
+        self.assertGreater(self.scroll.verticalScrollBar().value(), 300)
+        rect = self.browser.update_rubber_band_drag.call_args.args[0]
+        self.assertEqual(rect.top(), self.area.mapToGlobal(self.anchor).y())
+        self.assertGreater(rect.height(), self.scroll.viewport().height())
+        self.area._finish_drag()
+        self.assertFalse(self.area._edge_timer.isActive())
+        self.browser.end_rubber_band_drag.assert_called_once()
+
+    def test_upward_scroll_and_neutral_zones(self):
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(700)
+        self.begin(y=200)
+        self.tick_at(120, 1, 10)
+        self.assertLess(bar.value(), 700)
+        rect = self.browser.update_rubber_band_drag.call_args.args[0]
+        self.assertAlmostEqual(rect.bottom(), self.area.mapToGlobal(self.anchor).y(), delta=1)
+        previous = bar.value()
+        self.tick_at(120, 150, 5)
+        self.tick_at(-20, 0, 5)
+        self.assertEqual(bar.value(), previous)
+        self.tick_at(120, -20, 100)
+        self.assertEqual(bar.value(), 0)
+
+    def test_releasing_mouse_or_changing_tab_stops_scrolling(self):
+        self.begin()
+        with patch.object(app.QApplication, "mouseButtons", return_value=app.Qt.NoButton):
+            self.area._edge_scroll_tick()
+        self.assertFalse(self.area._dragging)
+        self.assertFalse(self.area._edge_timer.isActive())
+        self.begin()
+        self.browser.tabs.currentWidget = lambda: None
+        self.tick_at(120, 299)
+        self.assertFalse(self.area._dragging)
+
+
 if __name__ == "__main__":
     unittest.main()
