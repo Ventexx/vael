@@ -13,6 +13,8 @@ A minimal to-do app for keeping tasks, notes, and repeatable lists together. Org
 
 - add, edit, complete, reject, and delete tasks
 - group tasks with headers and separators, and attach notes
+- right-click a separator to collapse or expand everything until the next separator; hidden tasks still count, and the view is saved
+- tasks added to a collapsed section stay visible until you expand and collapse it again
 - drag items to reorder them
 - undo and redo list changes
 - save named profiles and choose a startup profile
