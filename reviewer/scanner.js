@@ -38,9 +38,12 @@ function scanLibrary(config) {
     }
     const order = [];
     for (const base of Object.keys(groups).sort(naturalCompare)) {
-      groups[base].sort((a, b) => a.iter - b.iter || naturalCompare(a.name, b.name));
+      groups[base].sort((a, b) => naturalCompare(a.name, b.name));
       for (const entry of groups[base]) order.push({ base, ...entry });
     }
+    // General review follows filenames, not the stripped group names or
+    // iteration counters. Grouping remains available in the set reviewer.
+    order.sort((a, b) => naturalCompare(a.name, b.name));
     if (order.length) all.push({ dir, groups, order });
   }
   all.sort((a, b) => naturalCompare(a.dir, b.dir));
