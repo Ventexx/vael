@@ -21,7 +21,7 @@ A dark desktop image editor built for one job: pixelating or blurring parts of a
 - drag thumbnails between categories
 - apply filters to selected images and save an entire category
 - per-image undo/redo, retained while moving between open images
-- automatically advance to the next image after saving
+- queue an exact copy of each edit and immediately advance; encoding and file writing run in background workers while you keep editing
 - export PNG, JPEG, or WebP with quality and JPEG background options
 - remove source metadata, or retain PNG text such as ComfyUI prompts
 - inspect original image metadata
@@ -68,6 +68,10 @@ Images are written only when you choose **Save** or **Save As**. Saving can repl
 Temporary editing data is stored in your system's temporary directory in folders beginning `vael-editor-cache-`. Normal exit removes this cache; an unexpected crash can leave files behind. It is not automatic recovery after restarting.
 
 Entering a category waits for its images to load, with progress shown in the status bar. From the start of that category, the editor prepares the entire next category in the background, even with Auto Next off and while edits or background saves are running. Both categories stay in memory; the old 512 MB cache target only reclaims older categories. The status bar shows how many images in the next category are ready. Once preparation finishes, crossing into it needs no image loading. Jumping ahead faster than the files can be read still waits for any remaining images. This trades higher RAM use for smooth batch navigation.
+
+Save captures the current revision and export settings, then Auto Next advances as soon as that copy is queued. Background workers encode and write it without locking editing. You can return to an image, edit it again, and queue another version; writes stay ordered and an older save never marks a newer edit as saved. The status bar shows pending and failed saves. Click it to retry a failed copy, save it elsewhere, or explicitly discard it. A failed copy is retained even if you keep editing.
+
+The queue reserves up to 512 MB for snapshots and encoder working space. If it fills, a new save is declined without advancing or discarding the current edit. Closing the app, removing queued images, and reloading their folders wait until those saves finish or failed copies are resolved. Pending saves are session-only, not crash recovery.
 
 ---
 

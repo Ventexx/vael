@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   close:    () => ipcRenderer.send('win-close'),
   quit:     () => ipcRenderer.send('win-close'),
   save:     (filePath, src, expectedVersion, metadata) => ipcRenderer.invoke('save', filePath, src, expectedVersion, metadata),
+  saveBytes: (filePath, bytes, expectedVersion, metadata) => ipcRenderer.invoke('save-bytes', filePath, bytes, expectedVersion, metadata),
   chooseSavePath: (name) => ipcRenderer.invoke('choose-save-path', name),
   openFolder: () => ipcRenderer.invoke('open-folder'),
   reloadFolder: dir => ipcRenderer.invoke('reload-folder', dir),

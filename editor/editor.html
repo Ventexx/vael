@@ -725,6 +725,7 @@
     <span id="sb-status">Ready</span>
     <span id="sb-import" role="status" style="color:var(--text-dim); white-space:nowrap"></span>
     <span id="sb-read-ahead" role="status" style="color:var(--text-dim); white-space:nowrap" title="Full-resolution images loaded for the active category"></span>
+    <button id="sb-saves" class="qa-btn" onclick="showSaveQueue()" style="display:none; white-space:nowrap" title="Background saves — click for details" aria-live="polite"></button>
     <input id="sb-zoom" type="text" value="" onchange="setZoomInput(this.value)" title="Zoom %">
   </div>
 
@@ -733,6 +734,13 @@
 <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="onFileInput(event)">
 
 <!-- METADATA OVERLAY -->
+<div class="overlay" id="overlay-saves" role="dialog" aria-label="Background saves">
+  <div class="meta-box" style="width:480px; max-width:90vw; padding:20px; background:var(--bg2); border:1px solid var(--border2); border-radius:8px">
+    <div style="margin-bottom:12px">Background saves</div>
+    <div id="save-jobs" style="max-height:50vh; overflow:auto; font-size:12px"></div>
+    <button class="overlay-close" onclick="$('overlay-saves').classList.remove('open')">close</button>
+  </div>
+</div>
 <div class="overlay" id="overlay-meta" onclick="closeMetaPanel(event)">
   <div class="overlay-box">
     <div class="meta-title" id="meta-filename">—</div>
@@ -795,6 +803,7 @@
 
 <script src="thumbnail-queue.js"></script>
 <script src="read-ahead.js"></script>
+<script src="save-queue.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════
 // STATE
@@ -2203,7 +2212,7 @@ const imageReadAhead = new ImageReadAhead({
       (next.length ? ` · Next ${next.filter(imageReady).length}/${next.length}` : '') : '';
   },
 });
-window.addEventListener('beforeunload', () => imageReadAhead.close());
+window.addEventListener('beforeunload', () => { if (!state.saveBusy && !saveQueue.jobs.length) imageReadAhead.close(); });
 function residentImageBytes() {
   let bytes = 0;
   const seen = new Set();
@@ -2633,7 +2642,7 @@ const thumbnailQueue = new ThumbnailQueue({
   },
   progress: value => { thumbnailProgress = value; updateImportProgressDisplay(); },
 });
-window.addEventListener('beforeunload', () => thumbnailQueue.close());
+window.addEventListener('beforeunload', () => { if (!state.saveBusy && !saveQueue.jobs.length) thumbnailQueue.close(); });
 
 // ────────────────────────────────────────────────────────────────────
 // BACKGROUND IMPORT PROGRESS
@@ -2744,6 +2753,8 @@ async function reloadCategory(id) {
   const cat = state.categories.find(c => c.id === id);
   if (!cat?.folderPath || cat.reloading) return;
   const busy = () => state.filterBusy || state.saveBusy || state.historyBusy;
+  const savingCategory = () => state.images.some(img => img.categoryId === id && saveQueue.has(img));
+  if (savingCategory()) { showSaveQueue(); setStatus('Finish or retry this category’s saves before reloading.', false); return; }
   if (busy()) { setStatus('Wait for the current operation before reloading.', false); return; }
   cat.reloading = true;
   renderCategoryPanel();
@@ -2751,7 +2762,7 @@ async function reloadCategory(id) {
   try {
     const files = await window.electronAPI.reloadFolder(cat.folderPath);
     if (!state.categories.includes(cat)) return;
-    if (busy()) { setStatus('An image operation started. Reload the folder again when it finishes.', false); return; }
+    if (busy() || savingCategory()) { setStatus('An image operation started. Reload the folder again when it finishes.', false); return; }
     const active = state.images[state.activeIdx];
     const selected = new Set([...state.multiSelected].map(i => state.images[i]));
     const previous = state.images.filter(img => img.categoryId === id);
@@ -2928,6 +2939,7 @@ function selectImage(idx) {
   }
 }
 function removeImage(idx) {
+  if (saveQueue.has(state.images[idx])) { showSaveQueue(); setStatus('Finish or retry this image’s saves before closing it.', false); return; }
   if (state.filterBusy || state.saveBusy || state.historyBusy) { setStatus("Wait for the current operation before closing images.", false); return; }
   releaseImage(state.images[idx]);
   state.images.splice(idx, 1);
@@ -2984,6 +2996,7 @@ function deleteCategory(id) {
   if (!cat) return;
   const label = categoryLabel(cat);
   const indices = state.images.map((_, i) => i).filter(i => state.images[i].categoryId === id);
+  if (indices.some(i => saveQueue.has(state.images[i]))) { showSaveQueue(); setStatus('Finish or retry this category’s saves before deleting it.', false); return; }
   state.categories = state.categories.filter(c => c.id !== id);
 
   // Deleting a category deletes the images filed under it too — it's not
@@ -3010,6 +3023,7 @@ function deleteCategory(id) {
 // the canvas instead of leaving stale pixels on screen.
 function removeImages(indices) {
   if (!indices || !indices.length) return;
+  if (indices.some(i => saveQueue.has(state.images[i]))) { showSaveQueue(); setStatus('Finish or retry these saves before closing images.', false); return; }
   if (state.filterBusy || state.saveBusy || state.historyBusy) { setStatus("Wait for the current operation before closing images.", false); return; }
   const ascending = [...new Set(indices)].sort((a, b) => a - b);
   const descending = [...ascending].reverse();
@@ -3403,7 +3417,7 @@ function navigateWorkflow(direction) {
   const target = order[at + direction];
   if (target) selectImage(state.images.indexOf(target));
 }
-// Jumps to the next image after a save — the last step of the select ->
+// Jumps to the next image after accepting a save snapshot — the last step of the select ->
 // pixelate -> save -> next loop, so the workflow never needs a mouse click
 // just to move on to the next file. Stays within the just-saved image's own
 // category first, matching against its actual categoryId rather than
@@ -3423,7 +3437,7 @@ function advanceToNextImage(fromIdx) {
   if (next !== undefined) {
     selectImage(next);
     const n = sameCategory.indexOf(next) + 1;
-    setStatus(`Saved — showing ${state.images[next].name} (${n}/${sameCategory.length})`, true);
+    setStatus(`Save queued — showing ${state.images[next].name} (${n}/${sameCategory.length})`, true);
     return;
   }
   const nextCat = nextCategoryWithImages(cat);
@@ -3432,10 +3446,10 @@ function advanceToNextImage(fromIdx) {
     selectImage(firstIdx);
     const catObj = state.categories.find(c => c.id === nextCat);
     const label = catObj ? categoryLabel(catObj) : 'Unsorted';
-    setStatus(`Saved — moving to next collection: ${label}`, true);
+    setStatus(`Save queued — moving to next collection: ${label}`, true);
     return;
   }
-  setStatus('Saved — that was the last image', true);
+  setStatus('Last image queued — background saves finish in the status bar', true);
 }
 // Read-only reference for whatever hotkeys are currently bound to a preset —
 // lives at the bottom of the toolbar since the panels that manage them
@@ -3524,25 +3538,115 @@ function exportMime(filePath) {
 function defaultExportName(name) {
   return /\.(png|jpe?g|webp)$/i.test(name) ? name : name.replace(/\.[^.]+$/, '') + '.png';
 }
-async function encodeExport(img, filePath) {
-  const mime = exportMime(filePath);
-  let canvas = img.canvas;
-  if (mime === 'image/jpeg') {
-    canvas = document.createElement('canvas');
-    canvas.width = img.w; canvas.height = img.h;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = $('export-background').value;
-    ctx.fillRect(0, 0, img.w, img.h);
-    ctx.drawImage(img.canvas, 0, 0);
+let saveEncoder;
+function saveDestinationKey(destination) {
+  return navigator.platform.startsWith('Win') ? destination.toLowerCase() : destination;
+}
+async function encodeSaveSnapshot(job) {
+  const bitmap = await createImageBitmap(job.snapshot);
+  return new Promise((resolve, reject) => {
+    const worker = saveEncoder || (saveEncoder = new Worker('save-encode-worker.js'));
+    const fail = error => {
+      worker.terminate(); saveEncoder = null;
+      bitmap.close(); reject(error);
+    };
+    worker.onmessage = ({ data }) => {
+      if (data.error) reject(new Error(data.error));
+      else resolve(data.bytes);
+    };
+    worker.onerror = event => { event.preventDefault(); fail(new Error(event.message || 'Save encoder stopped. Retry the save.')); };
+    worker.onmessageerror = () => fail(new Error('Could not read the encoded image.'));
+    try { worker.postMessage({ bitmap, mime: job.mime, quality: job.quality, background: job.background }, [bitmap]); }
+    catch (error) { fail(error); }
+  });
+}
+const saveQueue = new BackgroundSaveQueue({
+  execute: async job => {
+    const img = job.owner;
+    const bytes = await encodeSaveSnapshot(job);
+    const previous = img._saveVersions?.get(job.destinationKey);
+    // A previous queued save of this image may have replaced the source
+    // since this snapshot was taken. Other image copies still conflict.
+    const expected = previous && previous.sequence > job.versionSequence ? previous.version : job.expectedVersion;
+    if (window.electronAPI?.saveBytes) {
+      const version = await window.electronAPI.saveBytes(job.destination, new Uint8Array(bytes), expected, job.metadata);
+      (img._saveVersions ||= new Map()).set(job.destinationKey, { version, sequence: job.id });
+      img.path = job.destination;
+      img._sourceVersion = version;
+    } else {
+      if (job.metadata.policy !== 'strip') throw new Error('PNG text retention requires the desktop application.');
+      const url = URL.createObjectURL(new Blob([bytes], { type: job.mime }));
+      const link = document.createElement('a');
+      link.href = url; link.download = job.destination; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    img.name = job.destination.split(/[\\/]/).pop();
+    markSaved(img, job.revision); // Later edits remain unsaved.
+    if (img._thumbDot) img._thumbDot.style.display = img.unsaved ? '' : 'none';
+    if (img._thumbWrap) img._thumbWrap.title = img.name;
+    $('save-all-btn').disabled = !state.images.some(item => item.unsaved);
+    if (state.images[state.activeIdx] === img) updateStatusBar();
+  },
+  changed: () => updateSaveQueueStatus(),
+});
+window.addEventListener('beforeunload', event => {
+  if (state.saveBusy || saveQueue.jobs.length) {
+    event.preventDefault(); event.returnValue = false;
+  } else saveEncoder?.terminate();
+});
+function updateSaveQueueStatus() {
+  const badge = $('sb-saves');
+  const failed = saveQueue.failed.length;
+  badge.style.display = saveQueue.jobs.length ? '' : 'none';
+  badge.textContent = [saveQueue.pending ? `Saving ${saveQueue.pending}` : '', failed ? `${failed} failed — retry` : ''].filter(Boolean).join(' · ');
+  badge.style.color = failed ? '#ffaaaa' : 'var(--text-dim)';
+  if ($('overlay-saves').classList.contains('open')) renderSaveQueue();
+}
+function showSaveQueue() {
+  $('overlay-saves').classList.add('open');
+  renderSaveQueue();
+}
+function renderSaveQueue() {
+  const list = $('save-jobs');
+  list.replaceChildren();
+  if (!saveQueue.jobs.length) { list.textContent = 'All saves finished.'; return; }
+  for (const job of saveQueue.jobs) {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:8px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere';
+    const label = document.createElement('div');
+    label.textContent = `${job.destination} — ${job.status === 'failed' ? job.error : job.status === 'running' ? 'saving' : 'queued'}`;
+    row.appendChild(label);
+    if (job.status === 'failed') {
+      for (const [text, action] of [['Retry', () => saveQueue.retry(job)], ['Save copy as…', () => retrySaveAs(job)], ['Discard queued copy', () => discardFailedSave(job)]]) {
+        const button = document.createElement('button'); button.className = 'qa-btn';
+        button.textContent = text; button.onclick = action; row.appendChild(button);
+      }
+    }
+    list.appendChild(row);
   }
-  const quality = Math.min(100, Math.max(1, Number($('export-quality').value) || 92)) / 100;
-  return new Promise((resolve, reject) => canvas.toBlob(blob => {
-    if (!blob || blob.type !== mime) { reject(new Error('This image format could not be encoded.')); return; }
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Could not encode the image.'));
-    reader.readAsDataURL(blob);
-  }, mime, quality));
+}
+function discardFailedSave(job) {
+  if (job.status !== 'failed') return;
+  $('confirm-msg').textContent = `Discard the failed queued version of "${job.owner.name}"? Your current image stays open. This queued copy will not be saved.`;
+  $('overlay-confirm').classList.add('open');
+  state.confirmCallback = action => {
+    $('overlay-confirm').classList.remove('open');
+    if (action === 'close') saveQueue.discard(job);
+  };
+}
+async function retrySaveAs(job) {
+  if (!window.electronAPI?.chooseSavePath || job.status !== 'failed') return;
+  try {
+    const chosen = await window.electronAPI.chooseSavePath(defaultExportName(job.owner.name));
+    if (!chosen || job.status !== 'failed') return;
+    job.destination = chosen.filePath; job.destinationKey = saveDestinationKey(chosen.filePath);
+    job.expectedVersion = chosen.version;
+    job.versionSequence = job.owner._saveVersions?.get(job.destinationKey)?.sequence || 0;
+    job.mime = exportMime(chosen.filePath);
+    job.metadata = { ...job.metadata, policy: $('export-metadata').value };
+    job.owner._saveDestination = { path: chosen.filePath, version: chosen.version };
+    saveQueue.retry(job);
+  } catch (error) { setStatus(`Save failed: ${error.message}`, false); }
 }
 async function persistImage(img, saveAs = false) {
   if (state.categoryLoading) throw new Error('Wait for the category to finish loading.');
@@ -3553,8 +3657,9 @@ async function persistImage(img, saveAs = false) {
     // Read the source before choosing an overwrite destination so its version
     // describes exactly the bytes that supplied the working pixels.
     await hydrateImage(img);
-    let destination = img.path;
-    let expectedVersion = img._sourceVersion;
+    let destination = img._saveDestination?.path || img.path;
+    const savedVersion = img._saveVersions?.get(saveDestinationKey(destination || ''));
+    let expectedVersion = savedVersion ? savedVersion.version : img._saveDestination ? img._saveDestination.version : img._sourceVersion;
     if (saveAs || !destination || !/\.(png|jpe?g|webp)$/i.test(destination)) {
       if (window.electronAPI?.chooseSavePath) {
         const chosen = await window.electronAPI.chooseSavePath(defaultExportName(img.name));
@@ -3564,32 +3669,36 @@ async function persistImage(img, saveAs = false) {
       } else destination = defaultExportName(img.name);
     }
     const revision = currentRevision(img);
-    const src = await encodeExport(img, destination);
-    if (window.electronAPI?.save) {
-      img._sourceVersion = await window.electronAPI.save(destination, src, expectedVersion, {
-        policy: $('export-metadata').value, sourceKey: img._originalKey,
-      });
-      img.path = destination;
-    } else {
-      if ($('export-metadata').value !== 'strip') throw new Error('PNG text retention requires the desktop application.');
-      const link = document.createElement('a');
-      link.href = src; link.download = destination; link.click();
-    }
-    img.name = destination.split(/[\\/]/).pop();
-    markSaved(img, revision);
+    const destinationKey = saveDestinationKey(destination);
+    if (saveQueue.jobs.some(job => job.owner === img && job.revision === revision && job.destinationKey === destinationKey && job.status !== 'failed')) return true;
+    const bytes = img.w * img.h * 8; // Snapshot plus encoder working space.
+    saveQueue.checkCapacity(bytes);
+    const snapshot = new OffscreenCanvas(img.w, img.h);
+    snapshot.getContext('2d').drawImage(img.canvas, 0, 0);
+    const job = {
+      owner: img, snapshot, bytes, revision, destination, destinationKey, expectedVersion,
+      versionSequence: img._saveVersions?.get(destinationKey)?.sequence || 0,
+      mime: exportMime(destination),
+      quality: Math.min(100, Math.max(1, Number($('export-quality').value) || 92)) / 100,
+      background: $('export-background').value,
+      metadata: { policy: $('export-metadata').value, sourceKey: img._originalKey },
+      dispose: () => { snapshot.width = snapshot.height = 0; },
+    };
+    try { saveQueue.add(job); }
+    catch (error) { job.dispose(); throw error; }
+    img._saveDestination = { path: destination, version: expectedVersion };
     return true;
   } finally {
     img._pinned = false;
     state.saveBusy = false;
   }
 }
-async function saveImage() {
-  const img = state.images[state.activeIdx];
+async function saveImage(img = state.images[state.activeIdx]) {
   if (!img) { setStatus('No image to save', false); return; }
   try {
     if (!await persistImage(img)) { setStatus('Save cancelled', false); return; }
     renderGallery(); updateStatusBar();
-    setStatus(`Saved ${img.name}`, true);
+    setStatus(`Save queued — ${img.name}`, true);
     const idx = state.images.indexOf(img);
     if (idx === state.activeIdx) advanceToNextImage(idx);
   } catch (e) { setStatus(`Save failed: ${e.message}`, false); }
@@ -3600,7 +3709,7 @@ async function saveImageAs() {
   try {
     if (!await persistImage(img, true)) { setStatus('Save cancelled', false); return; }
     renderGallery(); updateStatusBar();
-    setStatus(`Saved ${img.name}`, true);
+    setStatus(`Save queued — ${img.name}`, true);
     const idx = state.images.indexOf(img);
     if (idx === state.activeIdx) advanceToNextImage(idx);
   } catch (e) { setStatus(`Save failed: ${e.message}`, false); }
@@ -3614,7 +3723,7 @@ async function saveImageSet(images) {
     catch (e) { fail++; failures.push(`${img.name}: ${e.message}`); console.error(img.name, e); }
   }
   renderGallery(); updateStatusBar();
-  setStatus(fail ? `Saved ${ok}, ${fail} skipped${failures.length ? ": " + failures.join("; ") : ""}` : `Saved all changes (${ok})`, fail === 0);
+  setStatus(fail ? `Queued ${ok}, ${fail} skipped${failures.length ? ": " + failures.join("; ") : ""}` : `Queued all changes (${ok})`, fail === 0);
 }
 async function saveAllChanges() { return saveImageSet(state.images.filter(img => img.unsaved)); }
 
@@ -3910,6 +4019,11 @@ function requestCloseImage(idx) {
   }
 }
 function attemptClose() {
+  if (state.saveBusy || saveQueue.jobs.length) {
+    showSaveQueue();
+    setStatus('Finish or retry background saves before closing the editor.', false);
+    return;
+  }
   const unsaved = state.images.filter(i => i.unsaved);
   if (!unsaved.length) { doCloseApp(); return; }
   $('confirm-msg').textContent = `You have ${unsaved.length} unsaved image${unsaved.length > 1 ? 's' : ''}. Close anyway?`;
@@ -3920,7 +4034,10 @@ function attemptClose() {
   };
 }
 function confirmAction(action) { if (state.confirmCallback) state.confirmCallback(action); state.confirmCallback = null; }
-function doCloseApp() { if (window.electronAPI?.quit) window.electronAPI.quit(); else window.close(); }
+function doCloseApp() {
+  if (state.saveBusy || saveQueue.jobs.length) { showSaveQueue(); return; }
+  if (window.electronAPI?.quit) window.electronAPI.quit(); else window.close();
+}
 
 // ════════════════════════════════════════════════════════════════════
 // DRAG & DROP / FILE INPUT
@@ -4062,12 +4179,14 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     const target = getTemplateSaveTarget();
     if (!target) { setStatus('Template + Save: no template selected', false); return; }
-    Promise.resolve(runFilter(target.type, target.value)).then(applied => { if (applied) return saveImage(); });
+    const editedImage = state.images[state.activeIdx];
+    Promise.resolve(runFilter(target.type, target.value)).then(applied => { if (applied) return saveImage(editedImage); });
     return;
   }
 
   if (e.key === 'Escape') {
     closeMetaPanelDirect();
+    $('overlay-saves').classList.remove('open');
     closeContextMenu();
     document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
     $('tool-pixelate').classList.remove('active');

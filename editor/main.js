@@ -5,6 +5,9 @@ const { outputFormat, decodeExport, fileVersion, readSnapshot, atomicSave } = re
 const { SessionCache } = require('./session-cache');
 const { keepPngText } = require('./image-metadata');
 const sessionCache = new SessionCache();
+const { SaveService } = require('./save-service');
+const saveService = new SaveService();
+app.on('will-quit', () => saveService.close());
 ipcMain.handle('cache-put', (_, value) => sessionCache.put(value));
 ipcMain.handle('cache-get', (_, key) => sessionCache.get(key));
 ipcMain.handle('cache-remove', (_, key) => sessionCache.remove(key));
@@ -197,6 +200,12 @@ ipcMain.handle('save', async (_, filePath, src, expectedVersion, metadata = {}) 
     bytes = keepPngText(bytes, Buffer.from(original.source.split(',')[1], 'base64'));
   } else if (policy !== 'strip') throw new Error('Unknown metadata policy.');
   return atomicSave(filePath, bytes, expectedVersion);
+});
+
+ipcMain.handle('save-bytes', (_, filePath, bytes, expectedVersion, metadata = {}) => {
+  const policy = metadata.policy || 'strip';
+  const sourceFile = policy === 'png-text' ? sessionCache.file(metadata.sourceKey) : undefined;
+  return saveService.save({ filePath, bytes, expectedVersion, policy, sourceFile });
 });
 
 app.whenReady().then(createWindow);
