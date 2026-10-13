@@ -178,10 +178,6 @@ protect.py         — optional standalone encryption/recovery tool
 pyproject.toml     — Python project information
 README.md          — this guide
 docs/              — recovery instructions and command outcomes
-tests/             — integration tests using disposable files and real 7-Zip
 icon.png / .ico    — app icons
 ```
 
-## development checks
-
-From the repository root, run `python -m unittest discover -s backup/tests -v` with a working 7-Zip executable on `PATH`. `VAEL_TEST_7ZIP` can select a different executable. The suite exercises encrypted and plain backups, updates/deletions, configuration changes, both companion directions, standard-tool recovery, conversion, password changes, wrong passwords, cancellation, corruption, locks, and no-overwrite behavior. No real backup data is used. Integration tests are skipped when no archiver is available; a skipped run is not encryption validation.
