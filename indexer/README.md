@@ -35,12 +35,12 @@ A desktop library for images and their accompanying information. Turn folders of
 
 1. Install [Python](https://www.python.org/downloads/). Enable **Add Python to PATH** if the installer offers it.
 2. Download Vael using **Code → Download ZIP** on GitHub, then extract it.
-3. Open the `indexer` folder. On Windows, double-click `start.bat`. On Linux, open a terminal in this folder and run `bash start.sh`.
+3. Open the `indexer` folder and double-click `start.bat` on Windows.
 4. Wait while the launcher creates a local `venv` folder, downloads the required packages, and opens the app.
 
 On Windows, use `start.bat` for first-time setup or manual dependency maintenance. It prepares the environment, upgrades pip, installs required packages, and opens the app with console output. Setup needs internet access.
 
-After setup, use `start_silent.bat` for everyday launches, including through Rovyl. It uses the installed environment directly, without activation, dependency checks, or updates. If setup is missing, it asks you to run `start.bat`. If the app fails to open, run `start.bat` to see the error. Silent launches no longer create timestamped launcher logs. Linux launchers are unchanged.
+After setup, use `start_silent.bat` for everyday launches, including through Rovyl. It uses the installed environment directly, without activation, dependency checks, or updates. If setup is missing, it asks you to run `start.bat`. If the app fails to open, run `start.bat` to see the error. Silent launches no longer create timestamped launcher logs.
 
 Use **Add Folder** in the app to choose a library. Each indexed image needs a matching `.json` file containing its information. Indexer does not generate missing information files automatically.
 
@@ -182,8 +182,8 @@ Indexing reads your source files. Explicit tag, JSON, and persistent-identifier 
 ```text
 app.py                       — the desktop app
 requirements.txt             — packages needed by the app
-start.bat / start.sh          — Windows / Linux setup and launch
-start_silent.bat / .sh        — alternate launchers
+start.bat                    — Windows setup and launch
+start_silent.bat              — everyday launch without setup
 README.md                   — this guide
 icon.png / .ico               — app icons
 cover.png                    — the cover image above

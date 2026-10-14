@@ -33,13 +33,13 @@ Sources, field names, rules, and aliases are configuration. No particular creato
 
 1. Install [Python](https://www.python.org/downloads/) 3.10 or newer. On Windows, enable **Add Python to PATH**.
 2. Download Vael using **Code → Download ZIP**, then extract it.
-3. Open the `sorter` folder. On Windows, double-click `start.bat`. On Linux, run `bash start.sh`.
+3. Open the `sorter` folder and double-click `start.bat` on Windows.
 4. The launcher creates a local `venv`, installs PySide6, and starts the app. Initial setup needs internet access.
 5. Open **Settings**, add your source folders, and select an existing dedicated sorting folder.
 
-Use `start.bat` for first-time setup, dependency maintenance, or visible error output. For everyday Windows launches, including launchers such as Rovyl, use `start_silent.bat`. It reuses the installed environment without dependency checks or updates. On Linux, `start_silent.sh` does the same in the background. Silent launchers ask you to run normal setup if the environment is missing.
+Use `start.bat` for first-time setup, dependency maintenance, or visible error output. For everyday launches, including launchers such as Rovyl, use `start_silent.bat`. It reuses the installed environment without dependency checks or updates and asks you to run normal setup if the environment is missing.
 
-Linux needs a graphical desktop and the system libraries required by Qt. Codec availability can vary between systems. Windows is the primary tested platform.
+The provided launchers target Windows. Codec availability can vary between systems.
 
 **Uninstall**
 
@@ -171,8 +171,8 @@ All application code is in `app.py`, organized into internal sections for settin
 ```text
 app.py                        — the complete desktop app
 requirements.txt              — PySide6 dependency
-start.bat / start.sh           — setup, maintenance, and launch
-start_silent.bat / .sh         — everyday launch without setup
+start.bat                     — Windows setup, maintenance, and launch
+start_silent.bat              — everyday launch without setup
 README.md                     — this guide and the in-app Help content
 cover.png                     — optional README artwork and fallback app icon
 cover.ico                     — optional Windows app icon

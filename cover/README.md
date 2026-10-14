@@ -32,12 +32,12 @@ A desktop companion for ComfyUI. Browse your image folders, assign inputs to sav
 
 1. Install [Python](https://www.python.org/downloads/). Enable **Add Python to PATH** if the installer offers it.
 2. Download Vael using **Code → Download ZIP** on GitHub, then extract it.
-3. Open the `cover` folder. On Windows, double-click `start.bat`. On Linux, open a terminal in this folder and run `bash start.sh`.
+3. Open the `cover` folder and double-click `start.bat` on Windows.
 4. Wait while the launcher creates a local `venv` folder, downloads the required packages, and opens the app.
 
 On Windows, use `start.bat` for first-time setup or manual dependency maintenance. It prepares the environment, upgrades pip, installs required packages, and opens the app with console output. Setup needs internet access.
 
-After setup, use `start_silent.bat` for everyday launches, including through Rovyl. It uses the installed environment directly, without activation, dependency checks, or updates. If setup is missing, it asks you to run `start.bat`. If the app fails to open, run `start.bat` to see the error. Silent launches no longer create timestamped launcher logs. Linux launchers are unchanged.
+After setup, use `start_silent.bat` for everyday launches, including through Rovyl. It uses the installed environment directly, without activation, dependency checks, or updates. If setup is missing, it asks you to run `start.bat`. If the app fails to open, run `start.bat` to see the error. Silent launches no longer create timestamped launcher logs.
 
 ComfyUI must be installed and running separately. In Cover's Settings, enter its server address and choose the local output folder to browse. Add workflows exported in ComfyUI's **API format**; Cover does not install the models or extra nodes they require.
 
@@ -108,8 +108,8 @@ Closing Cover stops its local monitoring. Jobs already submitted can continue on
 ```text
 app.py                       — the desktop app
 requirements.txt             — packages needed by the app
-start.bat / start.sh          — Windows / Linux setup and launch
-start_silent.bat / .sh        — alternate launchers
+start.bat                    — Windows setup and launch
+start_silent.bat              — everyday launch without setup
 README.md                     — this guide
 icon.png / .ico               — app icons
 workflows_config.json        — your saved settings; created locally
