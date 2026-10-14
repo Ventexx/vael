@@ -775,11 +775,11 @@ def _natural_sort_key(path_str):
 THUMB_W = 106
 THUMB_H = 159
 
-_PIXMAP_CACHE: dict[str, QPixmap] = {}
+_PIXMAP_CACHE: dict[str, QImage] = {}
 
 
-def _load_pixmap(path: str) -> QPixmap:
-    """Return a cached thumbnail pixmap, or load+scale synchronously."""
+def _load_pixmap(path: str) -> QImage:
+    """Return a cached thumbnail image, safe to decode on a worker thread."""
     if Path(path).suffix.lower() not in IMAGES:
         return QImage()
     if path not in _PIXMAP_CACHE:
@@ -1370,7 +1370,8 @@ class ThumbnailCard(QWidget):
         super().paintEvent(event)
         selected = self.browser and self.filepath in self.browser._selected_file_paths
         media = Path(self.filepath).suffix.lower() in VIDEOS | {'.gif'}
-        if self._hovered or selected or media:
+        flagged = self.browser and self.filepath in self.browser.window.config['flags']
+        if self._hovered or selected or media or flagged:
             # Subtle white-grey, almost-transparent highlight outline so
             # it's clear which thumbnail is under the cursor.
             p = QPainter(self)
@@ -1384,7 +1385,7 @@ class ThumbnailCard(QWidget):
                 p.fillRect(QRect(6, THUMB_H - 23, THUMB_W - 12, 17), QColor(10, 10, 10, 190))
                 p.setPen(QColor('#b4b4b4'))
                 p.drawText(QRect(9, THUMB_H - 23, THUMB_W - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
-            if self.browser and self.filepath in self.browser.window.config['flags']:
+            if flagged:
                 p.setBrush(QColor('#00d4a0'))
                 p.setPen(Qt.NoPen)
                 p.drawEllipse(THUMB_W - 13, 7, 5, 5)
@@ -3070,6 +3071,7 @@ class CoverBrowser(ImageBrowser):
         self._details = False
         super().__init__(window)
         if not PIXMAP_WORKER.isRunning():
+            PIXMAP_WORKER._stop = False
             PIXMAP_WORKER.start()
         self.path = QLineEdit(self)
         self.path.hide()
@@ -3132,10 +3134,10 @@ class CoverBrowser(ImageBrowser):
         self.table.hide()
         self.reload_folder_btn.show()
         self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
-        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('F5', self.refresh)]:
+        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(callback)
+            shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
         if editable:
             for key, callback in [('Ctrl+X', lambda: window.copy_selection(self, True)), ('Ctrl+V', lambda: window.paste(self)), ('Delete', lambda: window.trash_selection(self)), ('F2', lambda: window.rename_selection(self)), ('F', lambda: window.toggle_flags(self)), ('Ctrl+Shift+N', lambda: window.new_folders(self)), ('Alt+Up', self.up)]:
                 shortcut = QShortcut(QKeySequence(key), self)
@@ -3174,9 +3176,11 @@ class CoverBrowser(ImageBrowser):
         self.empty_hint.hide() if enabled else self._update_empty_state()
         if enabled:
             self.filter_rows()
-        elif not self.active_filter():
+        else:
             self._filter_map = None
             self.reload_folders()
+            if self.active_filter():
+                self.filter_rows()
 
     def context_menu(self, view, point):
         self.action_menu(view.viewport().mapToGlobal(point))
@@ -3254,6 +3258,9 @@ class CoverBrowser(ImageBrowser):
             self.focus_path(path)
 
     def update_roots(self):
+        self._filter_serial += 1
+        if self._filter_task:
+            self._filter_task.cancel.set()
         self._filter_map = None
         self.reload_folders()
         if hasattr(self, 'search') and (self.active_filter() or self._details):
@@ -3274,6 +3281,10 @@ class CoverBrowser(ImageBrowser):
         if target and not target.is_dir():
             self.window.notice('This folder is unavailable.')
             return
+        self._filter_serial += 1
+        if self._filter_task:
+            self._filter_task.cancel.set()
+        self._filter_map = None
         self._location = target
         if target:
             self._saved_active_tab = str(target)
@@ -3283,6 +3294,8 @@ class CoverBrowser(ImageBrowser):
                 if section.path == str(target):
                     self.tabs.setCurrentIndex(index)
                     break
+        if self.active_filter() or self._details:
+            self.filter_rows()
 
     def selected_paths(self):
         if self._details:
@@ -3779,6 +3792,7 @@ class SettingsDialog(QDialog):
         header.setSpacing(4)
         toggle = QToolButton()
         toggle.setText(title)
+        toggle.setMinimumWidth(toggle.fontMetrics().horizontalAdvance(title) + 30)
         toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toggle.setArrowType(Qt.ArrowType.RightArrow)
         toggle.setCheckable(True)
@@ -5404,11 +5418,7 @@ class Window(QMainWindow):
         self.config['flags'] = sorted(flags)
         for item in self.browsers:
             item.filter_rows()
-            if isinstance(item, CoverBrowser):
-                item.repaint_content()
-            else:
-                item.grid.viewport().update()
-                item.table.viewport().update()
+            item.repaint_content()
         self.persist()
 
     def pin(self, browser):
@@ -5516,6 +5526,10 @@ class Window(QMainWindow):
         self.poll_timer.stop()
         self._img_viewer.close_viewer()
         for browser in self.browsers:
+            browser._closing = True
+            browser.filter_timer.stop()
+            if browser._filter_task:
+                browser._filter_task.cancel.set()
             browser.bulk_loader.cancel()
         PIXMAP_WORKER.stop()
         PIXMAP_WORKER.wait()
