@@ -482,6 +482,7 @@ def top_level_selection(paths):
 # ========================================================================
 import sys
 import math
+import queue
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -489,10 +490,10 @@ from datetime import datetime
 from PySide6.QtCore import (
     Qt, QObject, Signal, QRunnable, QThreadPool, QTimer, QUrl, QSize, QRect,
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QMimeData, QByteArray,
-    QFile, QIODevice, QPoint, QPointF, QRectF, QEvent,
+    QThread, QFile, QIODevice, QPoint, QPointF, QRectF, QEvent,
 )
 from PySide6.QtGui import (
-    QColor, QImageReader, QPixmap, QIcon, QPainter, QPen, QDrag, QKeySequence,
+    QColor, QImage, QImageReader, QPixmap, QIcon, QPainter, QPen, QDrag, QKeySequence,
     QAction, QDesktopServices, QMovie, QShortcut, QPalette, QPainterPath, QGuiApplication,
 )
 from PySide6.QtWidgets import (
@@ -1155,8 +1156,2224 @@ class Browser(QWidget):
 
 
 # ========================================================================
+# COVER EXPLORER COMPONENTS
+# ========================================================================
+RECURSION_DEPTH_WARN = 5
+FOLDER_COUNT_WARN = 20
+
+IMAGE_FILE_EXTENSIONS = (
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
+)
+
+import re as _re
+_NATSORT_SPLIT_RE = _re.compile(r"(\d+)")
+
+
+def _natural_sort_key(path_str):
+    """Case-insensitive filename ordering: symbols, numbers, then letters.
+
+    Numeric runs compare by value, so img2 appears before img10.
+    """
+    name = Path(path_str).name.casefold()
+    # Explicit character groups keep punctuation (including '_' and '[')
+    # ahead of digits, then letters; numeric runs still sort naturally.
+    return [(1, int(part)) if part.isdecimal() else
+            (2 if part.isalnum() else 0, part)
+            for part in _re.findall(r'\d+|[^\d]', name)]
+
+# 2:3 portrait thumbnail, identical crop-to-fill sizing to vael. indexer.
+THUMB_W = 106
+THUMB_H = 159
+
+_PIXMAP_CACHE: dict[str, QPixmap] = {}
+
+
+def _load_pixmap(path: str) -> QPixmap:
+    """Return a cached thumbnail pixmap, or load+scale synchronously."""
+    if Path(path).suffix.lower() not in IMAGES:
+        return QImage()
+    if path not in _PIXMAP_CACHE:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        size = reader.size()
+        if size.isValid():
+            size.scale(THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding)
+            reader.setScaledSize(size)
+        pix = reader.read()
+        if not pix.isNull():
+            scaled = pix.scaled(
+                THUMB_W, THUMB_H,
+                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
+            )
+            x = (scaled.width() - THUMB_W) // 2
+            y = (scaled.height() - THUMB_H) // 2
+            pix = scaled.copy(x, y, THUMB_W, THUMB_H)
+        _PIXMAP_CACHE[path] = pix
+    return _PIXMAP_CACHE[path]
+
+
+class PixmapWorker(QThread):
+    """Loads and scales thumbnail pixmaps off the main thread, one shared
+    long-lived instance for the whole app session (mirrors vael. indexer)."""
+
+    pixmap_ready = Signal(object, QImage)   # (card, pixmap)
+
+    def __init__(self):
+        super().__init__()
+        self._queue = queue.Queue()
+        self._stop = False
+
+    def submit(self, card, path):
+        self._queue.put((card, path))
+
+    def stop(self):
+        """Ask the loop to exit at its next queue-poll and wake it up
+        immediately with a no-op sentinel so shutdown doesn't wait out the
+        full poll timeout. Called from MainWindow.closeEvent."""
+        self._stop = True
+        self._queue.put((None, None))
+
+    def run(self):
+        while not self._stop:
+            try:
+                card, path = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if card is None:
+                    continue
+            except RuntimeError:
+                continue
+            try:
+                self.pixmap_ready.emit(card, _load_pixmap(path))
+            except (RuntimeError, OSError):
+                pass
+
+
+PIXMAP_WORKER = PixmapWorker()
+
+
+
+# ---------------------------------------------------------------------------
+# Rough-scan cache — a session-lifetime dict of folder_path -> (files,
+# subdirs), shared by every FolderSection. Normally a section fills its own
+# entry the moment it's expanded (see FolderSection.ensure_rough_pass). The
+# "Load Selected Folders" bulk path (BulkFolderLoadManager, below) walks
+# whole trees ahead of time and fills this cache for every folder it visits
+# — together with pre-decoding every thumbnail into _PIXMAP_CACHE — so that
+# actually expanding any of those folders afterwards is instant: no rescan,
+# no per-thumbnail decode wait, because everything is already warm.
+# ---------------------------------------------------------------------------
+_ROUGH_SCAN_CACHE: dict[str, tuple[list, list]] = {}
+
+# Bulk loading uses its own small, bounded thread pools, kept separate from
+# ImageBrowser.thread_pool (used for single-folder interactive expand/scan)
+# so that a huge "Load Selected Folders" run can't starve or stall ordinary
+# click-to-expand browsing while it works through the backlog. One pool
+# walks directories (I/O bound, cheap), the other decodes+scales images
+# (CPU/I-O bound, the expensive part) — both capped at a small thread count
+# so a "giant total amount of images" run degrades to "takes a while in the
+# background" instead of spawning thousands of concurrent threads.
+_BULK_SCAN_POOL = QThreadPool()
+_BULK_SCAN_POOL.setMaxThreadCount(4)
+
+_BULK_PIXMAP_POOL = QThreadPool()
+_BULK_PIXMAP_POOL.setMaxThreadCount(max(2, min(6, os.cpu_count() or 4)))
+
+# Images per background decode task. Batching (rather than one QRunnable per
+# file) keeps task-scheduling overhead sane when a bulk load touches tens of
+# thousands of images.
+BULK_PRELOAD_CHUNK = 40
+# Purely advisory (same spirit as FOLDER_COUNT_WARN / RECURSION_DEPTH_WARN
+# above) — crossing this never stops or slows anything down, it just adds a
+# note to the status line so the user understands why decoding is still
+# trickling in after the folder scan itself has finished.
+BULK_IMAGE_COUNT_WARN = 3000
+
+
+class _BulkScanSignals(QObject):
+    folder_ready = Signal(str, list, list)   # folder_path, files, subdirs
+    error = Signal(str, str)                 # folder_path, message
+    branch_done = Signal()                   # this root's whole subtree is exhausted
+
+
+class _BulkScanWorker(QRunnable):
+    """Recursively walks one selected folder's entire tree off the UI
+    thread. Streams a folder_ready signal for every folder it visits (the
+    root first, then every descendant, depth-first) so each one's result
+    can be cached / absorbed by its FolderSection the moment it's ready,
+    rather than waiting for the whole tree to finish."""
+
+    def __init__(self, root_path, ignore_patterns, cancel_flag):
+        super().__init__()
+        self.root_path = root_path
+        self.ignore_patterns = list(ignore_patterns)
+        self.cancel_flag = cancel_flag
+        self.signals = _BulkScanSignals()
+
+    def run(self):
+        try:
+            self._walk(self.root_path)
+        finally:
+            self.signals.branch_done.emit()
+
+    def _walk(self, path):
+        if self.cancel_flag.is_set():
+            return
+        files, subdirs = [], []
+        try:
+            if any(is_link(p) for p in [Path(path), *Path(path).parents]):
+                raise OSError('Linked folders are not followed')
+            with os.scandir(path) as it:
+                for entry in it:
+                    if self.cancel_flag.is_set():
+                        return
+                    name = entry.name
+                    try:
+                        if is_link(Path(entry.path)) or _folder_is_ignored(name, self.ignore_patterns):
+                            continue
+                        if entry.is_dir():
+                            if not _folder_is_ignored(name, self.ignore_patterns):
+                                subdirs.append(entry.path)
+                        elif entry.is_file():
+                            files.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError as e:
+            self.signals.error.emit(path, str(e))
+            return
+        files.sort(key=_natural_sort_key)
+        subdirs.sort(key=_natural_sort_key)
+        self.signals.folder_ready.emit(path, files, subdirs)
+        for sub_path in subdirs:
+            self._walk(sub_path)
+
+
+class _BulkPixmapSignals(QObject):
+    chunk_done = Signal(int)   # number of images processed in this chunk
+
+
+class _BulkPixmapPreloadWorker(QRunnable):
+    """Decodes+scales a batch of thumbnails straight into _PIXMAP_CACHE, on
+    one of _BULK_PIXMAP_POOL's threads. Cheap no-op for anything already
+    cached (e.g. a thumbnail the user already scrolled past normally)."""
+
+    def __init__(self, filepaths, cancel_flag):
+        super().__init__()
+        self.filepaths = filepaths
+        self.cancel_flag = cancel_flag
+        self.signals = _BulkPixmapSignals()
+
+    def run(self):
+        done = 0
+        for path in self.filepaths:
+            if self.cancel_flag.is_set():
+                break
+            if path not in _PIXMAP_CACHE:
+                try:
+                    _load_pixmap(path)
+                except Exception:
+                    pass
+            done += 1
+        self.signals.chunk_done.emit(done)
+
+
+class BulkFolderLoadManager(QObject):
+    """Backs the "Load Selected Folders" context-menu action: recursively
+    scans every selected folder tree and pre-decodes every thumbnail found
+    in it, entirely off the UI thread, via the two bounded pools above.
+    Once it's done (or even while it's still running), expanding any folder
+    it touched is instant instead of triggering a fresh scan + per-image
+    decode queue. Handles being pointed at a large number of folders and/or
+    a huge total image count by streaming results through the pools in
+    small batches rather than blocking on the whole thing at once, and
+    supports folding a second selection into an already-running load
+    instead of starting a competing one."""
+
+    statusChanged = Signal(int, int, str)   # files_preloaded, files_queued, detail_text
+    started = Signal()
+    finished = Signal()
+
+    def __init__(self, browser):
+        super().__init__()
+        self.browser = browser
+        self.active = False
+        self._cancel_flag = threading.Event()
+        self._pending_branches = 0
+        self._roots = []
+        self._folders_seen = 0
+        self._files_seen = 0
+        self._files_queued = 0
+        self._files_preloaded = 0
+
+    def start(self, root_paths):
+        new_roots = [p for p in root_paths if p not in self._roots]
+        if self.active:
+            # Already running — fold the newly-requested roots into this
+            # run instead of starting a second, overlapping one.
+            self._roots.extend(new_roots)
+            for p in new_roots:
+                self._start_branch(p)
+            return
+        self.active = True
+        self._cancel_flag = threading.Event()
+        self._pending_branches = 0
+        self._roots = list(root_paths)
+        self._folders_seen = 0
+        self._files_seen = 0
+        self._files_queued = 0
+        self._files_preloaded = 0
+        self.started.emit()
+        for p in self._roots:
+            self._start_branch(p)
+        self._emit_status()
+
+    def cancel(self):
+        self._cancel_flag.set()
+        if self.active:
+            # Don't wait for every in-flight worker to notice the flag and
+            # report back (a straggling chunk that was interrupted
+            # mid-batch would otherwise never bring _files_preloaded up to
+            # _files_queued, leaving _maybe_finish() waiting forever) —
+            # cancelling means "stop now" from the UI's point of view.
+            self.active = False
+            self.finished.emit()
+            self.statusChanged.emit(
+                self._files_preloaded, self._files_queued,
+                f"Load canceled \u2014 {self._folders_seen} folder(s) scanned,\n"
+                f"{self._files_seen} image(s) found are still cached."
+            )
+
+    def _start_branch(self, root_path):
+        self._pending_branches += 1
+        worker = _BulkScanWorker(root_path, self.browser.ignore_folder_patterns(), self._cancel_flag)
+        worker.signals.folder_ready.connect(self._on_folder_ready)
+        worker.signals.error.connect(self._on_scan_error)
+        worker.signals.branch_done.connect(self._on_branch_done)
+        _BULK_SCAN_POOL.start(worker)
+
+    def _on_folder_ready(self, path, files, subdirs):
+        if self._cancel_flag.is_set():
+            return
+        _ROUGH_SCAN_CACHE[path] = (files, subdirs)
+        self._folders_seen += 1
+        self._files_seen += len(files)
+        # If a FolderSection already exists for this path (e.g. the user
+        # had it partway expanded before triggering the bulk load), feed it
+        # the fresh result right away instead of leaving it stale.
+        section = self.browser.section_for_path(path)
+        if section is not None:
+            section.absorb_bulk_scan(files, subdirs)
+        if files:
+            self._files_queued += len(files)
+            for i in range(0, len(files), BULK_PRELOAD_CHUNK):
+                chunk = files[i:i + BULK_PRELOAD_CHUNK]
+                worker = _BulkPixmapPreloadWorker(chunk, self._cancel_flag)
+                worker.signals.chunk_done.connect(self._on_chunk_done)
+                _BULK_PIXMAP_POOL.start(worker)
+        self._emit_status()
+
+    def _on_scan_error(self, path, message):
+        if self._cancel_flag.is_set():
+            return
+        self._emit_status()
+
+    def _on_chunk_done(self, n):
+        if self._cancel_flag.is_set():
+            return
+        self._files_preloaded += n
+        self._maybe_finish()
+        self._emit_status()
+
+    def _on_branch_done(self):
+        if self._cancel_flag.is_set():
+            return
+        self._pending_branches -= 1
+        self._maybe_finish()
+        self._emit_status()
+
+    def _maybe_finish(self):
+        if not self.active:
+            return
+        scanning_done = self._pending_branches <= 0
+        preloading_done = self._files_preloaded >= self._files_queued
+        if scanning_done and preloading_done:
+            self.active = False
+            self.finished.emit()
+
+    def _emit_status(self):
+        scanning_done = self._pending_branches <= 0 and bool(self._roots)
+        fully_done = scanning_done and self._files_preloaded >= self._files_queued
+        if fully_done:
+            self.statusChanged.emit(
+                self._files_preloaded, self._files_queued,
+                f"Loaded {self._folders_seen} folder(s), {self._files_seen} image(s)\n"
+                f"across {len(self._roots)} selected folder(s)."
+            )
+            return
+        warn = ""
+        if self._files_seen > BULK_IMAGE_COUNT_WARN:
+            warn = "\nLarge batch \u2014 thumbnails keep loading in the background."
+        self.statusChanged.emit(
+            self._files_preloaded, self._files_queued,
+            f"Loading selected folders\u2026\n"
+            f"{self._folders_seen} folder(s) scanned, {self._files_seen} image(s) found{warn}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Folder scanning (still needed here, unlike indexer, since this app has no
+# pre-built database of images — it walks the filesystem live). A single
+# pass now always recurses into every subfolder (the "recursive" per-folder
+# flag has been removed: everything configured in Settings is always fully
+# recursive), skipping only folders that match a configured ignore pattern.
+# ---------------------------------------------------------------------------
+class _ScanSignals(QObject):
+    done = Signal(str, list, list)   # section_path, files, subdirs
+    failed = Signal(str, str)        # section_path, message
+
+
+def _folder_is_ignored(name, ignore_patterns):
+    return name.startswith('.sorter-') or any(fnmatch.fnmatch(name.casefold(), rule.casefold()) for rule in ignore_patterns)
+
+
+class _RoughScanWorker(QRunnable):
+    """Rough pass: list image filenames + immediate subfolders for one
+    folder section. Fast — no image decoding at all. Always recurses (every
+    subfolder is reported, to be turned into its own nested section) except
+    folders matching a configured ignore pattern."""
+
+    def __init__(self, section_path, ignore_patterns):
+        super().__init__()
+        self.section_path = section_path
+        self.ignore_patterns = list(ignore_patterns)
+        self.signals = _ScanSignals()
+
+    def run(self):
+        files, subdirs = [], []
+        try:
+            if any(is_link(p) for p in [Path(self.section_path), *Path(self.section_path).parents]):
+                raise OSError('Linked folders are not followed')
+            with os.scandir(self.section_path) as it:
+                for entry in it:
+                    name = entry.name
+                    try:
+                        if is_link(Path(entry.path)) or _folder_is_ignored(name, self.ignore_patterns):
+                            continue
+                        if entry.is_dir():
+                            if not _folder_is_ignored(name, self.ignore_patterns):
+                                subdirs.append(entry.path)
+                        elif entry.is_file():
+                            files.append(entry.path)
+                    except OSError:
+                        continue
+        except FileNotFoundError:
+            self.signals.failed.emit(self.section_path, "not_found")
+            return
+        except PermissionError:
+            self.signals.failed.emit(self.section_path, "permission_denied")
+            return
+        except OSError as e:
+            self.signals.failed.emit(self.section_path, f"error:{e}")
+            return
+        files.sort(key=_natural_sort_key)
+        subdirs.sort(key=_natural_sort_key)
+        self.signals.done.emit(self.section_path, files, subdirs)
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail card — ported one-to-one from vael. indexer's ThumbnailCard:
+# image only (no filename caption), a faint neutral border on hover and
+# nothing more, and a drag source so a card can be dragged straight onto a
+# roster icon below (or anywhere else that accepts a file URL drop).
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# QScrollArea with middle-mouse-drag autopan, ported from vael. indexer's
+# ResultsPanel: press the middle button anywhere in the viewport and drag
+# up/down to scroll, exactly like indexer's image browser.
+# ---------------------------------------------------------------------------
+class _AutopanScrollArea(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._autopan_active = False
+        self._autopan_origin = QPoint()
+        self._autopan_timer = QTimer(self)
+        self._autopan_timer.setInterval(16)  # ~60 fps
+        self._autopan_timer.timeout.connect(self._autopan_tick)
+        self.viewport().setMouseTracking(True)
+        self.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.viewport():
+            t = event.type()
+            if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MiddleButton:
+                self._autopan_active = True
+                self._autopan_origin = event.position().toPoint()
+                self.viewport().setCursor(Qt.CursorShape.SizeVerCursor)
+                self._autopan_timer.start()
+                return True
+            if t == QEvent.Type.MouseButtonRelease and event.button() == Qt.MiddleButton:
+                self._stop_autopan()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _autopan_tick(self):
+        if not self._autopan_active:
+            return
+        cursor_pos = self.viewport().mapFromGlobal(self.viewport().cursor().pos())
+        delta_y = cursor_pos.y() - self._autopan_origin.y()
+        if abs(delta_y) < 8:
+            return
+        speed = int((delta_y - (8 if delta_y > 0 else -8)) * 0.4)
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.value() + speed)
+
+    def _stop_autopan(self):
+        self._autopan_active = False
+        self._autopan_timer.stop()
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+
+
+class ThumbnailCard(QWidget):
+    view_requested = Signal(object)   # emits self on a plain left-click (no drag)
+    # Right-click ("open context menu on an image") -- emits self plus the
+    # global cursor position so the caller (FolderSection) can build and
+    # show a menu listing every available roster/image input.
+    context_menu_requested = Signal(object, QPoint)
+
+    CARD_W = THUMB_W
+    CARD_H = THUMB_H
+
+    def __init__(self, filepath, parent=None):
+        super().__init__(parent)
+        self.filepath = filepath
+        self.setFixedSize(self.CARD_W, self.CARD_H)
+        self.setCursor(Qt.PointingHandCursor)
+        self._hovered = False
+        self._drag_start_pos = None
+        self._image_loaded = False
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self._img_lbl = QLabel()
+        self._img_lbl.setObjectName("cardImage")
+        self._img_lbl.setFixedSize(THUMB_W, THUMB_H)
+        self._img_lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._img_lbl)
+
+        self.browser = None
+        self.setToolTip(str(filepath))
+        PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
+
+    def request_image(self):
+        """Called by FolderSection once the section is expanded. No-op if
+        this card's image is already loaded/loading."""
+        if self._image_loaded:
+            return
+        extension = Path(self.filepath).suffix.lower()
+        if extension not in IMAGES:
+            symbol = QStyle.SP_MediaPlay if extension in VIDEOS or extension == '.gif' else QStyle.SP_FileIcon
+            self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(28, 28))
+            self._image_loaded = True
+            return
+        if self.filepath in _PIXMAP_CACHE:
+            self._apply_pixmap(_PIXMAP_CACHE[self.filepath])
+        else:
+            PIXMAP_WORKER.submit(self, self.filepath)
+
+    def _on_pixmap_ready(self, card, pix):
+        if card is not self:
+            return
+        self._apply_pixmap(pix)
+        try:
+            PIXMAP_WORKER.pixmap_ready.disconnect(self._on_pixmap_ready)
+        except RuntimeError:
+            pass
+
+    def _apply_pixmap(self, pix):
+        if isinstance(pix, QImage):
+            pix = QPixmap.fromImage(pix)
+        self._image_loaded = True
+        if not pix.isNull():
+            rounded = QPixmap(THUMB_W, THUMB_H)
+            rounded.fill(Qt.GlobalColor.transparent)
+            p = QPainter(rounded)
+            p.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addRoundedRect(0, 0, THUMB_W, THUMB_H, 7, 7)
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, pix)
+            p.end()
+            self._img_lbl.setPixmap(rounded)
+        else:
+            self._img_lbl.setText("?")
+
+    # -- click / drag (mirrors indexer's card interactions) ---------------
+    # NOTE: every one of these handlers explicitly accept()s left-button
+    # events instead of falling through to QWidget's default implementation.
+    # QWidget's base mouse handlers ignore() unhandled events so they can
+    # bubble up to the parent -- which is exactly right for e.g. middle-
+    # button autopan (see _AutopanScrollArea), but wrong here: this card
+    # lives inside a FolderSection body, which itself lives inside a
+    # _RubberBandArea (see ImageBrowser.reload_folders / FolderSection).
+    # If a left-click on a thumbnail were left unaccepted, Qt would hand it
+    # up to that ancestor's mousePressEvent, which grabs the mouse and
+    # starts an Explorer-style folder rubber-band selection -- silently
+    # stealing every subsequent move/release from this card and making it
+    # impossible to drag an image out. Accepting the event here keeps the
+    # whole press/move/release gesture on the card, where it belongs.
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos is not None and (event.buttons() & Qt.LeftButton):
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._drag_start_pos = None
+                self._start_drag()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
+            self._drag_start_pos = None
+            if self.browser and event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+                self.browser.select_card(self, event.modifiers())
+            else:
+                self.view_requested.emit(self)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        mime = QMimeData()
+        paths = self.browser.drag_paths(self) if self.browser else [self.filepath]
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        mime.setData('application/x-vael-sorter', QByteArray(b'1'))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pix = QPixmap.fromImage(_load_pixmap(self.filepath))
+        if not pix.isNull():
+            drag.setPixmap(pix.scaled(THUMB_W // 2, THUMB_H // 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        drag.exec(Qt.CopyAction)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def contextMenuEvent(self, event):
+        self.context_menu_requested.emit(self, event.globalPos())
+        event.accept()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        selected = self.browser and self.filepath in self.browser._selected_file_paths
+        media = Path(self.filepath).suffix.lower() in VIDEOS | {'.gif'}
+        if self._hovered or selected or media:
+            # Subtle white-grey, almost-transparent highlight outline so
+            # it's clear which thumbnail is under the cursor.
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor('#00d4a0') if selected else QColor(103, 139, 169, 110) if media else QColor(235, 235, 240, 90))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(1, 1, THUMB_W - 2, THUMB_H - 2, 7, 7)
+            if self._hovered and media:
+                p.fillRect(QRect(6, THUMB_H - 23, THUMB_W - 12, 17), QColor(10, 10, 10, 190))
+                p.setPen(QColor('#b4b4b4'))
+                p.drawText(QRect(9, THUMB_H - 23, THUMB_W - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
+            if self.browser and self.filepath in self.browser.window.config['flags']:
+                p.setBrush(QColor('#00d4a0'))
+                p.setPen(Qt.NoPen)
+                p.drawEllipse(THUMB_W - 13, 7, 5, 5)
+            p.end()
+
+
+class _InertMouseArea(QWidget):
+    """A plain container that deliberately swallows left-button mouse
+    presses/moves/releases on its own blank space instead of letting them
+    bubble up to an ancestor _RubberBandArea. Used for the thumbnail card
+    grid of an *open* folder: without this, an unhandled click on the
+    gaps between thumbnails would propagate to the folder header's rubber
+    -band area and start a folder-selection drag, exactly the same failure
+    mode a plain ThumbnailCard press would otherwise hit (see
+    ThumbnailCard's mouse handlers). Right/middle clicks and anything that
+    isn't a plain left-button press still pass through untouched, so
+    middle-button autopan (see _AutopanScrollArea) keeps working."""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# One folder header, or (nested under it) one recursive sub-header — design
+# ported one-to-one from vael. indexer's FolderSection: a flat QToolButton
+# header with an arrow indicator, indent-by-depth, and a QGridLayout card
+# grid that reflows its column count to the available width. Unlike
+# indexer, this app has no pre-built index, so contents are still scanned
+# lazily off the UI thread the first time a section is expanded — but every
+# folder is now always fully recursive, and a top-level (depth 0) section
+# auto-expands itself the moment its scan completes, since folders
+# configured in Settings are guaranteed to hold only more folders, never
+# images directly, so there's no reason to make the user click twice just
+# to see the first level of real subfolders.
+# ---------------------------------------------------------------------------
+class _RubberBandArea(QWidget):
+    """A plain container that starts a Windows-Explorer-style click-and-
+    drag rectangle selection of folder headers when the drag begins on
+    blank space inside it — i.e. not on a header button or a thumbnail
+    card, both of which are child widgets that intercept the press first,
+    exactly like clicking directly on a desktop icon doesn't start a
+    rubber band in Explorer either. Used for every "background" area
+    inside a browser tab that a drag might reasonably start from: the
+    header row's empty stretch, the space below the last subfolder, and
+    the top-level tab wrapper itself.
+
+    No visual selection rectangle is drawn — as the drag crosses a folder
+    header it's highlighted directly (via ImageBrowser.set_folder_selection
+    / FolderSection.set_selected), which reads clearer than a rectangle
+    that's mostly just passing over irrelevant blank space anyway."""
+
+    def __init__(self, browser, parent=None):
+        super().__init__(parent)
+        self._browser = browser
+        self._dragging = False
+        self._origin_content = None
+        self._pointer_global = None
+        self._selection_scroll = None
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(16)
+        self._edge_timer.timeout.connect(self._edge_scroll_tick)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            scroll = self._browser.tabs.currentWidget()
+            if not isinstance(scroll, QScrollArea) or not scroll.isAncestorOf(self):
+                super().mousePressEvent(event)
+                return
+            self._selection_scroll = scroll
+            self._pointer_global = event.globalPosition().toPoint()
+            # Anchor in content coordinates so scrolling never moves the start
+            # of the selection relative to its original folder.
+            self._origin_content = scroll.widget().mapFromGlobal(self._pointer_global)
+            additive = bool(event.modifiers() & Qt.ControlModifier)
+            self._browser.begin_rubber_band_drag(additive)
+            self._dragging = True
+            self.grabMouse()
+            self._edge_timer.start()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _update_drag_selection(self):
+        origin = self._selection_scroll.widget().mapToGlobal(self._origin_content)
+        self._browser.update_rubber_band_drag(QRect(origin, self._pointer_global).normalized())
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self._pointer_global = event.globalPosition().toPoint()
+            self._update_drag_selection()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def _edge_scroll_tick(self):
+        if not self._dragging:
+            return
+        if (not QApplication.mouseButtons() & Qt.LeftButton
+                or not self.isVisible()
+                or self._browser.tabs.currentWidget() is not self._selection_scroll):
+            self._finish_drag()
+            return
+        viewport = self._selection_scroll.viewport()
+        point = viewport.mapFromGlobal(self._pointer_global)
+        # Scroll only at the top/bottom, not when dragging into a sidebar.
+        if not 0 <= point.x() < viewport.width():
+            return
+        edge = min(48, max(1, viewport.height() // 4))
+        distance = 0
+        if point.y() < edge:
+            distance = point.y() - edge
+        elif point.y() >= viewport.height() - edge:
+            distance = point.y() - (viewport.height() - edge) + 1
+        if distance:
+            speed = max(1, min(24, abs(distance) // 2))
+            bar = self._selection_scroll.verticalScrollBar()
+            bar.setValue(bar.value() + (speed if distance > 0 else -speed))
+        # Update even with a stationary mouse, including after wheel scrolling.
+        self._update_drag_selection()
+
+    def _finish_drag(self):
+        if not getattr(self, "_dragging", False):
+            return
+        self._dragging = False
+        self._edge_timer.stop()
+        self.releaseMouse()
+        self._selection_scroll = None
+        self._browser.end_rubber_band_drag()
+
+    def event(self, event):
+        if event.type() in (QEvent.UngrabMouse, QEvent.Hide, QEvent.WindowDeactivate):
+            self._finish_drag()
+        return super().event(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging and event.button() == Qt.LeftButton:
+            self._pointer_global = event.globalPosition().toPoint()
+            self._update_drag_selection()
+            self._finish_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class FolderSection(QWidget):
+    def __init__(self, browser, path, depth=0, closable=False):
+        super().__init__()
+        self.browser = browser
+        self.path = path
+        self.depth = depth
+        self.closable = closable
+        self.setObjectName("folderSection")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._expanded = False
+        self._rough_done = False
+        self._rough_started = False
+        self._materialized = False
+        self._files = []
+        self._pending_subdirs = []
+        self._cards = []
+        self._child_sections = []
+        self._current_cols = 0
+        self._selected = False
+        # Set to the FolderSection that created this one as a child (see
+        # _materialize); stays None for depth-0 (tab-root) sections. Lets
+        # Ctrl+Up/Down walk siblings under the same parent only.
+        self.parent_section = None
+
+        browser.register_section(self)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # _RubberBandArea (not plain QWidget) so a click-drag that starts on
+        # the blank space beside the folder name can kick off a Windows-
+        # style rectangle multi-select of folder headers (see
+        # ImageBrowser.begin_rubber_band_drag and friends).
+        header_wrap = _RubberBandArea(browser)
+        header_wrap.setObjectName("sectionHeaderWrap")
+        header_wrap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        indent = depth * 14
+        hw_lay = QHBoxLayout(header_wrap)
+        hw_lay.setContentsMargins(indent, 0, 0, 0)
+        hw_lay.setSpacing(4)
+
+        is_deep = depth > RECURSION_DEPTH_WARN
+        name_text = Path(path).name or path
+
+        self.header = QToolButton()
+        self.header.setObjectName("sectionHeader")
+        self.header.setProperty("depth0", "true" if depth == 0 else "false")
+        if is_deep:
+            self.header.setProperty("deep", True)
+        self.header.setArrowType(Qt.ArrowType.RightArrow)
+        self.header.setText(name_text + (" \u26a0" if is_deep else ""))
+        self.header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.header.setFixedHeight(26 if depth == 0 else 22)
+        self.header.setCursor(Qt.PointingHandCursor)
+        # Let right-clicks fall through to FolderSection.contextMenuEvent
+        # (below) instead of the button/wrap trying to handle them.
+        self.header.setContextMenuPolicy(Qt.NoContextMenu)
+        header_wrap.setContextMenuPolicy(Qt.NoContextMenu)
+        tooltip = path
+        if is_deep:
+            tooltip += (
+                f"\n\u26a0 Nested {depth} levels deep \u2014 past the recommended "
+                f"{RECURSION_DEPTH_WARN}-level guideline. Still fully functional, "
+                f"just flagged for awareness."
+            )
+        tooltip += (
+            "\n\nCtrl+click to multi-select, or drag a rectangle over several "
+            "folders, then right-click for \u201cLoad Selected Folders\u201d."
+        )
+        self.header.setToolTip(tooltip)
+        self.header.clicked.connect(self._on_header_clicked)
+        hw_lay.addWidget(self.header, 0)
+
+        self.count_lbl = QLabel("")
+        self.count_lbl.setObjectName("headerCount")
+        hw_lay.addWidget(self.count_lbl, 0)
+        hw_lay.addStretch(1)
+
+        if closable:
+            close_btn = QToolButton()
+            close_btn.setObjectName("iconButton")
+            close_btn.setText("\u00d7")
+            close_btn.setToolTip("Hide for this session (not removed from Settings)")
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.clicked.connect(self._close_for_session)
+            hw_lay.addWidget(close_btn)
+
+        outer.addWidget(header_wrap)
+
+        self.body = QWidget()
+        self.body.setObjectName("sectionBody")
+        self.body.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        body_lay = QVBoxLayout(self.body)
+        body_lay.setContentsMargins(indent + 8, 4, 4, 6)
+        body_lay.setSpacing(6)
+
+        # _InertMouseArea (not plain QWidget, not _RubberBandArea) — this
+        # holds the actual thumbnail cards of an *open* folder. When a
+        # folder is open the user's blank-space click-drag here is
+        # virtually always an attempt to grab an image and drag it down to
+        # the input roster, not to rubber-band-select folder headers, so
+        # this area deliberately doesn't participate in folder selection at
+        # all: presses on blank space here are swallowed and do nothing,
+        # rather than bubbling up to the header's rubber-band area, leaving
+        # ThumbnailCard's own drag handling untouched.
+        self.card_widget = _InertMouseArea()
+        self.card_widget.setObjectName("cardGrid")
+        self.card_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.card_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.card_grid = QGridLayout(self.card_widget)
+        self.card_grid.setContentsMargins(0, 0, 0, 0)
+        self.card_grid.setSpacing(6)
+        self.card_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        body_lay.addWidget(self.card_widget)
+
+        self.children_container = _RubberBandArea(browser)
+        self.children_lay = QVBoxLayout(self.children_container)
+        self.children_lay.setContentsMargins(0, 0, 0, 0)
+        self.children_lay.setSpacing(4)
+        body_lay.addWidget(self.children_container)
+
+        outer.addWidget(self.body)
+        self.body.setVisible(False)
+
+    def _close_for_session(self):
+        self.browser.close_tab_for_session(self.path)
+
+    # -- multi-select (ctrl+click / rubber-band drag) -----------------------
+    def _on_header_clicked(self):
+        if QApplication.keyboardModifiers() & Qt.ControlModifier:
+            self.browser.toggle_folder_selection(self.path)
+        else:
+            if self.browser.has_folder_selection():
+                self.browser.clear_folder_selection()
+            self.toggle()
+
+    def set_selected(self, selected):
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self.header.setProperty("selected", "true" if selected else "false")
+        self.header.style().unpolish(self.header)
+        self.header.style().polish(self.header)
+
+    def contextMenuEvent(self, event):
+        # Mirrors Explorer: right-clicking a folder that's already part of
+        # the current multi-selection keeps the whole selection; right-
+        # clicking one that isn't selected replaces the selection with just
+        # that folder.
+        if self.path not in self.browser.selected_folder_paths():
+            self.browser.clear_folder_selection()
+            self.browser.toggle_folder_selection(self.path)
+        self.browser.show_folder_context_menu(self, event.globalPos())
+        event.accept()
+
+    def _on_card_view_requested(self, card):
+        self.browser.open_card(card, self._cards)
+
+    def _on_card_context_menu(self, card, global_pos):
+        self.browser.card_menu(card, global_pos)
+
+    # -- expand / collapse -------------------------------------------------
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded, persist=True):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self.header.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.header.setProperty("expanded", "true" if expanded else "false")
+        self.header.style().unpolish(self.header)
+        self.header.style().polish(self.header)
+        self.body.setVisible(expanded)
+        if expanded:
+            if not self._rough_done:
+                self.ensure_rough_pass()
+            else:
+                if not self._materialized:
+                    # A bulk "Load Selected Folders" run already scanned
+                    # this folder while it was still collapsed (see
+                    # absorb_bulk_scan) but deliberately held off building
+                    # the actual card/child widgets until it's really
+                    # needed — do that now that the user is opening it.
+                    self._materialize()
+                if self._cards:
+                    self._current_cols = 0
+                    QTimer.singleShot(0, self._relayout_cards)
+                    for card in self._cards:
+                        card.request_image()
+        if persist:
+            self.browser.note_expanded(self.path, expanded)
+        if expanded and persist:
+            # Universal "focus this folder" behavior: applies the same
+            # whether it was opened by a mouse click (toggle() -> here with
+            # persist=True) or by the Ctrl+Up/Down hotkeys (which also call
+            # set_expanded(True) directly) -- but not to the programmatic
+            # persist=False restores done on tab load/reload.
+            self.browser.focus_folder_section(self)
+
+    def is_expanded(self):
+        return self._expanded
+
+    # -- lazy scanning ------------------------------------------------------
+    def ensure_rough_pass(self):
+        if self._rough_done or self._rough_started:
+            return
+        # A bulk load (or an earlier visit) may already have scanned this
+        # exact folder — reuse that instead of scanning it all over again,
+        # which is the whole point of "Load Selected Folders": expanding a
+        # folder it already touched should feel instant.
+        cached = _ROUGH_SCAN_CACHE.get(self.path)
+        if cached is not None:
+            self._on_rough_done(self.path, cached[0], cached[1])
+            return
+        self._rough_started = True
+        self.count_lbl.setText("\u2026")
+        self._set_count_state("normal")
+        worker = _RoughScanWorker(self.path, self.browser.ignore_folder_patterns())
+        worker.signals.done.connect(self._on_rough_done)
+        worker.signals.failed.connect(self._on_rough_failed)
+        self.browser.thread_pool.start(worker)
+
+    def _on_rough_failed(self, path, message):
+        if path != self.path:
+            return
+        self._rough_started = False
+        labels = {
+            "not_found": "(folder not found)",
+            "permission_denied": "(permission denied)",
+        }
+        self.count_lbl.setText(labels.get(message, "(unreadable)"))
+        self._set_count_state("error")
+
+    def _set_count_state(self, state):
+        self.count_lbl.setProperty("state", state)
+        self.count_lbl.style().unpolish(self.count_lbl)
+        self.count_lbl.style().polish(self.count_lbl)
+
+    def _on_rough_done(self, path, files, subdirs):
+        if path != self.path:
+            return
+        self._rough_done = True
+        self._files = files
+        self._pending_subdirs = subdirs
+        _ROUGH_SCAN_CACHE[path] = (files, subdirs)
+        self.count_lbl.setText(f"({len(files)})" if (files or subdirs) else "(empty)")
+        self._set_count_state("normal" if (files or subdirs) else "muted")
+        self._materialize()
+
+        # A top-level folder is guaranteed (by convention — see Settings)
+        # to hold only more folders, not images. Auto-expand it the moment
+        # its scan finishes so the user lands straight on the first level
+        # of real subfolders instead of clicking once just to reveal them.
+        if self.depth == 0 and not self._expanded:
+            self.set_expanded(True, persist=False)
+        elif self._expanded and self._cards:
+            self._current_cols = 0
+            QTimer.singleShot(0, self._relayout_cards)
+            for card in self._cards:
+                card.request_image()
+
+    def absorb_bulk_scan(self, files, subdirs):
+        """Called by BulkFolderLoadManager when a background 'Load Selected
+        Folders' scan reaches this exact folder. Unlike the interactive
+        ensure_rough_pass()/_on_rough_done() path, this deliberately does
+        NOT build ThumbnailCard/child-FolderSection widgets while the
+        section is collapsed — a bulk load can touch thousands of folders
+        at once, and eagerly materializing every one of them would dump an
+        enormous widget tree on the UI thread. The header count still
+        updates immediately; the rest is built lazily in set_expanded()
+        the moment the user actually opens it, by which point the scan
+        result and every thumbnail in it are already cached."""
+        if self._rough_done:
+            return  # already scanned interactively — don't duplicate it
+        self._rough_done = True
+        self._files = files
+        self._pending_subdirs = subdirs
+        self.count_lbl.setText(f"({len(files)})" if (files or subdirs) else "(empty)")
+        self._set_count_state("normal" if (files or subdirs) else "muted")
+        if self._expanded:
+            # Rare (would mean the user opened it mid-bulk-load), but if it
+            # really is visible right now, build it out immediately.
+            self._materialize()
+            self._current_cols = 0
+            QTimer.singleShot(0, self._relayout_cards)
+            for card in self._cards:
+                card.request_image()
+        elif self.depth == 0:
+            self.set_expanded(True, persist=False)
+
+    def _materialize(self):
+        """Turn a completed (possibly cached) scan result into actual
+        ThumbnailCard / child-FolderSection widgets. Idempotent."""
+        if self._materialized:
+            return
+        self._materialized = True
+        for filepath in self._files:
+            card = ThumbnailCard(filepath)
+            card.browser = self.browser
+            card.view_requested.connect(self._on_card_view_requested)
+            card.context_menu_requested.connect(self._on_card_context_menu)
+            i = len(self._cards)
+            self._cards.append(card)
+            self.card_grid.addWidget(card, i // 4, i % 4)
+
+        for sub_path in self._pending_subdirs:
+            child = FolderSection(self.browser, sub_path, depth=self.depth + 1)
+            child.parent_section = self
+            self.children_lay.addWidget(child)
+            self._child_sections.append(child)
+            if sub_path in self.browser.saved_expanded_paths:
+                child.set_expanded(True, persist=False)
+        self._pending_subdirs = []
+
+    # -- reflow (ported from indexer's _relayout_cards) --------------------
+    def _relayout_cards(self):
+        avail_w = self.card_widget.width()
+        if avail_w < THUMB_W:
+            return
+        cols = max(1, avail_w // (THUMB_W + 6))
+        if cols == self._current_cols:
+            return
+        self._current_cols = cols
+        while self.card_grid.count():
+            self.card_grid.takeAt(0)
+        for i, card in enumerate(self._cards):
+            self.card_grid.addWidget(card, i // cols, i % cols)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._expanded and self._cards:
+            self._relayout_cards()
+
+
+# ---------------------------------------------------------------------------
+# Full-size image viewer overlay — ported one-to-one from vael. indexer's
+# ImgViewerOverlay, adapted for cover's ThumbnailCard (plain .filepath
+# instead of an .asset dict, no per-card context menu to delegate to).
+#
+#   • Opens centred over the image browser on a plain left-click of any
+#     ThumbnailCard (dragging a card down to the roster still works
+#     exactly as before — that's a drag, not a click).
+#   • Prev/Next arrows and the Left/Right keys navigate the cards within
+#     the same folder section the clicked card came from.
+#   • Click on the dim area outside the image, or the × / Esc, closes it.
+# ---------------------------------------------------------------------------
+class ImgViewerOverlay(QWidget):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.hide()
+
+        self._cards = []
+        self._idx = 0
+        self._current_card = None
+
+        self._close_btn = QToolButton(self)
+        self._close_btn.setText("\u2715")
+        self._close_btn.setObjectName("viewerCloseBtn")
+        self._close_btn.setFixedSize(32, 32)
+        self._close_btn.clicked.connect(self.close_viewer)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self._img_lbl = QLabel(self)
+        self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_lbl.setObjectName("viewerImage")
+        self._img_lbl.setScaledContents(False)
+
+        self._name_lbl = QLabel(self)
+        self._name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_lbl.setObjectName("viewerName")
+
+        self._prev_btn = QToolButton(self)
+        self._prev_btn.setText("\u2039")
+        self._prev_btn.setObjectName("viewerNavBtn")
+        self._prev_btn.setFixedSize(44, 80)
+        self._prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._prev_btn.clicked.connect(self._go_prev)
+
+        self._next_btn = QToolButton(self)
+        self._next_btn.setText("\u203a")
+        self._next_btn.setObjectName("viewerNavBtn")
+        self._next_btn.setFixedSize(44, 80)
+        self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._next_btn.clicked.connect(self._go_next)
+
+    # -- public API ---------------------------------------------------------
+    def open_viewer(self, card, cards):
+        self._cards = cards
+        self._idx = cards.index(card) if card in cards else 0
+        self._current_card = card
+        self.resize(self.parent().size())
+        self._load_current()
+        self._update_nav_state()
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def close_viewer(self):
+        self.hide()
+        self._current_card = None
+        self._cards = []
+
+    # -- navigation -----------------------------------------------------------
+    def _go_prev(self):
+        if self._idx > 0:
+            self._idx -= 1
+            self._current_card = self._cards[self._idx]
+            self._load_current()
+            self._update_nav_state()
+
+    def _go_next(self):
+        if self._idx < len(self._cards) - 1:
+            self._idx += 1
+            self._current_card = self._cards[self._idx]
+            self._load_current()
+            self._update_nav_state()
+
+    def _update_nav_state(self):
+        self._prev_btn.setEnabled(self._idx > 0)
+        self._next_btn.setEnabled(self._idx < len(self._cards) - 1)
+
+    # -- image loading --------------------------------------------------------
+    def _load_current(self):
+        card = self._current_card
+        if card is None:
+            return
+        self._name_lbl.setText(Path(card.filepath).name)
+
+        pix = QPixmap(card.filepath)
+        if pix.isNull():
+            self._img_lbl.clear()
+            self._img_lbl.setText("?")
+        else:
+            self._img_lbl.setProperty("_raw_pix", pix)
+            self._scale_image()
+        self._place_widgets()
+
+    def _scale_image(self):
+        pix = self._img_lbl.property("_raw_pix")
+        if pix is None or pix.isNull():
+            return
+        max_w, max_h = self._image_area_size()
+        scaled = pix.scaled(
+            max_w, max_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._img_lbl.setPixmap(scaled)
+        self._img_lbl.resize(scaled.width(), scaled.height())
+
+    def _image_area_size(self):
+        w, h = self.width(), self.height()
+        margin_x = 110
+        margin_y = 100
+        return max(200, w - margin_x * 2), max(200, h - margin_y)
+
+    # -- widget placement -------------------------------------------------------
+    def _place_widgets(self):
+        ow, oh = self.width(), self.height()
+
+        pad = 14
+        self._close_btn.move(ow - self._close_btn.width() - pad, pad)
+
+        img_w, img_h = self._img_lbl.width(), self._img_lbl.height()
+        img_x = (ow - img_w) // 2
+        img_y = max(50, (oh - img_h - 40) // 2)
+        self._img_lbl.move(img_x, img_y)
+
+        name_h = 28
+        self._name_lbl.setFixedSize(min(600, ow - 40), name_h)
+        name_x = (ow - self._name_lbl.width()) // 2
+        name_y = img_y + img_h + 10
+        self._name_lbl.move(name_x, name_y)
+
+        btn_y = img_y + (img_h - self._prev_btn.height()) // 2
+        left_edge = img_x - self._prev_btn.width() - 12
+        right_edge = img_x + img_w + 12
+        self._prev_btn.move(max(8, left_edge), btn_y)
+        self._next_btn.move(min(ow - self._next_btn.width() - 8, right_edge), btn_y)
+
+    # -- events -----------------------------------------------------------------
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.isVisible():
+            self._scale_image()
+            self._place_widgets()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 180))
+        p.end()
+
+    def mousePressEvent(self, event):
+        """Click outside the image panel closes the viewer."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._img_lbl.geometry().contains(event.position().toPoint()):
+                self.close_viewer()
+                return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            self.close_viewer()
+        elif key == Qt.Key.Key_Left:
+            self._go_prev()
+        elif key == Qt.Key.Key_Right:
+            self._go_next()
+        else:
+            super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Blur overlay shown while a "Load Selected Folders" bulk scan is running.
+# Rather than a boxed panel sitting on a dimmed backdrop, this blurs a
+# snapshot of the *entire app* (sidebars, roster, everything -- it's
+# parented to the app's content root, not just the image browser) to read
+# as "the whole UI is held up right now", and floats only bare text, a
+# progress bar, and a Cancel button in the middle -- no panel chrome.
+# ---------------------------------------------------------------------------
+class _BulkLoadOverlay(QWidget):
+    BLUR_RADIUS = 22
+
+    def __init__(self, parent, on_cancel):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._blurred_bg = None
+        self.hide()
+
+        self._panel = QWidget(self)
+        self._panel.setObjectName("bulkLoadPanel")
+        panel_lay = QVBoxLayout(self._panel)
+        panel_lay.setContentsMargins(30, 22, 30, 22)
+        panel_lay.setSpacing(10)
+
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bulkLoadProgress")
+        self.progress.setFixedWidth(280)
+        self.progress.setFixedHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)
+        panel_lay.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # Bold/bright "[done / total]" readout — deliberately its own,
+        # more prominent label sitting at the very top of the text block.
+        self.count_lbl = QLabel("")
+        self.count_lbl.setObjectName("bulkLoadCount")
+        self.count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        panel_lay.addWidget(self.count_lbl)
+
+        self.detail_lbl = QLabel("")
+        self.detail_lbl.setObjectName("bulkLoadDetail")
+        self.detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_lbl.setWordWrap(True)
+        panel_lay.addWidget(self.detail_lbl)
+
+        self.cancel_btn = QToolButton()
+        self.cancel_btn.setObjectName("iconButton")
+        self.cancel_btn.setText("Cancel load")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(on_cancel)
+        panel_lay.addWidget(self.cancel_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+
+    def set_progress(self, done, total, detail_text):
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(min(done, total))
+            self.count_lbl.setText(f"{done} / {total}")
+            self.count_lbl.show()
+        else:
+            self.progress.setRange(0, 0)
+            self.count_lbl.hide()
+        self.detail_lbl.setText(detail_text)
+        self._place_panel()
+
+    def show_overlay(self):
+        self.resize(self.parent().size())
+        self._capture_blurred_background()
+        self._place_panel()
+        self.show()
+        self.raise_()
+
+    def hide_overlay(self):
+        self.hide()
+        self._blurred_bg = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_panel()
+
+    def _place_panel(self):
+        self._panel.adjustSize()
+        pw, ph = self._panel.width(), self._panel.height()
+        self._panel.move((self.width() - pw) // 2, (self.height() - ph) // 2)
+
+    def _capture_blurred_background(self):
+        """Grab whatever's currently behind this overlay (the whole app
+        content) and blur it, so the backdrop itself reads as held-up
+        rather than needing a separate panel to carry that meaning."""
+        self.hide()
+        snapshot = self.parent().grab()
+        self.show()
+        if snapshot.isNull():
+            self._blurred_bg = None
+            return
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(snapshot)
+        blur = QGraphicsBlurEffect()
+        blur.setBlurRadius(self.BLUR_RADIUS)
+        item.setGraphicsEffect(blur)
+        scene.addItem(item)
+        result = QPixmap(snapshot.size())
+        result.fill(Qt.transparent)
+        p = QPainter(result)
+        scene.render(p)
+        p.end()
+        self._blurred_bg = result
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        if self._blurred_bg is not None:
+            p.drawPixmap(0, 0, self._blurred_bg)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 110))
+        p.end()
+
+
+# ---------------------------------------------------------------------------
+# Generic dimming/blur backdrop reused behind the Settings and Hotkeys
+# dialogs -- visually identical treatment to _BulkLoadOverlay above (same
+# blurred snapshot + dark fill), just without any panel/progress content of
+# its own, so it reads the same "you can't interact with the app right now"
+# way a bulk folder load does.
+# ---------------------------------------------------------------------------
+class _ModalDimOverlay(QWidget):
+    BLUR_RADIUS = 22
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._blurred_bg = None
+        self.hide()
+
+    def show_overlay(self):
+        self.resize(self.parent().size())
+        self._capture_blurred_background()
+        self.show()
+        self.raise_()
+
+    def hide_overlay(self):
+        self.hide()
+        self._blurred_bg = None
+
+    def _capture_blurred_background(self):
+        self.hide()
+        snapshot = self.parent().grab()
+        self.show()
+        if snapshot.isNull():
+            self._blurred_bg = None
+            return
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(snapshot)
+        blur = QGraphicsBlurEffect()
+        blur.setBlurRadius(self.BLUR_RADIUS)
+        item.setGraphicsEffect(blur)
+        scene.addItem(item)
+        result = QPixmap(snapshot.size())
+        result.fill(Qt.transparent)
+        p = QPainter(result)
+        scene.render(p)
+        p.end()
+        self._blurred_bg = result
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        if self._blurred_bg is not None:
+            p.drawPixmap(0, 0, self._blurred_bg)
+        p.fillRect(self.rect(), QColor(0, 0, 0, 110))
+        p.end()
+
+
+# ---------------------------------------------------------------------------
+# Small red "count" badge used to show how many posts are currently queued
+# (spec: Queue count indicator). Draws itself as a perfect circle for
+# single-digit counts and widens into a pill/stadium shape once the number
+# needs more horizontal room (double/triple digits+), so the digits never
+# get squeezed into an undersized circle.
+# ---------------------------------------------------------------------------
+class _QueueCountBadge(QWidget):
+    HEIGHT = 18
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("queueCountBadge")
+        self._count = 0
+        self._label = QLabel(self)
+        self._label.setObjectName("queueCountBadgeLabel")
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedSize(self.HEIGHT, self.HEIGHT)
+        self.hide()
+
+    def count(self):
+        return self._count
+
+    def set_count(self, count):
+        self._count = max(0, int(count))
+        if self._count <= 0:
+            self.hide()
+            return
+        self._label.setText(str(self._count) if self._count < 1000 else "999+")
+        self._resize_to_content()
+        self.show()
+        self.raise_()
+
+    def _resize_to_content(self):
+        fm = self._label.fontMetrics()
+        text_w = fm.horizontalAdvance(self._label.text())
+        w = max(self.HEIGHT, text_w + 12)
+        self.setFixedSize(w, self.HEIGHT)
+        self._label.setGeometry(0, 0, w, self.HEIGHT)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#e5484d"))
+        radius = self.height() / 2
+        p.drawRoundedRect(self.rect(), radius, radius)
+        p.end()
+
+
+# ---------------------------------------------------------------------------
+# Center — Image Browser. A single, persistent, global instance shared by
+# every workflow: one tab per configured top-level folder (always fully
+# recursive), lazy scanning off the UI thread, and an in-memory-only
+# thumbnail cache. Switching the active workflow never touches this widget
+# — only the roster below it.
+# ---------------------------------------------------------------------------
+class ImageBrowser(QWidget):
+    thumbnailClicked = Signal(str)   # filepath — MainWindow feeds this to the armed roster slot
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        self.setObjectName("imageBrowserPanel")
+        self.thread_pool = QThreadPool.globalInstance()
+        self._closed_this_session = set()   # paths ×'d away — in-memory only, cleared on relaunch
+
+        # Deliberately never loaded from (or saved to) config_data: the
+        # explorer always starts on the first tab with nothing expanded,
+        # regardless of whatever state it was left in last session. These
+        # still track expand/tab state during the current run (e.g. so
+        # reload_folders() can keep the same tab open after an in-session
+        # Settings change), they just don't persist across restarts.
+        self.saved_expanded_paths = set()
+        self._saved_active_tab = None
+        self._top_sections = []   # top-level FolderSection per tab index, in tab order
+
+        # The folder most recently opened by the user (click or the
+        # Ctrl+Up/Down hotkeys) -- what "current folder" means for
+        # navigate_sibling_folder(), and what gets auto-scrolled to the top
+        # of the viewport. See FolderSection.set_expanded / focus_folder_section.
+        self._focused_path = None
+
+        # -- multi-select folders (ctrl+click / rubber-band drag) + bulk
+        # "Load Selected Folders" background loading -----------------------
+        self._sections_by_path = {}       # path -> FolderSection, every depth, current tabs only
+        self._selected_folder_paths = set()
+        self._rb_base_selection = set()   # selection snapshot at the start of the current drag
+        self.bulk_loader = BulkFolderLoadManager(self)
+        self.bulk_loader.started.connect(self._on_bulk_load_started)
+        self.bulk_loader.statusChanged.connect(self._on_bulk_load_status)
+        self.bulk_loader.finished.connect(self._on_bulk_load_finished)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("browserTabs")
+        self.tabs.setDocumentMode(True)
+        # Qt's Fusion style draws its own native "tab bar base" line under
+        # the tab bar regardless of any ::pane border in the stylesheet --
+        # that's the stray straight line that used to run the full width
+        # of the panel above the tab strip (and the settings icon), with
+        # hard corners that didn't match the tab strip's own rounded pill.
+        # Turning it off leaves only our own styled pill border.
+        self.tabs.tabBar().setDrawBase(False)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        # Settings row: floats *over* the top-right corner of the tab strip
+        # instead of occupying its own full-width row above it -- that used
+        # to leave a whole empty bar sitting on top of the tabs. It's a
+        # free-floating child of the ImageBrowser itself (positioned/raised
+        # in resizeEvent / showEvent below) so it stays reachable even when
+        # the tabs/empty-hint stack underneath has zero folders configured
+        # and hides itself.
+        status_bar = QWidget(self)
+        status_bar.setObjectName("browserStatusBar")
+        status_lay = QHBoxLayout(status_bar)
+        # A small, deliberate gap from the true right edge -- enough that
+        # the icon doesn't feel glued to the corner, without stranding it
+        # out in empty space (that was the overcorrection last time: a
+        # full icon-width gap read as too much on its own).
+        status_lay.setContentsMargins(0, 0, 8, 0)
+        status_lay.setSpacing(2)
+
+        # The Settings button used to live here; it now lives at the
+        # bottom-left of the sorting sidebar instead (see WorkflowSidebar),
+        # so this row only houses the restore-hidden-folders button now.
+        self.restore_hidden_btn = QToolButton()
+        self.restore_hidden_btn.setObjectName("iconButton")
+        self.restore_hidden_btn.setText("\u21bb")
+        self.restore_hidden_btn.setPopupMode(QToolButton.InstantPopup)
+        self.restore_hidden_btn.setCursor(Qt.PointingHandCursor)
+        self.restore_hidden_btn.hide()
+        status_lay.addWidget(self.restore_hidden_btn)
+
+        # Reload button — always the rightmost item in the bar. Re-scans
+        # just the currently open (active-tab) top-level folder from disk,
+        # without touching any other configured folder's state.
+        self.reload_folder_btn = QToolButton()
+        self.reload_folder_btn.setObjectName("browserSettingsBtn")
+        self.reload_folder_btn.setText("\u27f3")
+        self.reload_folder_btn.setToolTip("Reload the current folder")
+        self.reload_folder_btn.setCursor(Qt.PointingHandCursor)
+        self.reload_folder_btn.clicked.connect(self.reload_current_folder)
+        self.reload_folder_btn.hide()
+        status_lay.addWidget(self.reload_folder_btn)
+
+        self._status_bar = status_bar
+        status_bar.adjustSize()
+        status_bar.raise_()
+
+        layout.addWidget(self.tabs, 1)
+
+        # Dimming/blur overlay for "Load Selected Folders" bulk scans.
+        # Parented to the app's content root (not just this panel) so the
+        # blur covers the whole app -- sidebars, roster, everything --
+        # rather than just the image browser's own rectangle.
+        self.bulk_overlay = _BulkLoadOverlay(main_window._content_root, self.bulk_loader.cancel)
+
+        self.empty_hint = QLabel(
+            "No folders configured yet.\n"
+            "Open the \u2699 Settings button (bottom-left of the sorting "
+            "workspace) \u2192 Folders to add one."
+        )
+        self.empty_hint.setObjectName("hint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.empty_hint, 1)
+
+        self.reload_folders()
+        self._position_status_bar()
+
+    def ignore_folder_patterns(self):
+        return self.main_window.config.get("ignored", [])
+
+    # -- folder registry (every FolderSection currently built, any depth) --
+    def register_section(self, section):
+        self._sections_by_path[section.path] = section
+
+    def section_for_path(self, path):
+        return self._sections_by_path.get(path)
+
+    # -- "current folder" focus (Ctrl+Up/Down + auto-scroll-into-view) -----
+    def focus_folder_section(self, section):
+        """Called by FolderSection.set_expanded() whenever a folder is
+        opened by the user, whether via a mouse click or the Ctrl+Up/Down
+        hotkeys. Remembers it as the "current" folder for
+        navigate_sibling_folder(), and scrolls the active tab so the
+        folder's header lands at the very top of the viewport, since the
+        user almost certainly wants to interact with what they just
+        opened. Deferred one event-loop tick because expanding a folder
+        changes the layout (new cards/children appear) after this call
+        returns, and the scroll target needs the settled geometry."""
+        self._focused_path = section.path
+        self.focus_path(section.path)
+        QTimer.singleShot(0, lambda s=section: self._scroll_section_into_view(s))
+
+    def _scroll_section_into_view(self, section):
+        scroll = self.tabs.currentWidget()
+        if not isinstance(scroll, QScrollArea):
+            return
+        if not scroll.isAncestorOf(section):
+            return
+        container = scroll.widget()
+        if container is None:
+            return
+        top_left = section.header.mapTo(container, QPoint(0, 0))
+        bar = scroll.verticalScrollBar()
+        bar.setValue(max(0, min(top_left.y(), bar.maximum())))
+
+    def _is_in_active_tab(self, section):
+        scroll = self.tabs.currentWidget()
+        return scroll is not None and scroll.isAncestorOf(section)
+
+    def _active_tab_root_section(self):
+        idx = self.tabs.currentIndex()
+        if 0 <= idx < len(self._top_sections):
+            return self._top_sections[idx]
+        return None
+
+    def navigate_sibling_folder(self, direction):
+        """Ctrl+Up (direction=-1) / Ctrl+Down (direction=+1): close the
+        current folder and open its sibling above/below it -- the other
+        folder at the same depth, under the same parent, in the active
+        tab. Wraps around at either end of that sibling group; never
+        crosses into folders that share a different parent, even if
+        they're at the same depth."""
+        section = None
+        if self._focused_path:
+            candidate = self._sections_by_path.get(self._focused_path)
+            if (
+                candidate is not None
+                and candidate.is_expanded()
+                and self._is_in_active_tab(candidate)
+            ):
+                section = candidate
+        if section is None:
+            # Nothing explicitly focused yet this session -- fall back to
+            # the active tab's root folder, if it's open.
+            root = self._active_tab_root_section()
+            if root is not None and root.is_expanded():
+                section = root
+        if section is None:
+            return
+
+        parent = section.parent_section
+        siblings = parent._child_sections if parent is not None else [section]
+        if section not in siblings or len(siblings) < 2:
+            return
+        idx = siblings.index(section)
+        target = siblings[(idx + direction) % len(siblings)]
+        section.set_expanded(False)
+        target.set_expanded(True)
+
+    # -- multi-select (ctrl+click / rubber-band drag) -----------------------
+    def selected_folder_paths(self):
+        return set(self._selected_folder_paths)
+
+    def has_folder_selection(self):
+        return bool(self._selected_folder_paths)
+
+    def toggle_folder_selection(self, path):
+        section = self._sections_by_path.get(path)
+        if section is None:
+            return
+        if path in self._selected_folder_paths:
+            self._selected_folder_paths.discard(path)
+            section.set_selected(False)
+        else:
+            self._selected_folder_paths.add(path)
+            section.set_selected(True)
+
+    def clear_folder_selection(self):
+        for path in list(self._selected_folder_paths):
+            section = self._sections_by_path.get(path)
+            if section is not None:
+                section.set_selected(False)
+        self._selected_folder_paths.clear()
+
+    def set_folder_selection(self, paths):
+        paths = set(paths)
+        if paths == self._selected_folder_paths:
+            return
+        for path, section in self._sections_by_path.items():
+            section.set_selected(path in paths)
+        self._selected_folder_paths = paths
+
+    def selected_folder_sections(self):
+        return [
+            self._sections_by_path[p]
+            for p in self._selected_folder_paths
+            if p in self._sections_by_path
+        ]
+
+    # -- rubber-band drag-select (driven by _RubberBandArea) ----------------
+    def begin_rubber_band_drag(self, additive):
+        if not additive:
+            self.clear_folder_selection()
+        self._rb_base_selection = set(self._selected_folder_paths)
+
+    def update_rubber_band_drag(self, global_rect):
+        hits = self._sections_intersecting_global_rect(global_rect)
+        self.set_folder_selection(self._rb_base_selection | hits)
+
+    def end_rubber_band_drag(self):
+        self._rb_base_selection = set()
+
+    def _sections_intersecting_global_rect(self, global_rect):
+        current_scroll = self.tabs.currentWidget()
+        hits = set()
+        for path, section in self._sections_by_path.items():
+            if not section.isVisible():
+                continue
+            if current_scroll is not None and not current_scroll.isAncestorOf(section):
+                continue
+            top_left = section.header.mapToGlobal(QPoint(0, 0))
+            rect = QRect(top_left, section.header.size())
+            if rect.intersects(global_rect):
+                hits.add(path)
+        return hits
+
+    # -- right-click context menu on a folder header -------------------------
+    def show_folder_context_menu(self, origin_section, global_pos):
+        selected_paths = self.selected_folder_paths()
+        if not selected_paths:
+            return
+        menu = QMenu(origin_section)
+        n = len(selected_paths)
+        label = (
+            "Load This Folder (Full, Recursively)"
+            if n == 1 else
+            f"Load {n} Selected Folders (Full, Recursively)"
+        )
+        load_action = menu.addAction(label)
+        load_action.triggered.connect(lambda: self.start_bulk_load(list(selected_paths)))
+        menu.addSeparator()
+        clear_action = menu.addAction("Clear Selection")
+        clear_action.triggered.connect(self.clear_folder_selection)
+        menu.exec(global_pos)
+
+    # -- "Load Selected Folders" bulk background load -----------------------
+    def start_bulk_load(self, paths):
+        self.bulk_loader.start(paths)
+
+    def _on_bulk_load_started(self):
+        self.bulk_overlay.show_overlay()
+
+    def _on_bulk_load_status(self, done, total, text):
+        self.bulk_overlay.set_progress(done, total, text)
+
+    def _on_bulk_load_finished(self):
+        # Leave the summary text ("Loaded N folders, M images...") up for a
+        # few seconds so the user actually sees it, then quietly dismiss
+        # the overlay.
+        QTimer.singleShot(2500, self._hide_bulk_status_if_idle)
+
+    def _hide_bulk_status_if_idle(self):
+        if not self.bulk_loader.active:
+            self.bulk_overlay.hide_overlay()
+
+    # -- (re)building tabs from Settings -----------------------------------
+    def reload_folders(self):
+        prev_active = self._current_tab_path() or self._saved_active_tab
+        old_pages = [self.tabs.widget(i) for i in range(self.tabs.count())]
+        self.tabs.clear()
+        for page in old_pages:
+            page.deleteLater()
+        self._top_sections = []
+        self._sections_by_path = {}
+        self._selected_folder_paths = set()
+        # A reload means the configured folder set (or ignore patterns)
+        # changed, or the user explicitly asked to restore a hidden
+        # folder — either way it should reflect what's on disk *now*, not
+        # whatever an earlier scan (interactive or bulk) cached. Any
+        # in-flight bulk load is scanning against a tab tree that's about
+        # to be discarded anyway, so stop it too.
+        self.bulk_loader.cancel()
+        _ROUGH_SCAN_CACHE.clear()
+        folders = self.configured_folders()
+        configured_paths = {f.get("path", "") for f in folders}
+        self._closed_this_session &= configured_paths
+
+        restore_index = 0
+        for folder_cfg in folders:
+            path = folder_cfg.get("path", "")
+            if path in self._closed_this_session:
+                continue
+
+            scroll = _AutopanScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            section = FolderSection(self, path, depth=0, closable=False)
+            wrapper = _RubberBandArea(self)
+            wrapper_lay = QVBoxLayout(wrapper)
+            wrapper_lay.setContentsMargins(12, 12, 12, 12)
+            wrapper_lay.addWidget(section)
+            wrapper_lay.addStretch(1)
+            scroll.setWidget(wrapper)
+
+            name = Path(path).name or path
+            self.tabs.addTab(scroll, name)
+            self.tabs.setTabToolTip(self.tabs.count() - 1, path)
+            self._top_sections.append(section)
+            if path == prev_active:
+                restore_index = self.tabs.count() - 1
+            if path in self.saved_expanded_paths:
+                section.set_expanded(True, persist=False)
+
+        if self.tabs.count() > 0:
+            self.tabs.setCurrentIndex(restore_index)
+            self._trigger_rough_pass_for_tab(restore_index)
+
+        self._update_empty_state()
+        self._refresh_restore_hidden_button()
+
+    # -- reload button: re-scan just the current tab's folder --------------
+    def reload_current_folder(self):
+        path = self._current_tab_path()
+        if path:
+            self._reload_folder_tab(path)
+
+    def _reload_folder_tab(self, path):
+        index = next(
+            (i for i, section in enumerate(self._top_sections) if section.path == path),
+            None,
+        )
+        if index is None:
+            return
+
+        # Drop cached scan results for this folder and everything nested
+        # under it, so the rebuild below reflects what's on disk right
+        # now instead of a stale rough-scan cache entry.
+        prefix = path.rstrip(os.sep) + os.sep
+        for cached_path in [p for p in _ROUGH_SCAN_CACHE if p == path or p.startswith(prefix)]:
+            del _ROUGH_SCAN_CACHE[cached_path]
+        self._purge_section_registry(path)
+
+        old_section = self._top_sections[index]
+
+        scroll = _AutopanScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        section = FolderSection(self, path, depth=0, closable=False)
+        wrapper = _RubberBandArea(self)
+        wrapper_lay = QVBoxLayout(wrapper)
+        wrapper_lay.setContentsMargins(12, 12, 12, 12)
+        wrapper_lay.addWidget(section)
+        wrapper_lay.addStretch(1)
+        scroll.setWidget(wrapper)
+
+        name = Path(path).name or path
+        old_page = self.tabs.widget(index)
+        self.tabs.removeTab(index)
+        old_page.deleteLater()
+        self.tabs.insertTab(index, scroll, name)
+        self.tabs.setTabToolTip(index, path)
+        self._top_sections[index] = section
+        self.tabs.setCurrentIndex(index)
+        old_section.deleteLater()
+
+        if path in self.saved_expanded_paths:
+            section.set_expanded(True, persist=False)
+
+        self._trigger_rough_pass_for_tab(index)
+
+    def _update_empty_state(self):
+        has_tabs = self.tabs.count() > 0
+        self.tabs.setVisible(has_tabs)
+        self.empty_hint.setVisible(not has_tabs)
+        self.reload_folder_btn.setVisible(has_tabs)
+        if not has_tabs:
+            if self._closed_this_session:
+                self.empty_hint.setText(
+                    "All configured folders are hidden for this session.\n"
+                    "Click \u21bb above to restore them."
+                )
+            else:
+                self.empty_hint.setText(
+                    "No folders configured yet.\n"
+                    "Open the \u2699 Settings button (bottom-left of the "
+                    "sorting workspace) \u2192 Folders to add one."
+                )
+
+    def _refresh_restore_hidden_button(self):
+        if not self._closed_this_session:
+            self.restore_hidden_btn.hide()
+            return
+        self.restore_hidden_btn.setToolTip(
+            f"{len(self._closed_this_session)} folder(s) hidden for this session \u2014 click to restore"
+        )
+        menu = QMenu(self.restore_hidden_btn)
+        for path in sorted(self._closed_this_session, key=str.lower):
+            name = Path(path).name or path
+            action = menu.addAction(name)
+            action.setToolTip(path)
+            action.triggered.connect(lambda checked=False, p=path: self._restore_closed_folder(p))
+        menu.addSeparator()
+        restore_all = menu.addAction("Restore all")
+        restore_all.triggered.connect(self._restore_all_closed_folders)
+        self.restore_hidden_btn.setMenu(menu)
+        self.restore_hidden_btn.show()
+
+    def _restore_closed_folder(self, path):
+        self._closed_this_session.discard(path)
+        self.reload_folders()
+
+    def _restore_all_closed_folders(self):
+        self._closed_this_session.clear()
+        self.reload_folders()
+
+    def _trigger_rough_pass_for_tab(self, index):
+        if 0 <= index < len(self._top_sections):
+            self._top_sections[index].ensure_rough_pass()
+
+    def close_tab_for_session(self, path):
+        self._closed_this_session.add(path)
+        for i, section in enumerate(self._top_sections):
+            if section.path == path:
+                self.tabs.removeTab(i)
+                del self._top_sections[i]
+                self._purge_section_registry(path)
+                section.deleteLater()
+                break
+        self._update_empty_state()
+        self._refresh_restore_hidden_button()
+
+    def _purge_section_registry(self, root_path):
+        """Drop `root_path` and everything nested under it from the folder
+        registry/multi-selection when its tab is closed for the session, so
+        a stale reference to an now-orphaned FolderSection can't linger in
+        a later rubber-band selection or "Load Selected Folders" context
+        menu (it's still on disk, just no longer shown)."""
+        prefix = root_path.rstrip(os.sep) + os.sep
+        stale = [p for p in self._sections_by_path if p == root_path or p.startswith(prefix)]
+        for p in stale:
+            del self._sections_by_path[p]
+            self._selected_folder_paths.discard(p)
+
+    def note_expanded(self, path, expanded):
+        if expanded:
+            self.saved_expanded_paths.add(path)
+        else:
+            self.saved_expanded_paths.discard(path)
+
+    def _current_tab_path(self):
+        idx = self.tabs.currentIndex()
+        if idx < 0:
+            return None
+        tooltip = self.tabs.tabToolTip(idx)
+        return tooltip or None
+
+    def _on_tab_changed(self, index):
+        self._trigger_rough_pass_for_tab(index)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_status_bar()
+
+    def _position_status_bar(self):
+        """Float the settings row over the top-right corner of the tab
+        strip instead of it occupying a separate row of its own."""
+        bar = getattr(self, "_status_bar", None)
+        if bar is None:
+            return
+        bar.adjustSize()
+        tab_bar_height = self.tabs.tabBar().sizeHint().height()
+        y = max(0, (tab_bar_height - bar.height()) // 2)
+        bar.move(max(0, self.width() - bar.width()), y)
+        bar.raise_()
+
+
+# ---------------------------------------------------------------------------
+# Bottom bar — the "input roster" (spec section 2.3), plus the run/queue
+# controls and optional-parameter form for whichever workflow is active.
+# Only this bar changes when the active workflow changes; it never resets
+# the Image Browser above it.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Plain QScrollArea that emits a signal on resize, used by RosterBar to know
+# exactly when its viewport height changes so the roster icons can be
+# rescaled to fill it (see RosterBar._sync_icon_size).
+# ---------------------------------------------------------------------------
+
 # SESSION SHELF AND MEDIA VIEWER
 # ========================================================================
+class CoverBrowser(ImageBrowser):
+    """Cover's original explorer, with Sorter's file-action hooks."""
+
+    def __init__(self, window, editable=False, title='Library'):
+        self.window = window
+        self.editable = editable
+        self.current = None
+        self._location = None
+        self._selected_file_paths = set()
+        self._selection_anchor = None
+        self._closing = False
+        super().__init__(window)
+        if not PIXMAP_WORKER.isRunning():
+            PIXMAP_WORKER.start()
+        self.path = QLineEdit(self)
+        self.path.hide()
+        self.reload_folder_btn.show()
+        self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
+        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('F5', self.refresh)]:
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(callback)
+
+    def configured_folders(self):
+        paths = self.window.config['sources']
+        if self._location and str(self._location) not in paths:
+            paths = paths + [str(self._location)]
+        return [{'path': str(normalized(p))} for p in paths]
+
+    def focus_path(self, path):
+        self.current = Path(path)
+        self.window.active_browser = self
+        if hasattr(self, 'path'):
+            self.path.setText(str(path))
+
+    def _on_tab_changed(self, index):
+        self._selected_file_paths.clear()
+        super()._on_tab_changed(index)
+        path = self._current_tab_path()
+        if path:
+            self.focus_path(path)
+
+    def update_roots(self):
+        self.reload_folders()
+
+    def refresh(self, *_):
+        self._selected_file_paths.clear()
+        self.reload_current_folder()
+
+    def navigate(self, path, remember=True):
+        target = normalized(path) if path else None
+        if target and not target.is_dir():
+            self.window.notice('This folder is unavailable.')
+            return
+        self._location = target
+        if target:
+            self._saved_active_tab = str(target)
+        self.reload_folders()
+        if target:
+            for index, section in enumerate(self._top_sections):
+                if section.path == str(target):
+                    self.tabs.setCurrentIndex(index)
+                    break
+
+    def selected_paths(self):
+        return [Path(p) for p in sorted(self._selected_file_paths | set(self.selected_folder_paths()))]
+
+    def select_card(self, card, modifiers=Qt.ControlModifier):
+        self.window.active_browser = self
+        self.clear_folder_selection()
+        cards = [c for section in self._sections_by_path.values() if section.isVisible() for c in section._cards if c.isVisible()]
+        if modifiers & Qt.ShiftModifier and self._selection_anchor in [c.filepath for c in cards]:
+            names = [c.filepath for c in cards]
+            first, last = sorted((names.index(self._selection_anchor), names.index(card.filepath)))
+            self._selected_file_paths.update(names[first:last + 1])
+        elif card.filepath in self._selected_file_paths:
+            self._selected_file_paths.remove(card.filepath)
+        else:
+            self._selected_file_paths.add(card.filepath)
+        self._selection_anchor = card.filepath
+        self.repaint_content()
+
+    def drag_paths(self, card):
+        if card.filepath not in self._selected_file_paths:
+            self._selected_file_paths = {card.filepath}
+            self.clear_folder_selection()
+            self.repaint_content()
+        return self.selected_paths()
+
+    def open_card(self, card, cards):
+        self.window.active_browser = self
+        self.window.open_image_viewer(card, cards)
+
+    def card_menu(self, card, point):
+        self.drag_paths(card)
+        self.action_menu(point, card)
+
+    def show_folder_context_menu(self, origin_section, global_pos):
+        self._selected_file_paths.clear()
+        self.repaint_content()
+        self.action_menu(global_pos)
+
+    def action_menu(self, point, card=None):
+        self.window.active_browser = self
+        paths = self.selected_paths()
+        menu = QMenu(self)
+        if card:
+            menu.addAction('View', lambda: self.open_card(card, [card]))
+        folders = list(self.selected_folder_paths())
+        if folders:
+            menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))
+        if paths:
+            menu.addAction('Add to session shelf', lambda: self.window.shelf.add_paths(paths))
+            menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
+            menu.addAction('Copy to sorting folder…', lambda: self.window.transfer_dialog(self, False))
+            menu.addSeparator()
+            menu.addAction('Information…', lambda: self.window.information(paths))
+            menu.addAction('Copy paths', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
+            menu.addAction('Open containing folder externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
+        menu.addAction('Clear selection', self.clear_selection)
+        menu.exec(point)
+
+    def clear_selection(self):
+        self._selected_file_paths.clear()
+        self.clear_folder_selection()
+        self.repaint_content()
+
+    def repaint_content(self):
+        for section in self._sections_by_path.values():
+            for card in section._cards:
+                card.update()
+
+    def filter_rows(self):
+        self.repaint_content()
+
+    def state(self):
+        return {}
+
+    def restore(self, state):
+        # Cover starts with the first source tab and collapsed child folders.
+        if self.tabs.count():
+            self.tabs.setCurrentIndex(0)
+
+
 class ShelfList(QListWidget):
     def __init__(self, shelf):
         super().__init__()
@@ -2686,7 +4903,7 @@ class Window(QMainWindow):
         self.vertical.setObjectName('centerSplitter')
         self.vertical.setChildrenCollapsible(False)
         self.vertical.setHandleWidth(10)
-        self.library = Browser(self, False, 'Library')
+        self.library = CoverBrowser(self, False, 'Library')
         self.vertical.addWidget(self.library)
         bottom = QWidget()
         bottom.setObjectName('rosterBar')
@@ -2741,6 +4958,7 @@ class Window(QMainWindow):
         layout.addLayout(operation_bar)
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
+        self._img_viewer = ImgViewerOverlay(self._content_root)
         self.browsers = [self.library, self.sorter, self.second]
         for browser in self.browsers:
             browser.update_roots()
@@ -3097,8 +5315,11 @@ class Window(QMainWindow):
         self.config['flags'] = sorted(flags)
         for item in self.browsers:
             item.filter_rows()
-            item.grid.viewport().update()
-            item.table.viewport().update()
+            if isinstance(item, CoverBrowser):
+                item.repaint_content()
+            else:
+                item.grid.viewport().update()
+                item.table.viewport().update()
         self.persist()
 
     def pin(self, browser):
@@ -3131,6 +5352,12 @@ class Window(QMainWindow):
                 rows.append(f'{path}\n{exc}\n')
         text.setPlainText('\n'.join(rows))
         dialog.exec()
+
+    def open_image_viewer(self, card, cards):
+        if Path(card.filepath).suffix.lower() in IMAGES:
+            self._img_viewer.open_viewer(card, cards)
+        else:
+            self.preview(Path(card.filepath), [Path(c.filepath) for c in cards])
 
     def preview(self, path, paths=None):
         if path.is_dir():
@@ -3198,6 +5425,12 @@ class Window(QMainWindow):
             event.ignore()
             return
         self.poll_timer.stop()
+        self.library.bulk_loader.cancel()
+        PIXMAP_WORKER.stop()
+        PIXMAP_WORKER.wait()
+        _BULK_SCAN_POOL.waitForDone()
+        _BULK_PIXMAP_POOL.waitForDone()
+        QThreadPool.globalInstance().waitForDone()
         for task in list(self.jobs.tasks):
             task.cancel.set()
         self.jobs.pool.waitForDone()
