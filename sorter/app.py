@@ -2211,6 +2211,10 @@ class FolderSection(QWidget):
     def ensure_rough_pass(self):
         if self._rough_done or self._rough_started:
             return
+        if self.browser._filter_map is not None:
+            files, subdirs = self.browser._filter_map.get(self.path, ([], []))
+            self._on_rough_done(self.path, files, subdirs)
+            return
         # A bulk load (or an earlier visit) may already have scanned this
         # exact folder — reuse that instead of scanning it all over again,
         # which is the whole point of "Load Selected Folders": expanding a
@@ -2249,7 +2253,8 @@ class FolderSection(QWidget):
         self._rough_done = True
         self._files = files
         self._pending_subdirs = subdirs
-        _ROUGH_SCAN_CACHE[path] = (files, subdirs)
+        if self.browser._filter_map is None:
+            _ROUGH_SCAN_CACHE[path] = (files, subdirs)
         self.count_lbl.setText(f"({len(files)})" if (files or subdirs) else "(empty)")
         self._set_count_state("normal" if (files or subdirs) else "muted")
         self._materialize()
@@ -2315,7 +2320,7 @@ class FolderSection(QWidget):
             child.parent_section = self
             self.children_lay.addWidget(child)
             self._child_sections.append(child)
-            if sub_path in self.browser.saved_expanded_paths:
+            if sub_path in self.browser.saved_expanded_paths or self.browser._filter_map is not None:
                 child.set_expanded(True, persist=False)
         self._pending_subdirs = []
 
@@ -3288,11 +3293,72 @@ class CoverBrowser(ImageBrowser):
         self._selected_file_paths = set()
         self._selection_anchor = None
         self._closing = False
+        self._filter_map = None
+        self._filter_task = None
+        self._filter_serial = 0
+        self._details = False
         super().__init__(window)
         if not PIXMAP_WORKER.isRunning():
             PIXMAP_WORKER.start()
         self.path = QLineEdit(self)
         self.path.hide()
+        self.filter_panel = QWidget()
+        filter_layout = QHBoxLayout(self.filter_panel)
+        filter_layout.setContentsMargins(4, 2, 4, 6)
+        filter_layout.setSpacing(6)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Search folders and files · Pokemon g · g:Pokemon ch:Misty')
+        self.search.setClearButtonEnabled(True)
+        filter_layout.addWidget(self.search, 1)
+        self.kind = QComboBox()
+        self.kind.addItems(['All types', 'Image', 'GIF', 'Video', 'Folder', 'Other'])
+        filter_layout.addWidget(self.kind)
+        self.extension = QLineEdit()
+        self.extension.setPlaceholderText('png, jpg…')
+        self.extension.setMaximumWidth(85)
+        filter_layout.addWidget(self.extension)
+        self.recursive = QCheckBox('Subfolders')
+        self.recursive.setChecked(True)
+        filter_layout.addWidget(self.recursive)
+        self.flagged = QCheckBox('Flagged')
+        self.flagged.setVisible(editable)
+        filter_layout.addWidget(self.flagged)
+        self.layout().insertWidget(0, self.filter_panel)
+        self.filter_panel.hide()
+        self.search_button = QToolButton()
+        self.search_button.setObjectName('browserSettingsBtn')
+        self.search_button.setIcon(_make_search_icon())
+        self.search_button.setToolTip('Search and filters · Ctrl+F')
+        self.search_button.setCheckable(True)
+        self.search_button.toggled.connect(self.toggle_search)
+        self._status_bar.layout().insertWidget(0, self.search_button)
+        self.filter_timer = QTimer(self)
+        self.filter_timer.setSingleShot(True)
+        self.filter_timer.setInterval(180)
+        self.filter_timer.timeout.connect(self.filter_rows)
+        for signal in (self.search.textChanged, self.extension.textChanged, self.kind.currentIndexChanged, self.flagged.toggled, self.recursive.toggled):
+            signal.connect(lambda *_: self.filter_timer.start())
+        shortcut = QShortcut(QKeySequence('Ctrl+F'), self)
+        shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(lambda: (self.search_button.setChecked(True), self.search.setFocus()))
+        self.model = MediaModel(self)
+        self.proxy = MediaFilter(self)
+        self.proxy.setSourceModel(self.model)
+        self.table = DetailView()
+        self.grid = self.table
+        self.table.setModel(self.proxy)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.AscendingOrder)
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 220)
+        self.table.setColumnWidth(3, 140)
+        self.table.setColumnWidth(4, 260)
+        self.table.setup_drag(self)
+        self.layout().addWidget(self.table, 1)
+        self.table.hide()
         self.reload_folder_btn.show()
         self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
         for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('F5', self.refresh)]:
@@ -3312,6 +3378,50 @@ class CoverBrowser(ImageBrowser):
             self.tools_btn.clicked.connect(lambda: self.action_menu(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height()))))
             self._status_bar.layout().insertWidget(0, self.tools_btn)
             self._position_status_bar()
+
+    def toggle_search(self, visible):
+        self.filter_panel.setVisible(visible)
+        if visible:
+            self.search.setFocus()
+        self._position_status_bar()
+
+    def _position_status_bar(self):
+        super()._position_status_bar()
+        if getattr(self, 'filter_panel', None) and self.filter_panel.isVisible():
+            self._status_bar.move(self._status_bar.x(), self._status_bar.y() + self.filter_panel.height() + self.layout().spacing())
+
+    def active_filter(self):
+        return bool(self.search.text().strip() or self.extension.text().strip() or self.kind.currentIndex() or self.flagged.isChecked())
+
+    def set_details(self, enabled):
+        self._details = enabled
+        self.tabs.setVisible(not enabled and bool(self.tabs.count()))
+        self.table.setVisible(enabled)
+        self.empty_hint.hide() if enabled else self._update_empty_state()
+        if enabled:
+            self.filter_rows()
+        elif not self.active_filter():
+            self._filter_map = None
+            self.reload_folders()
+
+    def context_menu(self, view, point):
+        self.action_menu(view.viewport().mapToGlobal(point))
+
+    def open_index(self, index):
+        entry = index.data(Qt.UserRole)
+        if entry:
+            if entry.is_dir:
+                self.navigate(entry.path)
+            else:
+                self.window.preview(entry.path)
+
+    def _update_empty_state(self):
+        super()._update_empty_state()
+        if not self.tabs.count() and not self._closed_this_session:
+            self.empty_hint.setText('No sorting folder configured.\nOpen Settings below to choose one.' if self.editable else 'No source folders configured.\nOpen Settings in the sorting workspace below to add folders.')
+        if getattr(self, '_details', False):
+            self.tabs.hide()
+            self.empty_hint.hide()
 
     def accept_drop(self, event):
         if self.editable and event.mimeData().hasUrls():
@@ -3370,11 +3480,17 @@ class CoverBrowser(ImageBrowser):
             self.focus_path(path)
 
     def update_roots(self):
+        self._filter_map = None
         self.reload_folders()
+        if hasattr(self, 'search') and (self.active_filter() or self._details):
+            self.filter_rows()
 
     def refresh(self, *_):
         self._selected_file_paths.clear()
-        self.reload_current_folder()
+        if self.active_filter() or self._details:
+            self.filter_rows()
+        else:
+            self.reload_current_folder()
 
     def navigate(self, path, remember=True):
         target = normalized(path) if path else None
@@ -3395,6 +3511,8 @@ class CoverBrowser(ImageBrowser):
                     break
 
     def selected_paths(self):
+        if self._details:
+            return [i.data(Qt.UserRole).path for i in self.table.selectionModel().selectedIndexes() if i.column() == 0]
         return [Path(p) for p in sorted(self._selected_file_paths | set(self.selected_folder_paths()))]
 
     def select_card(self, card, modifiers=Qt.ControlModifier):
@@ -3468,6 +3586,14 @@ class CoverBrowser(ImageBrowser):
             menu.addAction('Copy paths', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
             menu.addAction('Open containing folder externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
         menu.addAction('Clear selection', self.clear_selection)
+        menu.addSeparator()
+        details = menu.addAction('Detail list')
+        details.setCheckable(True)
+        details.setChecked(self._details)
+        details.triggered.connect(self.set_details)
+        menu.addAction('Search and filters', lambda: self.search_button.setChecked(True))
+        menu.addAction('Select all visible items', self.select_all)
+        menu.addAction('Invert visible selection', self.invert_selection)
         menu.exec(point)
 
     def choose_folder(self):
@@ -3478,18 +3604,106 @@ class CoverBrowser(ImageBrowser):
     def clear_selection(self):
         self._selected_file_paths.clear()
         self.clear_folder_selection()
+        if hasattr(self, 'table'):
+            self.table.clearSelection()
         self.repaint_content()
+
+    def visible_cards(self):
+        scroll = self.tabs.currentWidget()
+        return [c for section in self._sections_by_path.values() if scroll and scroll.isAncestorOf(section) and section.isVisible() for c in section._cards if c.isVisible()]
+
+    def select_all(self):
+        if self._details:
+            self.table.selectAll()
+        else:
+            self._selected_file_paths = {c.filepath for c in self.visible_cards()}
+            self.repaint_content()
+
+    def invert_selection(self):
+        if self._details:
+            from PySide6.QtCore import QItemSelectionModel, QItemSelection
+            if self.proxy.rowCount():
+                selection = QItemSelection(self.proxy.index(0, 0), self.proxy.index(self.proxy.rowCount() - 1, 5))
+                self.table.selectionModel().select(selection, QItemSelectionModel.Toggle | QItemSelectionModel.Rows)
+        else:
+            self._selected_file_paths = {c.filepath for c in self.visible_cards()} - self._selected_file_paths
+            self.repaint_content()
 
     def repaint_content(self):
         for section in self._sections_by_path.values():
             for card in section._cards:
                 card.update()
+        if hasattr(self, 'table'):
+            self.table.viewport().update()
 
     def filter_rows(self):
-        self.repaint_content()
+        try:
+            terms = parse_query(self.search.text(), self.window.config['fields'])
+        except ValueError as exc:
+            self.search.setToolTip(str(exc))
+            return
+        self._filter_serial += 1
+        serial = self._filter_serial
+        if self._filter_task:
+            self._filter_task.cancel.set()
+        self.proxy.terms = terms
+        self.proxy.invalidate()
+        if not self.active_filter() and not self._details:
+            if self._filter_map is not None:
+                self._filter_map = None
+                self.reload_folders()
+            self.repaint_content()
+            self.search_button.setToolTip('Search and filters · Ctrl+F')
+            return
+        roots = [str(self.current)] if self._details and self.current else [f['path'] for f in self.configured_folders()]
+        config = copy.deepcopy(self.window.config)
+        recursive = self.recursive.isChecked()
+        kind = self.kind.currentText()
+        extensions = {part.strip().lstrip('.').lower() for part in self.extension.text().split(',') if part.strip()}
+        flagged = self.flagged.isChecked()
+        flags = set(config['flags'])
+        self.search_button.setToolTip('Searching…')
+
+        def found(result):
+            if serial != self._filter_serial or self._closing:
+                return
+            entries, warnings = result
+            self.model.set_entries(entries)
+            self.proxy.invalidate()
+            filtered = [e for e in entries if matches(e, terms)
+                        and (kind == 'All types' or e.kind == kind)
+                        and (not extensions or e.path.suffix.lower().lstrip('.') in extensions)
+                        and (not flagged or str(e.path) in flags)]
+            self.search_button.setToolTip(f'{len(filtered)} matches across {len(roots)} folder tabs' + ('\n' + '\n'.join(warnings[:5]) if warnings else ''))
+            self.search.setToolTip(' · '.join(f'{field or "Any"}: {value}' for field, value in terms))
+            if not self._details:
+                mapping = {str(root): (set(), set()) for root in roots}
+                for entry in filtered:
+                    for root_text in roots:
+                        root = Path(root_text)
+                        if not entry.path.is_relative_to(root):
+                            continue
+                        current = entry.path if entry.is_dir else entry.path.parent
+                        mapping.setdefault(str(current), (set(), set()))
+                        if not entry.is_dir:
+                            mapping[str(current)][0].add(str(entry.path))
+                        while current != root and current.is_relative_to(root):
+                            parent = current.parent
+                            mapping.setdefault(str(parent), (set(), set()))[1].add(str(current))
+                            current = parent
+                self._filter_map = {key: (sorted(files, key=_natural_sort_key), sorted(folders, key=_natural_sort_key)) for key, (files, folders) in mapping.items()}
+                self.reload_folders()
+            values = sorted({f'{config["fields"][k]}:"{v}"' for e in entries for k, v in e.fields.items() if k in config['fields']})
+            completer = QCompleter(values[:3000], self.search)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            self.search.setCompleter(completer)
+
+        self._filter_task = self.window.jobs.start(lambda task: scan(roots, config, recursive, task.cancel, DATA_DIR / 'catalog.sqlite'), found,
+            lambda error: self.search_button.setToolTip(error))
 
     def state(self):
-        return {'path': str(self._location or self.current or '')}
+        return {'path': str(self._location or self.current or ''), 'details': self._details,
+                'header': bytes(self.table.horizontalHeader().saveState().toBase64()).decode()}
 
     def restore(self, state):
         if self.editable and state.get('path') and Path(state['path']).is_dir() and self.window.service.inside(state['path'], True):
@@ -3497,6 +3711,10 @@ class CoverBrowser(ImageBrowser):
         # Cover starts with the first source tab and collapsed child folders.
         if self.tabs.count():
             self.tabs.setCurrentIndex(0)
+        if state.get('header'):
+            self.table.horizontalHeader().restoreState(QByteArray.fromBase64(state['header'].encode()))
+        if self.editable and state.get('details'):
+            self.set_details(True)
 
 
 class ShelfList(QListWidget):
@@ -4773,6 +4991,18 @@ if _IS_WINDOWS:
     _SM_CYSIZEFRAME = 33
     _SM_CXPADDEDBORDER = 92
     _RESIZE_BORDER_PX = 8  # invisible grab margin for edge/corner resize
+
+
+def _make_search_icon():
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor('#b4b4b4'), 1.3))
+    painter.drawEllipse(QRectF(1.5, 1.5, 7, 7))
+    painter.drawLine(QPointF(8, 8), QPointF(12, 12))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _make_gear_icon(color: str = "#b4b4b4", size: int = 14) -> QIcon:
