@@ -11,12 +11,12 @@ A local media workspace for finding content in structured folders, collecting a 
 
 ## features
 
-- browse any number of source folders, or enter a folder path directly
+- browse any number of source folders in Cover’s original tabbed, collapsible explorer
 - search both explorers independently, with file-type, extension, and flag filters
 - extract searchable fields from user-defined folder-name patterns
 - collect files and folders on a session-only shelf without moving their originals
 - copy selections into a sorting folder through drag and drop or menus
-- manage real files and subfolders in tiles, a detail list, or two panes side by side
+- manage real files and subfolders in Cover thumbnail cards, a detail list, or two panes side by side
 - create folders, copy, move, duplicate, rename, batch rename, and move items to the system trash
 - pin frequently used sorting subfolders and flag selected items
 - inspect images with fit/zoom controls and play GIFs and videos in the larger viewer
@@ -35,7 +35,7 @@ Sources, field names, rules, and aliases are configuration. No particular creato
 2. Download Vael using **Code → Download ZIP**, then extract it.
 3. Open the `sorter` folder and double-click `start.bat` on Windows.
 4. The launcher creates a local `venv`, installs PySide6, and starts the app. Initial setup needs internet access.
-5. Open **Settings**, add your source folders, and select an existing dedicated sorting folder.
+5. Open the **gear in the lower workspace**, expand **Folders**, add your source folders, and select an existing dedicated sorting folder.
 
 Use `start.bat` for first-time setup, dependency maintenance, or visible error output. For everyday launches, including launchers such as Rovyl, use `start_silent.bat`. It reuses the installed environment without dependency checks or updates and asks you to run normal setup if the environment is missing.
 
@@ -51,27 +51,29 @@ Close sorter and delete its folder, including `venv` and `.local`. Your source f
 
 ### library above
 
-Use the source selector to browse all configured sources or an individual one. Enter a path to browse another folder, or double-click a folder to enter it. Back, forward, parent, and refresh controls work independently in each explorer.
+The upper explorer uses Cover’s window styling, folder tabs, collapsible headers, portrait cards, spacing, scrolling, and in-window image viewer. Each configured source gets a tab. Click a folder header to expand it; thumbnails load as folders become visible. Source folders start with collapsed children, as in Cover. Temporarily hidden tabs can be restored from the tab controls.
 
-Enable **Subfolders** to include descendants. Disable it to show only the current folder's immediate contents. Search narrows the currently loaded scope; it does not silently search unrelated drives. Image, GIF, Video, Folder, and Other filters can be combined with extensions such as `png,jpg`.
+Click a card to inspect it. **Ctrl-click** toggles selection and **Shift-click** extends a card selection. Drag selected cards to the shelf or a sorting folder. Folder headers support selection, drag and drop, and rectangular selection across headers. Middle-button dragging pans the explorer. Right-click selected folders to load their full contents recursively in the background; loading can be cancelled.
 
-Choose **Tiles** for visual selection or **Details** for sortable, resizable columns. **Group by folder** sorts items together by their containing directory; tile captions show their containing folder during recursive browsing. Ctrl-click, Shift-click, and selection dragging support multiple items.
+The small **search icon** opens that explorer’s search and filters. Searches cover its configured folder tabs; **Subfolders** includes descendants. Image, GIF, Video, Folder, and Other filters can be combined with extensions such as `png,jpg`. The lower explorers have independent searches and filters, including flags.
 
-Folder scans run in the background. Recent directory snapshots can appear immediately from the local catalog while sorter checks for changes. Typing another search filters the loaded catalog without rescanning the drive. Use Refresh / F5 for changes deep inside a recursive source. Changes to the currently open directory are also checked periodically.
+The context menu offers **Detail list** for sortable, resizable columns. In that view, searches use the current folder and its descendants when Subfolders is enabled. Double-click a folder to enter it or a file to inspect it. Turn Detail list off to return to Cover’s folder cards.
+
+Folder scans and thumbnail decoding run in the background. Search changes cancel outdated scans. Use Refresh / F5 to reload the active folder after external changes; the active directory is also checked periodically. Large recursive searches can take time.
 
 ### session shelf
 
-Use **Add selection to shelf**, the context menu, or drag files onto the shelf. Repeated references are not added twice. The shelf holds references, not temporary copies, and disappears when the app closes.
+Open **Shelf** in the lower workspace controls. Use **Add to session shelf** in the context menu, or drag files onto the shelf. Its cards use the same portrait layout as the explorers; Ctrl-click selects references for copying or removal. Repeated references are not added twice. The shelf holds references, not temporary copies, and disappears when the app closes.
 
 Drag selected shelf entries onto a sorting folder, or use **Copy to target**. That button copies selected entries, or the whole shelf when none are selected, into the last active lower pane. Copied references remain on the shelf for reuse. **Remove selected** and **Clear** only remove references; they never delete the files.
 
 ### sorting workspace below
 
-Choose one sorting root in Settings. Both lower panes stay inside that folder. Use **Two folders side by side** to organize between two different subfolders. Each pane has its own path, search, filters, sort order, and view. Pin/unpin the current folder to make it available in the lower folder selectors.
+Choose one sorting root in Settings. Both lower panes stay inside that folder. Use **Split view** to organize between two different subfolders. Each pane uses the same Cover explorer, with independent navigation, search, filters, and optional detail list. Pin/unpin the current folder to give it a lower tab. The folder you interact with becomes the current destination; use **Open sorting subfolder…** or **Parent folder** in the menu to navigate explicitly.
 
 Drop onto a visible folder to target it, or onto empty space to use the current folder. A drag from the library copies external content. An internal drag of items already inside the sorting root moves them; hold **Ctrl** to copy instead. Shelf drops and drops from other applications always copy. The status bar describes internal drag behavior.
 
-The **Edit** menu and right-click menu contain:
+The lower **⋯ folder tools** menu and right-click menu contain:
 
 - copy, cut, paste, copy to folder, and move to folder
 - duplicate with an automatically unique name
@@ -129,7 +131,7 @@ When inheritance is enabled, recognized fields pass down from the configured sou
 | `g:Pokemon ch:Misty` | GENRE contains Pokemon AND CHAR contains Misty |
 | `s:"Beach Night"` | SCENE contains the phrase Beach Night |
 
-Search is case-insensitive and uses partial matches. Multiple terms are combined with AND. Quotes keep multiword values together. The status line shows interpreted search terms, and autocomplete offers field values from the loaded entries. Each explorer's query and filters are independent.
+Search is case-insensitive and uses partial matches. Multiple terms are combined with AND. Quotes keep multiword values together. The search field’s tooltip shows interpreted search terms, and autocomplete offers field values from the loaded entries. Each explorer's query and filters are independent.
 
 **Profiles & exclusions** configures ignored folder/file names using wildcard patterns, one per line. Export/import shares fields, rules, and relevant preferences as JSON; source paths, sorting root, pins, flags, and rule scope paths are not exported. Importing changes the dialog first; Save applies it.
 
@@ -137,9 +139,9 @@ Search is case-insensitive and uses partial matches. Multiple terms are combined
 
 ## images, GIFs & videos
 
-Images receive background thumbnails with a bounded memory cache. GIFs and videos use static media tiles with a subtle colored outline; their exact extension appears in the tooltip and on hover. They never autoplay in the explorer.
+Images receive background thumbnails cached for the session. GIFs and videos use static media tiles with a subtle colored outline; their exact extension appears in the tooltip and on hover. They never autoplay in the explorer.
 
-Double-click a file to open the viewer. Images support Fit, 100%, and zoom. GIFs animate there and can be paused. Videos provide play/pause, seeking, time, and volume. Left/Right moves between media items in the current filtered view, and Space toggles playback. Add to shelf works from the viewer too.
+Click a card to open Cover’s in-window viewer (double-click in Detail list). Images support Fit, Actual size, mouse-wheel zoom, and dragging to pan; right-click for viewer actions. Escape or clicking outside closes the viewer. GIFs animate there and can be paused. Videos provide play/pause, seeking, time, and volume. Left/Right moves between media items in the current filtered view, and Space toggles playback. Add to shelf works from the viewer too.
 
 Recognized image extensions: PNG, JPG/JPEG, WebP, BMP, TIFF, and AVIF. Video extensions: MP4, MKV, WebM, MOV, AVI, M4V, WMV, MPEG, and MPG. Actual image decoding and video playback depend on the available Qt codecs. Unsupported or damaged files remain manageable, with an explanation and **Open externally** in the viewer.
 
@@ -154,7 +156,8 @@ Shortcuts act on the focused explorer and do not run file actions while typing i
 | `Ctrl+C` | Copy selected file references |
 | `Ctrl+X` / `Ctrl+V` | Cut / paste in the sorting workspace |
 | `Ctrl+A` | Select all |
-| `Ctrl+F` / `Ctrl+L` | Focus search / path |
+| `Ctrl+F` | Open search and filters |
+| `Ctrl+Up` / `Ctrl+Down` | Navigate sibling folders |
 | `F5` / `Alt+Up` | Refresh / parent folder |
 | `F2` | Rename; multiple items open batch rename |
 | `F` | Toggle flags in a lower pane |
@@ -174,14 +177,15 @@ requirements.txt              — PySide6 dependency
 start.bat                     — Windows setup, maintenance, and launch
 start_silent.bat              — everyday launch without setup
 README.md                     — this guide and the in-app Help content
+icon.ico / icon.png           — application icons (preferred)
 cover.png                     — optional README artwork and fallback app icon
-cover.ico                     — optional Windows app icon
+cover.ico                     — optional fallback Windows app icon
 .local/settings.json          — local preferences, paths, flags, and layout
 .local/catalog.sqlite         — disposable recent directory snapshots
 venv/                         — local Python environment
 ```
 
-Add your artwork as **`cover.png`** and **`cover.ico`** beside `app.py`. The README already references `cover.png`. Windows prefers `cover.ico` for the app/window icon and falls back to `cover.png`; other platforms use `cover.png`. Restart the app after adding artwork. Missing artwork does not prevent launch.
+Keep artwork beside `app.py`. The README displays **`cover.png`**. On Windows the app tries **`icon.ico`**, **`cover.ico`**, **`icon.png`**, then **`cover.png`**. The supplied icons and Cover-style artwork naming both work. Restart after changing artwork. Missing artwork does not prevent launch.
 
 `.local` and `venv` are excluded from Git. Deleting the catalog while the app is closed rebuilds it on the next scan. Deleting `settings.json` resets configuration and flags. The shelf, internal cut selection, and undo history are session-only. Window/view preferences and flags are saved locally; no content is uploaded or published.
 
