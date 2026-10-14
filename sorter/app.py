@@ -4303,14 +4303,28 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.config = copy.deepcopy(config)
         self.setWindowTitle('Settings — sorter')
-        self.resize(800, 660)
-        layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-        layout.addWidget(tabs)
+        self.setMinimumWidth(560)
+        self.resize(620, 480)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setObjectName('settingsScroll')
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
         folders = QWidget()
         f = QVBoxLayout(folders)
+        f.setContentsMargins(0, 0, 0, 0)
         f.addWidget(QLabel('Sources · browse and copy from any number of folders'))
         self.sources = QListWidget()
+        self.sources.setMaximumHeight(150)
+        self.sources.setDragDropMode(QAbstractItemView.InternalMove)
         self.sources.addItems(config['sources'])
         f.addWidget(self.sources, 1)
         row = QHBoxLayout()
@@ -4339,9 +4353,10 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.addRow('When a name already exists', self.collision)
         f.addLayout(form)
-        tabs.addTab(folders, 'Folders')
+        self._section(layout, 'Folders', 'Source order determines the tab order. Content can be modified only inside the chosen sorting folder.').addWidget(folders)
         naming = QWidget()
         n = QVBoxLayout(naming)
+        n.setContentsMargins(0, 0, 0, 0)
         n.addWidget(QLabel('Fields · freely chosen names and unique search aliases'))
         self.fields = QTableWidget(0, 2)
         self.fields.setHorizontalHeaderLabels(['Field name', 'Search alias'])
@@ -4351,12 +4366,13 @@ class SettingsDialog(QDialog):
         n.addLayout(self.table_tools(self.fields, ['FIELD', 'alias']))
         n.addWidget(QLabel('Folder patterns · first matching rule wins at each folder level'))
         self.rules = QTableWidget(0, 2)
+        self.rules.setMaximumHeight(170)
         self.rules.setHorizontalHeaderLabels(['Pattern', 'Scope folder (empty = all sources)'])
         self.rules.horizontalHeader().setStretchLastSection(True)
         self.rules.setColumnWidth(0, 320)
         n.addWidget(self.rules)
         n.addLayout(self.table_tools(self.rules, ['[GENRE]-[CHAR]_[SCENE]', ''], ordered=True))
-        self.inherit = QCheckBox('Inherit fields from parent folders; closer folders override matching fields')
+        self.inherit = QCheckBox('Inherit fields from parent folders')
         self.inherit.setChecked(config['inherit'])
         n.addWidget(self.inherit)
         preview_row = QHBoxLayout()
@@ -4370,9 +4386,10 @@ class SettingsDialog(QDialog):
         self.sample_result = QLabel('Use separators that do not also occur ambiguously inside your field values.')
         self.sample_result.setWordWrap(True)
         n.addWidget(self.sample_result)
-        tabs.addTab(naming, 'Naming & search')
+        self._section(layout, 'Naming & search', 'Define fields, search aliases, and folder patterns. The first matching rule wins; closer folders override inherited fields.').addWidget(naming)
         advanced = QWidget()
         a = QVBoxLayout(advanced)
+        a.setContentsMargins(0, 0, 0, 0)
         a.addWidget(QLabel('Ignored names · one wildcard pattern per line, e.g. .git or temp-*'))
         self.ignored = QPlainTextEdit('\n'.join(config['ignored']))
         a.addWidget(self.ignored)
@@ -4387,12 +4404,54 @@ class SettingsDialog(QDialog):
         note = QLabel('Profiles contain naming rules and preferences. Source folders, sorting folder, pins and flags remain local. Scope paths in rules are omitted when exporting.\n\nSettings and the disposable catalog are stored in sorter/.local/. The session shelf is never saved.')
         note.setWordWrap(True)
         a.addWidget(note)
-        tabs.addTab(advanced, 'Profiles & exclusions')
+        self._section(layout, 'Profiles & exclusions', 'Share naming rules and exclude filenames or folders with wildcard patterns.').addWidget(advanced)
+        layout.addStretch(1)
         self.populate_tables(config)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QWidget()
+        buttons = QHBoxLayout(footer)
+        buttons.setContentsMargins(16, 8, 16, 16)
+        buttons.addStretch()
+        close = QPushButton('Close')
+        close.clicked.connect(self.reject)
+        buttons.addWidget(close)
+        save = QPushButton('Save')
+        save.setObjectName('accentButton')
+        save.clicked.connect(self.save)
+        buttons.addWidget(save)
+        outer.addWidget(footer)
+
+    def _section(self, parent_layout, title, help_text):
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        toggle = QToolButton()
+        toggle.setText(title)
+        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.ArrowType.RightArrow)
+        toggle.setCheckable(True)
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setStyleSheet("QToolButton { border: none; background: transparent; padding: 2px 0px; }")
+        header.addWidget(toggle)
+        header.addWidget(self._help_label(help_text))
+        header.addStretch(1)
+        parent_layout.addLayout(header)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(12, 4, 0, 12)
+        parent_layout.addWidget(body)
+        body.hide()
+        toggle.toggled.connect(body.setVisible)
+        toggle.toggled.connect(lambda opened: toggle.setArrowType(
+            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
+        return body_layout
+
+    @staticmethod
+    def _help_label(text):
+        label = QLabel("?")
+        label.setObjectName("hint")
+        label.setToolTip(text)
+        label.setAccessibleName("Help: " + text)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return label
 
     def populate_tables(self, config):
         self.fields.setRowCount(0)
@@ -5557,6 +5616,12 @@ class Window(QMainWindow):
         settings.setToolTip('Settings')
         settings.clicked.connect(self.settings)
         controls.addWidget(settings)
+        help_button = QToolButton()
+        help_button.setObjectName('browserSettingsBtn')
+        help_button.setText('?')
+        help_button.setToolTip('Help and shortcuts')
+        help_button.clicked.connect(self.help)
+        controls.addWidget(help_button)
         self.target_label = QLabel()
         self.target_label.setObjectName('hint')
         self.target_label.hide()
@@ -5606,6 +5671,7 @@ class Window(QMainWindow):
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
         self._img_viewer = MediaViewerOverlay(self._content_root)
+        self._modal_dim_overlay = _ModalDimOverlay(self._content_root)
         self.browsers = [self.library, self.sorter, self.second]
         for browser in self.browsers:
             browser.update_roots()
@@ -5736,12 +5802,19 @@ class Window(QMainWindow):
     def notice(self, text):
         QMessageBox.information(self, 'sorter', str(text))
 
+    def exec_dialog(self, dialog):
+        self._modal_dim_overlay.show_overlay()
+        try:
+            return dialog.exec()
+        finally:
+            self._modal_dim_overlay.hide_overlay()
+
     def settings(self):
         if self.operation_task:
             self.notice('Wait for the current file operation before changing settings.')
             return
         dialog = SettingsDialog(self.config, self)
-        if dialog.exec() == QDialog.Accepted:
+        if self.exec_dialog(dialog) == QDialog.Accepted:
             old_root = self.config['sort_root']
             self.config = dialog.config
             if self.config['sort_root'] != old_root:
@@ -5949,7 +6022,7 @@ class Window(QMainWindow):
         if not browser.selected_paths():
             return
         dialog = RenameDialog(browser.selected_paths(), self)
-        if dialog.exec() == QDialog.Accepted:
+        if self.exec_dialog(dialog) == QDialog.Accepted:
             self.run_operations('Batch rename', [(str(path), lambda p=path, n=name: self.service.rename(p, n)) for path, name in dialog.mapping])
 
     def trash_selection(self, browser):
@@ -6013,7 +6086,7 @@ class Window(QMainWindow):
             except OSError as exc:
                 rows.append(f'{path}\n{exc}\n')
         text.setPlainText('\n'.join(rows))
-        dialog.exec()
+        self.exec_dialog(dialog)
 
     def open_image_viewer(self, card, cards):
         self._img_viewer.open_viewer(card, cards)
@@ -6044,7 +6117,7 @@ class Window(QMainWindow):
             text.setOpenExternalLinks(True)
             text.setMarkdown(path.read_text(encoding='utf-8'))
             layout.addWidget(text)
-            dialog.exec()
+            self.exec_dialog(dialog)
         else:
             self.notice('README.md is not available next to app.py.')
 
