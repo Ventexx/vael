@@ -782,7 +782,8 @@ def _load_pixmap(path: str) -> QImage:
     """Return a cached thumbnail image, safe to decode on a worker thread."""
     if Path(path).suffix.lower() not in IMAGES:
         return QImage()
-    if path not in _PIXMAP_CACHE:
+    cached = _PIXMAP_CACHE.get(path)
+    if cached is None:
         reader = QImageReader(path)
         reader.setAutoTransform(True)
         size = reader.size()
@@ -799,7 +800,8 @@ def _load_pixmap(path: str) -> QImage:
             y = (scaled.height() - THUMB_H) // 2
             pix = scaled.copy(x, y, THUMB_W, THUMB_H)
         _PIXMAP_CACHE[path] = pix
-    return _PIXMAP_CACHE[path]
+        return pix
+    return cached
 
 
 class PixmapWorker(QThread):
@@ -1242,6 +1244,7 @@ class ThumbnailCard(QWidget):
         self._hovered = False
         self._drag_start_pos = None
         self._image_loaded = False
+        self._image_requested = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1258,7 +1261,7 @@ class ThumbnailCard(QWidget):
     def request_image(self):
         """Called by FolderSection once the section is expanded. No-op if
         this card's image is already loaded/loading."""
-        if self._image_loaded:
+        if self._image_loaded or self._image_requested:
             return
         extension = Path(self.filepath).suffix.lower()
         if extension not in IMAGES:
@@ -1266,9 +1269,11 @@ class ThumbnailCard(QWidget):
             self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(28, 28))
             self._image_loaded = True
             return
-        if self.filepath in _PIXMAP_CACHE:
-            self._apply_pixmap(_PIXMAP_CACHE[self.filepath])
+        cached = _PIXMAP_CACHE.get(self.filepath)
+        if cached is not None:
+            self._apply_pixmap(cached)
         else:
+            self._image_requested = True
             PIXMAP_WORKER.submit(self, self.filepath)
 
     def _on_pixmap_ready(self, card, pix):
@@ -1920,7 +1925,8 @@ class FolderSection(QWidget):
     def _relayout_cards(self):
         if not isValid(self) or not isValid(self.card_widget):
             return
-        avail_w = self.card_widget.width()
+        available = self.browser.width() - self.card_widget.mapTo(self.browser, QPoint(0, 0)).x() - 12
+        avail_w = min(self.card_widget.width(), max(THUMB_W, available))
         if avail_w < THUMB_W:
             return
         cols = max(1, avail_w // (THUMB_W + 6))
@@ -2901,6 +2907,9 @@ class ImageBrowser(QWidget):
         prefix = path.rstrip(os.sep) + os.sep
         for cached_path in [p for p in _ROUGH_SCAN_CACHE if p == path or p.startswith(prefix)]:
             del _ROUGH_SCAN_CACHE[cached_path]
+        for cached_path in list(_PIXMAP_CACHE):
+            if cached_path.startswith(prefix):
+                _PIXMAP_CACHE.pop(cached_path, None)
         self._purge_section_registry(path)
 
         old_section = self._top_sections[index]
@@ -3026,6 +3035,9 @@ class ImageBrowser(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_status_bar()
+        for section in getattr(self, "_sections_by_path", {}).values():
+            if section._expanded and section._cards:
+                QTimer.singleShot(0, section._relayout_cards)
 
     def _position_status_bar(self):
         """Float the settings row over the top-right corner of the tab
@@ -3791,7 +3803,7 @@ class SettingsDialog(QDialog):
         header = QHBoxLayout()
         header.setSpacing(4)
         toggle = QToolButton()
-        toggle.setText(title)
+        toggle.setText(title.replace("&", "&&"))
         toggle.setMinimumWidth(toggle.fontMetrics().horizontalAdvance(title) + 30)
         toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toggle.setArrowType(Qt.ArrowType.RightArrow)
