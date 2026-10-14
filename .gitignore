@@ -42,6 +42,9 @@ cover/workflows/
 cover/outputs/
 cover/workflows_config.json
 
+# sorter local preferences, flags, and disposable catalog
+sorter/.local/
+
 # === OS cruft ===
 .DS_Store
 Thumbs.db

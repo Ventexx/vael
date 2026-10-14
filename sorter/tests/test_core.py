@@ -6,10 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core.catalog import scan
-from core.naming import NamingRules, compile_pattern, matches, parse_query
-from core.operations import FileService, top_level_selection
-from core.settings import DEFAULTS
+from app import scan, NamingRules, compile_pattern, matches, parse_query, FileService, top_level_selection, DEFAULTS
 
 
 class NamingTests(unittest.TestCase):
