@@ -481,6 +481,7 @@ def top_level_selection(paths):
 # BACKGROUND TASKS AND MEDIA MODELS
 # ========================================================================
 import sys
+import math
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -488,11 +489,11 @@ from datetime import datetime
 from PySide6.QtCore import (
     Qt, QObject, Signal, QRunnable, QThreadPool, QTimer, QUrl, QSize, QRect,
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QMimeData, QByteArray,
-    QFile, QIODevice,
+    QFile, QIODevice, QPoint, QPointF, QRectF, QEvent,
 )
 from PySide6.QtGui import (
     QColor, QImageReader, QPixmap, QIcon, QPainter, QPen, QDrag, QKeySequence,
-    QAction, QDesktopServices, QMovie, QShortcut,
+    QAction, QDesktopServices, QMovie, QShortcut, QPalette, QPainterPath, QGuiApplication,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -501,7 +502,8 @@ from PySide6.QtWidgets import (
     QMenu, QMessageBox, QFileDialog, QInputDialog, QSlider, QProgressBar,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
     QListWidgetItem, QPlainTextEdit, QFormLayout, QDialogButtonBox, QSpinBox,
-    QScrollArea, QGroupBox, QCompleter,
+    QScrollArea, QGroupBox, QCompleter, QToolButton, QFrame, QGridLayout, QSizePolicy,
+    QSplitterHandle, QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem, QSizeGrip,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -1745,40 +1747,882 @@ class RenameDialog(QDialog):
 # ========================================================================
 # APPLICATION COORDINATION
 # ========================================================================
-STYLE = '''
-QWidget { background: #181b1e; color: #dfe4de; font-family: "Segoe UI", sans-serif; font-size: 12px; }
-QMainWindow, QDialog { background: #181b1e; }
-QLabel#brand { font-size: 26px; font-weight: 650; color: #e9f0e6; }
-QLabel#sectionTitle { font-size: 14px; font-weight: 600; color: #b7cbb7; padding-right: 8px; }
-QLabel#muted { color: #8e9993; }
-QLineEdit, QPlainTextEdit, QSpinBox, QComboBox { background: #23282b; border: 1px solid #353d3b; border-radius: 5px; padding: 6px; selection-background-color: #48634e; }
-QLineEdit:focus, QPlainTextEdit:focus { border-color: #8aa98d; }
-QPushButton { background: #292f30; border: 1px solid #3a4540; border-radius: 5px; padding: 6px 10px; }
-QPushButton:hover { background: #354139; border-color: #749079; }
-QPushButton:pressed, QPushButton:checked { background: #405647; }
-QPushButton:disabled { color: #727a75; background: #202525; }
-QListView, QTableView, QListWidget { background: #191d20; alternate-background-color: #202629; border: 1px solid #303836; border-radius: 5px; outline: none; }
-QTableView::item, QListWidget::item { padding: 5px; }
-QTableView::item:selected, QListWidget::item:selected { background: #3c5143; color: #f1f4ee; }
-QHeaderView::section { background: #292f30; border: none; padding: 7px; color: #acbbae; }
-QSplitter::handle { background: #303a33; }
-QSplitter::handle:hover { background: #657f69; }
-QMenu { background: #252b2b; border: 1px solid #46554b; padding: 5px; }
-QMenu::item { padding: 7px 24px; }
-QMenu::item:selected { background: #3e5345; }
-QScrollBar:vertical { width: 11px; background: #1b2021; }
-QScrollBar::handle:vertical { background: #48554c; min-height: 24px; border-radius: 5px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QTabWidget::pane { border: 1px solid #354039; }
-QTabBar::tab { background: #272e2c; padding: 8px 16px; }
-QTabBar::tab:selected { background: #405247; }
-QProgressBar { border: 1px solid #3a4940; border-radius: 4px; text-align: center; }
-QProgressBar::chunk { background: #5d8267; }
-QToolTip { background: #303b33; color: #eef1e9; border: 1px solid #6a8170; padding: 5px; }
-QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid #657567; border-radius: 3px; background: #222a26; }
-QCheckBox::indicator:checked { background: #88aa8b; border: 2px solid #c4d8c4; }
-'''
+STYLE = """
+/* ============================================================
+   vael. cover — shares vael.'s design language (near-black
+   surfaces, teal accent, frameless window chrome) with the
+   rest of the vael. product line (see vael. indexer).
+   ============================================================ */
 
+/* ---- Global ---- */
+QWidget {
+    background-color: #0a0a0a;
+    color: #e8e8e8;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+
+QMainWindow {
+    background-color: #0a0a0a;
+}
+
+/* Frameless top-level window must stay fully transparent so only the
+   rounded #appShell surface underneath it is ever visible. */
+#mainWindowFrameless {
+    background: transparent;
+}
+
+/* ---- App shell / custom title bar ---- */
+#appShell {
+    background: #0a0a0a;
+    border: 1px solid #5c5c5c;
+    border-radius: 10px;
+}
+#appShell[maximized="true"] {
+    border-radius: 0px;
+    border: 1px solid rgba(255,255,255,0.14);
+}
+#appTitleBar {
+    background: #0a0a0a;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.16);
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+}
+#appShell[maximized="true"] #appTitleBar {
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+}
+#brandLbl {
+    background: transparent;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+#winMinBtn, #winMaxBtn, #winCloseBtn {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.11);
+    border-radius: 4px;
+    color: rgba(200,200,200,0.65);
+    font-size: 13px;
+    font-weight: 500;
+}
+#winMinBtn:hover, #winMaxBtn:hover {
+    background: rgba(255,255,255,0.09);
+    border-color: rgba(255,255,255,0.22);
+    color: rgba(230,230,230,0.95);
+}
+#winMinBtn:pressed, #winMaxBtn:pressed {
+    background: rgba(255,255,255,0.04);
+}
+#winCloseBtn:hover {
+    background: rgba(197,79,79,0.75);
+    border-color: rgba(220,100,100,0.85);
+    color: white;
+}
+#winCloseBtn:pressed {
+    background: rgba(160,60,60,0.85);
+}
+
+#appRoot {
+    background: #0a0a0a;
+    border-bottom-left-radius: 9px;
+    border-bottom-right-radius: 9px;
+}
+#appShell[maximized="true"] #appRoot {
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}
+
+/* ---- Left sidebar (Workflows) ---- */
+#workflowSidebar {
+    background-color: #121212;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-left: none;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+#edgeTabChevron {
+    color: rgba(220,220,220,0.85);
+    font-weight: 700;
+    font-size: 11px;
+}
+/* Small pill-shaped open/close handle -- this widget's footprint IS the
+   handle (see _WorkflowEdgeTab / _OutputsEdgeTab), so nothing outside it
+   is clickable or painted. */
+#edgeTabPill {
+    background-color: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.30);
+}
+#edgeTabPill:hover {
+    background-color: rgba(0,212,160,0.30);
+    border-color: rgba(0,212,160,0.75);
+}
+#edgeTabPill:hover #edgeTabChevron {
+    color: #ffffff;
+}
+QListWidget#workflowList::item {
+    padding: 8px 8px;
+    border-radius: 6px;
+    margin-bottom: 2px;
+}
+QListWidget#workflowList::item:selected {
+    background-color: rgba(0,212,160,0.16);
+    color: #e8e8e8;
+    border-left: 2px solid #00d4a0;
+}
+
+/* ---- Buttons ---- */
+QPushButton {
+    background-color: rgba(255,255,255,0.03);
+    color: #e8e8e8;
+    border: 1px solid rgba(255,255,255,0.11);
+    border-radius: 5px;
+    padding: 5px 12px;
+}
+QPushButton:hover {
+    background-color: rgba(0,212,160,0.18);
+    border-color: rgba(0,212,160,0.38);
+    color: #ffffff;
+}
+QPushButton:pressed {
+    background-color: rgba(255,255,255,0.03);
+}
+QPushButton:disabled {
+    color: rgba(200,200,200,0.25);
+    border-color: rgba(255,255,255,0.06);
+    background-color: transparent;
+}
+
+QPushButton#accentButton {
+    background-color: rgba(0,212,160,0.18);
+    border: 1px solid rgba(0,212,160,0.38);
+    color: rgb(60,235,190);
+    font-weight: 700;
+}
+QPushButton#accentButton:hover {
+    background-color: rgba(0,212,160,0.30);
+    border-color: rgba(0,212,160,0.65);
+    color: #ffffff;
+}
+QPushButton#accentButton:pressed {
+    background-color: rgba(0,212,160,0.12);
+}
+QPushButton#accentButton:disabled {
+    background-color: transparent;
+    border-color: rgba(255,255,255,0.06);
+    color: rgba(200,200,200,0.25);
+}
+
+QPushButton#dangerButton {
+    background-color: transparent;
+    border-color: rgba(197,79,79,0.35);
+    color: rgba(220,140,140,0.85);
+}
+QPushButton#dangerButton:hover {
+    background-color: rgba(197,79,79,0.20);
+    border-color: rgba(220,100,100,0.65);
+    color: #ffffff;
+}
+
+QPushButton#modeToggle {
+    background-color: transparent;
+    border: 1px solid rgba(255,255,255,0.11);
+    border-radius: 5px;
+    padding: 4px 12px;
+    color: rgba(200,200,200,0.55);
+}
+QPushButton#modeToggle:hover {
+    color: #e8e8e8;
+}
+QPushButton#modeToggle:checked {
+    background-color: rgba(0,212,160,0.14);
+    color: #00d4a0;
+    border-color: rgba(0,212,160,0.45);
+    font-weight: 600;
+}
+
+/* Small flat icon-only buttons (settings, sidebar toggle) */
+QToolButton#iconButton {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.11);
+    border-radius: 5px;
+    color: rgba(200,200,200,0.65);
+    font-size: 14px;
+    padding: 3px 9px;
+}
+QToolButton#iconButton:hover {
+    background: rgba(0,212,160,0.18);
+    border-color: rgba(0,212,160,0.38);
+    color: #00d4a0;
+}
+QToolButton#iconButton:checked {
+    background: rgba(0,212,160,0.22);
+    border-color: rgba(0,212,160,0.55);
+    color: #00d4a0;
+}
+
+/* ---- Inputs ---- */
+QLineEdit, QSpinBox, QDoubleSpinBox, QTextEdit, QPlainTextEdit {
+    background-color: #181818;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 6px;
+    padding: 5px 9px;
+    color: #e8e8e8;
+    selection-background-color: #00d4a0;
+}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border-color: rgba(0,212,160,0.45);
+    background-color: #1e1e1e;
+}
+
+/* ---- Roster icon (bottom Input Roster) ---- */
+QFrame#rosterIcon {
+    background-color: #141414;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 7px;
+}
+QFrame#rosterIcon:hover {
+    border-color: rgba(0,212,160,0.35);
+}
+QFrame#rosterIcon[dragOver="true"] {
+    border: 1px dashed #00d4a0;
+}
+QFrame#rosterIcon[armed="true"] {
+    border: 2px solid #00d4a0;
+    background-color: rgba(0,212,160,0.08);
+}
+QLabel#rosterIconCanvas {
+    background: transparent;
+    color: rgba(200,200,200,0.35);
+    font-size: 16px;
+    font-weight: 300;
+}
+/* Status text along the bottom strip of free space in the roster's
+   viewport (see RosterBar._position_status_label) -- plain single-line
+   text, no button/pill treatment. */
+QLabel#rosterStatusLabel {
+    background: transparent;
+    border: none;
+    color: rgba(200,200,200,0.45);
+    font-size: 11px;
+}
+QLabel#rosterStatusLabel[error="true"] {
+    color: rgba(224,110,100,0.85);
+}
+/* The run indicator itself (see _RunIndicator) is entirely custom-painted,
+   not stylesheet-driven -- no QSS rule needed here. */
+
+/* ---- Center — Image Browser ---- */
+#imageBrowserPanel {
+    background-color: #0d0d0d;
+}
+QTabWidget#browserTabs::pane {
+    /* No border here on purpose -- the tab strip itself (below) already
+       has its own bordered pill box. A border-top on the pane used to
+       draw a second, unrelated straight line spanning the *entire* width
+       of the panel (running clean through/above the settings icon too),
+       independent of the tab strip's own rounded box, which read as a
+       stray bar sitting above everything. */
+    border: none;
+    top: -1px;
+}
+/* Slim bordered pill for the tab strip itself — mirrors the indexer
+   app's clean status bar so this row takes up minimal vertical space. */
+QTabWidget#browserTabs QTabBar {
+    background: #141414;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 5px;
+    padding: 2px 3px;
+    margin: 2px 2px 4px 2px;
+}
+QTabWidget#browserTabs QTabBar::tab {
+    background: transparent;
+    color: rgba(200,200,200,0.55);
+    font-size: 11px;
+    padding: 4px 10px;
+    margin-right: 2px;
+    border-radius: 3px;
+    border-bottom: 2px solid transparent;
+}
+QTabWidget#browserTabs QTabBar::tab:selected {
+    color: #e8e8e8;
+    background: rgba(255,255,255,0.05);
+    border-bottom: 2px solid #00d4a0;
+}
+QTabWidget#browserTabs QTabBar::tab:hover:!selected {
+    color: rgba(220,220,220,0.85);
+}
+/* Status bar housing the Settings (and restore-hidden) button. This row
+   is always present, even with zero folders configured, so Settings is
+   never unreachable on a fresh/empty setup. */
+QWidget#browserStatusBar {
+    background: transparent;
+}
+QToolButton#browserSettingsBtn, QToolButton#workflowLockBtn {
+    background: transparent;
+    border: none;
+    color: rgba(200,200,200,0.45);
+    font-size: 14px;
+    padding: 1px 2px;
+    margin: -2px 0px 0px 0px;
+}
+QToolButton#browserSettingsBtn:hover, QToolButton#workflowLockBtn:hover {
+    color: rgba(220,220,220,0.85);
+}
+QToolButton#browserSettingsBtn:pressed {
+    color: #e8e8e8;
+}
+
+/* ---- Bulk "Load Selected Folders" overlay ----
+   No panel box on purpose -- the blurred/dimmed backdrop itself (painted
+   in _BulkLoadOverlay.paintEvent) already carries the "held up" meaning,
+   so only the bare text/progress/button float in the middle. */
+#bulkLoadPanel {
+    background: transparent;
+    border: none;
+}
+QProgressBar#bulkLoadProgress {
+    background-color: rgba(255,255,255,0.10);
+    border: none;
+    border-radius: 3px;
+}
+QProgressBar#bulkLoadProgress::chunk {
+    background-color: #00d4a0;
+    border-radius: 3px;
+}
+QLabel#bulkLoadCount {
+    background: transparent;
+    color: #00d4a0;
+    font-size: 15px;
+    font-weight: 700;
+}
+QLabel#bulkLoadDetail {
+    background: transparent;
+    color: rgba(230,230,230,0.85);
+    font-size: 12px;
+}
+/* ---- Queue count badge (red circle/pill, white digits) ---- */
+QLabel#queueCountBadgeLabel {
+    background: transparent;
+    color: #ffffff;
+    font-size: 10px;
+    font-weight: 700;
+}
+/* ---- Folder section header (ported from vael. indexer's #sectionHeader:
+   flat, text-only, no box at rest; depth conveyed by weight/color, not by
+   a bordered frame; hover adds a thin left accent bar). ---- */
+#folderSection     { background: transparent; }
+#sectionHeaderWrap { background: transparent; }
+#sectionBody       { background: transparent; }
+#cardGrid           { background: transparent; }
+
+QToolButton#sectionHeader {
+    background: transparent;
+    border: 1px solid transparent;
+    border-left: 2px solid transparent;
+    border-radius: 6px;
+    text-align: left;
+    padding: 0px 10px 0px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(200,200,200,0.68);
+    letter-spacing: 0.2px;
+}
+QToolButton#sectionHeader[depth0="true"] {
+    color: rgba(220,220,220,0.86);
+    font-weight: 700;
+    font-size: 12px;
+}
+QToolButton#sectionHeader[depth0="false"] {
+    color: rgba(195,195,195,0.55);
+    font-weight: 500;
+}
+QToolButton#sectionHeader:hover {
+    background: rgba(255,255,255,0.045);
+    border: 1px solid transparent;
+    border-left: 2px solid #00d4a0;
+    color: rgba(235,235,235,0.95);
+    font-weight: 700;
+}
+/* Past the recommended recursion-depth guideline (soft warning only, spec
+   section 9) — amber instead of teal, still fully functional. */
+QToolButton#sectionHeader[deep="true"] {
+    color: rgba(226,163,55,0.75);
+}
+QToolButton#sectionHeader[deep="true"]:hover {
+    border-left: 2px solid rgba(226,163,55,0.65);
+    background: rgba(226,163,55,0.05);
+}
+/* Multi-select (ctrl+click or rubber-band drag) — distinct from :hover so
+   a selected-but-not-hovered folder still reads clearly as selected. */
+QToolButton#sectionHeader[selected="true"] {
+    background: rgba(0,212,160,0.16);
+    border: 1px solid rgba(0,212,160,0.4);
+    border-left: 2px solid #00d4a0;
+    color: #00d4a0;
+    font-weight: 700;
+}
+QToolButton#sectionHeader[selected="true"]:hover {
+    background: rgba(0,212,160,0.22);
+}
+QLabel#headerCount {
+    color: rgba(200,200,200,0.35);
+    font-size: 10px;
+}
+QLabel#headerCount[state="error"] {
+    color: rgba(224,110,100,0.85);
+}
+
+/* ---- Thumbnail card (ported from vael. indexer: image only, no
+   filename caption, hover = a faint neutral border, nothing more). ---- */
+#cardImage {
+    background-color: #181818;
+    border-radius: 7px;
+}
+
+/* ---- Bottom bar — Input Roster ----
+   The actual depth cue is a real cast shadow (QGraphicsDropShadowEffect,
+   see RosterBar.__init__) bleeding up from this widget onto the browser
+   above it. Here we just add a crisp, slightly brighter top edge -- a
+   thin "lip" highlight where the raised slab would catch light -- rather
+   than stacking another gradient on top of the shadow. */
+#rosterBar {
+    background-color: #101010;
+    border-top: 1px solid rgba(255,255,255,0.28);
+}
+
+/* ---- Splitter handle (Image Browser / Input Roster) ----
+   No painted background here on purpose -- _CenterSplitterHandle draws
+   its own small three-line "grip" directly in paintEvent, so the handle
+   reads as a thin gap with a subtle drag affordance in the middle rather
+   than a thick colored bar. */
+QSplitter#centerSplitter::handle {
+    background-color: transparent;
+}
+
+/* ---- Sidebar (Outputs / Queue) ---- */
+#outputsSidebar {
+    background-color: #121212;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-right: none;
+    border-top-left-radius: 8px;
+    border-bottom-left-radius: 8px;
+}
+#sidebarHandle {
+    background-color: transparent;
+}
+#sidebarHandle:hover {
+    background-color: rgba(0,212,160,0.45);
+}
+
+/* ---- Outputs sidebar footer action row (Refresh/Open Folder/Clear,
+   Run Queue/Clear) -- kept separate from the Outputs/Queue mode toggle at
+   the top so a narrow sidebar never has to squeeze 4-5 buttons into one
+   row and truncate their labels. ---- */
+#outputsFooter {
+    background: transparent;
+    border-top: 1px solid rgba(255,255,255,0.12);
+}
+#outputsFooter QPushButton {
+    padding: 5px 8px;
+}
+
+/* ---- Lists (queue / outputs) ---- */
+QListWidget {
+    background-color: transparent;
+    border: none;
+    padding: 0;
+}
+QListWidget::item {
+    padding: 6px;
+    border-radius: 5px;
+}
+QListWidget::item:selected {
+    background-color: rgba(0,212,160,0.16);
+    color: #e8e8e8;
+}
+QListWidget::item:hover:!selected {
+    background-color: rgba(255,255,255,0.045);
+}
+
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: transparent;
+    width: 8px;
+    height: 8px;
+    margin: 0;
+}
+QScrollBar::handle {
+    background: rgba(255,255,255,0.14);
+    border-radius: 4px;
+    min-height: 24px;
+}
+QScrollBar::handle:hover {
+    background: #00d4a0;
+}
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0;
+    width: 0;
+}
+
+QLabel#sectionTitle {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e8e8e8;
+    padding: 2px 0 6px 0;
+}
+
+QLabel#hint {
+    color: rgba(200,200,200,0.45);
+    font-size: 11px;
+}
+QLabel#hint[state="warning"] {
+    color: rgba(226,163,55,0.90);
+}
+QLabel#hint[state="error"] {
+    color: rgba(224,110,100,0.85);
+}
+QLabel#hint[state="muted"] {
+    color: rgba(200,200,200,0.30);
+}
+
+QToolTip {
+    background-color: #1e1e1e;
+    color: #e8e8e8;
+    border: 1px solid rgba(255,255,255,0.11);
+    padding: 4px;
+}
+
+QTableWidget {
+    background-color: transparent;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 6px;
+    gridline-color: rgba(255,255,255,0.10);
+}
+QHeaderView::section {
+    background-color: transparent;
+    color: rgba(200,200,200,0.55);
+    padding: 6px;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.14);
+    font-weight: 600;
+}
+
+QProgressBar {
+    background-color: #181818;
+    border: none;
+    border-radius: 3px;
+    text-align: center;
+    color: #e8e8e8;
+    max-height: 3px;
+}
+QProgressBar::chunk {
+    background-color: #00d4a0;
+    border-radius: 3px;
+}
+
+/* ---- Image viewer overlay (ported from vael. indexer) ---- */
+#viewerCloseBtn {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: rgba(220,220,220,0.50);
+    font-size: 15px;
+    font-weight: 400;
+    border-radius: 16px;
+}
+#viewerCloseBtn:hover {
+    background: rgba(139,51,51,0.28);
+    border-color: rgba(197,79,79,0.50);
+    color: rgba(255,107,107,0.95);
+}
+#viewerCloseBtn:pressed {
+    background: rgba(139,51,51,0.18);
+}
+#viewerName {
+    color: rgba(210,210,210,0.70);
+    font-size: 12px;
+    background: transparent;
+}
+#viewerNavBtn {
+    background: rgba(18,18,18,0.72);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px;
+    color: rgba(220,220,220,0.82);
+    font-size: 30px;
+    font-weight: 300;
+}
+#viewerNavBtn:hover {
+    background: rgba(30,30,30,0.90);
+    border-color: rgba(0,212,160,0.55);
+    color: rgba(80,240,195,1.0);
+}
+#viewerNavBtn:pressed {
+    background: rgba(22,22,22,0.85);
+    color: rgba(20,220,170,0.90);
+}
+#viewerNavBtn:disabled {
+    background: rgba(10,10,10,0.30);
+    border-color: rgba(255,255,255,0.05);
+    color: rgba(255,255,255,0.12);
+}
+#viewerImage {
+    background: transparent;
+}
+
+/* ---- Context / app menus (ported from vael. indexer) ----
+   Kept generic (plain QMenu selector) so it applies to every popup menu
+   in the app — existing ones and any added later — without needing an
+   objectName on each. ---- */
+QMenu {
+    background-color: #0a0a0a;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 5px;
+    padding: 3px;
+}
+QMenu::item {
+    padding: 4px 14px;
+    font-size: 11px;
+    border-radius: 3px;
+    color: rgba(220,220,220,0.88);
+}
+QMenu::item:selected {
+    background: rgba(0,212,160,0.16);
+    color: #00d4a0;
+}
+QMenu::item:disabled {
+    color: rgba(200,200,200,0.30);
+}
+QMenu::separator {
+    height: 1px;
+    background: rgba(255,255,255,0.10);
+    margin: 3px 4px;
+}
+"""
+
+def app_icon():
+    # Accept the actual Vael artwork names, retaining cover.* as a fallback.
+    names = ('icon.ico', 'cover.ico', 'icon.png', 'cover.png') if sys.platform == 'win32' else ('icon.png', 'cover.png')
+    return next((APP_DIR / name for name in names if (APP_DIR / name).exists()), APP_DIR / names[0])
+
+_IS_WINDOWS = sys.platform == "win32"
+
+if _IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    class _NCCALCSIZE_PARAMS(ctypes.Structure):
+        _fields_ = [("rgrc", _RECT * 3), ("lppos", ctypes.c_void_p)]
+
+    _WM_NCCALCSIZE = 0x0083
+    _WM_NCHITTEST = 0x0084
+    _HTCLIENT = 1
+    _HTCAPTION = 2
+    _HTLEFT, _HTRIGHT, _HTTOP, _HTBOTTOM = 10, 11, 12, 15
+    _HTTOPLEFT, _HTTOPRIGHT, _HTBOTTOMLEFT, _HTBOTTOMRIGHT = 13, 14, 16, 17
+    _SM_CXSIZEFRAME = 32
+    _SM_CYSIZEFRAME = 33
+    _SM_CXPADDEDBORDER = 92
+    _RESIZE_BORDER_PX = 8  # invisible grab margin for edge/corner resize
+
+
+def _make_gear_icon(color: str = "#b4b4b4", size: int = 14) -> QIcon:
+    """Hand-draw a small, simple line-art gear/cog icon for the Settings
+    button, replacing the old emoji glyph so it matches the rest of the
+    app's minimal, monochrome icon style."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(1.3)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    cx = cy = size / 2
+    r_outer = size / 2 - 1.6
+    r_inner = size / 2 - 3.8
+    hole_r = size * 0.16
+    p.drawEllipse(QPointF(cx, cy), hole_r, hole_r)
+    p.drawEllipse(QPointF(cx, cy), r_inner, r_inner)
+    teeth = 6
+    for i in range(teeth):
+        angle = (2 * math.pi / teeth) * i
+        x1 = cx + r_inner * math.cos(angle)
+        y1 = cy + r_inner * math.sin(angle)
+        x2 = cx + r_outer * math.cos(angle)
+        y2 = cy + r_outer * math.sin(angle)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    p.end()
+    return QIcon(pm)
+
+def _make_win_icon(kind: str, color: str = "#b4b4b4", size: int = 10) -> QIcon:
+    """Hand-draw a small crisp icon for the maximize/restore window button."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    pen = QPen(QColor(color))
+    pen.setWidth(1)
+    p.setPen(pen)
+    if kind == "max":
+        p.drawRect(0, 0, size - 1, size - 1)
+    elif kind == "restore":
+        back = size - 3
+        p.drawRect(2, 0, back, back)
+        p.fillRect(0, 3, back, back, QColor("#0a0a0a"))
+        p.drawRect(0, 3, back, back)
+    elif kind == "min":
+        mid = size // 2
+        p.drawLine(0, mid, size - 1, mid)
+    elif kind == "close":
+        p.drawLine(0, 0, size - 1, size - 1)
+        p.drawLine(0, size - 1, size - 1, 0)
+    p.end()
+    return QIcon(pm)
+
+class _TitleBar(QWidget):
+    """Thin custom title bar for the frameless main window.
+
+    Provides drag-to-move and double-click-to-maximize, matching the
+    frameless chrome used by vael.'s other apps (e.g. vael. indexer).
+    Dragging is delegated to the OS via QWindow.startSystemMove() so
+    Snap zones / Snap Assist / Win+Arrow keep working.
+    """
+
+    def __init__(self, window: "MainWindow", parent=None):
+        super().__init__(parent)
+        self._window = window
+        self._drag_offset = None
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            wh = self._window.windowHandle()
+            started = bool(wh is not None and wh.startSystemMove())
+            if not started:
+                self._drag_offset = (
+                    event.globalPosition().toPoint() - self._window.frameGeometry().topLeft()
+                )
+            event.accept()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_offset is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._window.isMaximized():
+                self._window._toggle_maximize(force_normal=True)
+                self._drag_offset = QPoint(self._window.width() // 2, 14)
+            self._window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._window._toggle_maximize()
+        super().mouseDoubleClickEvent(event)
+
+class _CenterSplitterHandle(QSplitterHandle):
+    """Replaces the old thick, fully-colored splitter bar between the
+    Image Browser and the Input Roster with a slim, mostly-invisible
+    strip that only shows three short horizontal "grip" lines in the
+    middle -- and only responds to a drag that actually starts on that
+    small grip area, so the rest of the handle's width doesn't
+    accidentally resize things."""
+
+    GRIP_W = 26
+    GRIP_HIT_W = 40
+    GRIP_HIT_H = 14
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        # The cast shadow that used to sit on the roster bar itself now
+        # lives on the drag handle instead, blurring down into the
+        # roster below -- it marks the actual boundary the user drags to
+        # resize, rather than reading as a stray bar of its own.
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(36)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(0, 0, 0, 200))
+        self.setGraphicsEffect(shadow)
+
+    def _grip_rect(self):
+        r = self.rect()
+        return QRect(
+            r.center().x() - self.GRIP_HIT_W // 2,
+            r.center().y() - self.GRIP_HIT_H // 2,
+            self.GRIP_HIT_W, self.GRIP_HIT_H,
+        )
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        hovered = self._grip_rect().contains(self.mapFromGlobal(self.cursor().pos()))
+        color = QColor("#00d4a0") if hovered else QColor(255, 255, 255, 90)
+        pen = QPen(color)
+        pen.setWidth(1)
+        p.setPen(pen)
+        cx, cy = self.rect().center().x(), self.rect().center().y()
+        half = self.GRIP_W // 2
+        for dy in (-3, 0, 3):
+            p.drawLine(cx - half, cy + dy, cx + half, cy + dy)
+        p.end()
+
+    def mousePressEvent(self, event):
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if self._grip_rect().contains(pos):
+            super().mousePressEvent(event)
+        else:
+            event.ignore()
+
+    def mouseMoveEvent(self, event):
+        self.update()
+        super().mouseMoveEvent(event)
+
+    def enterEvent(self, event):
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.update()
+        super().leaveEvent(event)
+
+class _CenterSplitter(QSplitter):
+    """Vertical splitter between the Image Browser and Input Roster, using
+    _CenterSplitterHandle instead of the default full-width drag bar."""
+
+    def createHandle(self):
+        return _CenterSplitterHandle(self.orientation(), self)
+
+def apply_style(app: QApplication) -> None:
+    app.setStyle("Fusion")
+
+    if app_icon().exists():
+        app.setWindowIcon(QIcon(str(app_icon())))
+
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(10, 10, 10))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(232, 232, 232))
+    pal.setColor(QPalette.ColorRole.Base, QColor(7, 7, 7))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(17, 17, 17))
+    pal.setColor(QPalette.ColorRole.Text, QColor(232, 232, 232))
+    pal.setColor(QPalette.ColorRole.Button, QColor(24, 24, 24))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor(232, 232, 232))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(0, 212, 160))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(24, 24, 24))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor(220, 220, 220))
+    app.setPalette(pal)
+
+    app.setStyleSheet(STYLE)
 
 class Window(QMainWindow):
     def __init__(self, config=None):
@@ -1792,44 +2636,75 @@ class Window(QMainWindow):
         self.active_browser = None
         self.previews = []
         self.setWindowTitle('sorter. — vael')
-        self.resize(1420, 1000)
-        self.setMinimumSize(1000, 720)
-        icon = APP_DIR / ('cover.ico' if sys.platform == 'win32' else 'cover.png')
-        if not icon.exists():
-            icon = APP_DIR / 'cover.png'
-        if icon.exists():
-            self.setWindowIcon(QIcon(str(icon)))
+        self._is_windows = _IS_WINDOWS
+        self.resize(1280, 840)
+        self.setMinimumSize(720, 520)
+        if not self._is_windows:
+            self.setWindowFlag(Qt.FramelessWindowHint)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setObjectName('mainWindowFrameless')
+        if app_icon().exists():
+            self.setWindowIcon(QIcon(str(app_icon())))
+        shell = QWidget()
+        shell.setObjectName('appShell')
+        shell.setProperty('maximized', 'false')
+        self._shell = shell
+        self.setCentralWidget(shell)
+        shell_lay = QVBoxLayout(shell)
+        shell_lay.setContentsMargins(1, 1, 1, 1)
+        shell_lay.setSpacing(0)
+        self._title_bar = _TitleBar(self)
+        self._title_bar.setObjectName('appTitleBar')
+        self._title_bar.setFixedHeight(34)
+        title_layout = QHBoxLayout(self._title_bar)
+        title_layout.setContentsMargins(14, 0, 8, 0)
+        title_layout.setSpacing(2)
+        brand = QLabel('<span style="color:#e8e8e8;">vael. </span><span style="color:#00d4a0;">sorter</span>')
+        brand.setObjectName('brandLbl')
+        title_layout.addWidget(brand)
+        title_layout.addStretch()
+        for name, icon_kind, callback in [('winMinBtn', 'min', self.showMinimized), ('winMaxBtn', 'max', self._toggle_maximize), ('winCloseBtn', 'close', self.close)]:
+            button = QToolButton()
+            button.setObjectName(name)
+            button.setIcon(_make_win_icon(icon_kind))
+            button.setIconSize(QSize(10, 10))
+            button.setFixedSize(30, 24)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(callback)
+            title_layout.addWidget(button)
+            if icon_kind == 'max':
+                self._max_btn = button
+        shell_lay.addWidget(self._title_bar)
         center = QWidget()
+        center.setObjectName('appRoot')
+        self._content_root = center
+        shell_lay.addWidget(center, 1)
         layout = QVBoxLayout(center)
-        layout.setContentsMargins(12, 10, 12, 6)
-        layout.setSpacing(5)
-        header = QHBoxLayout()
-        brand = QLabel('sorter.')
-        brand.setObjectName('brand')
-        header.addWidget(brand)
-        subtitle = QLabel('Browse. Collect. Arrange.')
-        subtitle.setObjectName('muted')
-        header.addWidget(subtitle)
-        header.addStretch()
-        self.target_label = QLabel('No sorting folder configured')
-        self.target_label.setObjectName('muted')
-        header.addWidget(self.target_label)
-        settings = QPushButton('Settings')
-        settings.clicked.connect(self.settings)
-        header.addWidget(settings)
-        help_button = QPushButton('Help')
-        help_button.clicked.connect(self.help)
-        header.addWidget(help_button)
-        layout.addLayout(header)
-        self.vertical = QSplitter(Qt.Vertical)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+        self.vertical = _CenterSplitter(Qt.Vertical)
+        self.vertical.setObjectName('centerSplitter')
+        self.vertical.setChildrenCollapsible(False)
+        self.vertical.setHandleWidth(10)
         self.library = Browser(self, False, 'Library')
         self.vertical.addWidget(self.library)
         bottom = QWidget()
+        bottom.setObjectName('rosterBar')
+        bottom.setAttribute(Qt.WA_StyledBackground)
         b = QVBoxLayout(bottom)
         b.setContentsMargins(0, 0, 0, 0)
         self.shelf = Shelf(self)
         b.addWidget(self.shelf)
         controls = QHBoxLayout()
+        settings = QToolButton()
+        settings.setObjectName('browserSettingsBtn')
+        settings.setIcon(_make_gear_icon())
+        settings.setToolTip('Settings')
+        settings.clicked.connect(self.settings)
+        controls.addWidget(settings)
+        self.target_label = QLabel()
+        self.target_label.setObjectName('hint')
+        controls.addWidget(self.target_label)
         label = QLabel('SORTING WORKSPACE')
         label.setObjectName('muted')
         controls.addWidget(label)
@@ -1864,8 +2739,7 @@ class Window(QMainWindow):
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
         layout.addLayout(operation_bar)
-        self.setCentralWidget(center)
-        self.statusBar().showMessage('Outside sorting: view & copy only. Inside sorting: organize freely.')
+        self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
         self.browsers = [self.library, self.sorter, self.second]
         for browser in self.browsers:
@@ -1879,6 +2753,96 @@ class Window(QMainWindow):
         self.poll_timer.timeout.connect(self.poll_folders)
         self.poll_timer.start()
         self.folder_stamps = {}
+
+    def nativeEvent(self, eventType, message):
+        if self._is_windows and eventType in ("windows_generic_MSG", b"windows_generic_MSG"):
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == _WM_NCCALCSIZE:
+                if msg.wParam:
+                    if self.isMaximized():
+                        params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
+                        cx = ctypes.windll.user32.GetSystemMetrics(
+                            _SM_CXSIZEFRAME
+                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
+                        cy = ctypes.windll.user32.GetSystemMetrics(
+                            _SM_CYSIZEFRAME
+                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
+                        params.rgrc[0].left += cx
+                        params.rgrc[0].top += cy
+                        params.rgrc[0].right -= cx
+                        params.rgrc[0].bottom -= cy
+                    return True, 0
+            elif msg.message == _WM_NCHITTEST:
+                return self._win_hit_test(msg)
+        return super().nativeEvent(eventType, message)
+
+    def _win_hit_test(self, msg):
+        x = ctypes.c_short(msg.lParam & 0xFFFF).value
+        y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+        local = self.mapFromGlobal(QPoint(x, y))
+        w, h, b = self.width(), self.height(), _RESIZE_BORDER_PX
+
+        if not self.isMaximized() and not self.isFullScreen():
+            if local.x() < b and local.y() < b:
+                return True, _HTTOPLEFT
+            if local.x() >= w - b and local.y() < b:
+                return True, _HTTOPRIGHT
+            if local.x() < b and local.y() >= h - b:
+                return True, _HTBOTTOMLEFT
+            if local.x() >= w - b and local.y() >= h - b:
+                return True, _HTBOTTOMRIGHT
+            if local.x() < b:
+                return True, _HTLEFT
+            if local.x() >= w - b:
+                return True, _HTRIGHT
+            if local.y() < b:
+                return True, _HTTOP
+            if local.y() >= h - b:
+                return True, _HTBOTTOM
+
+        title_bar = self._title_bar
+        if title_bar.geometry().contains(local):
+            child = title_bar.childAt(title_bar.mapFrom(self, local))
+            if not isinstance(child, QToolButton):
+                return True, _HTCAPTION
+
+        return True, _HTCLIENT
+
+    def _toggle_maximize(self, force_normal: bool = False) -> None:
+        if force_normal or self.isMaximized():
+            self.showNormal()
+            self._max_btn.setIcon(_make_win_icon("max"))
+        else:
+            self.showMaximized()
+            self._max_btn.setIcon(_make_win_icon("restore"))
+        self._sync_shell_rounding()
+
+    def _sync_shell_rounding(self) -> None:
+        is_max = self.isMaximized() or self.isFullScreen()
+        prop = "true" if is_max else "false"
+        if self._shell.property("maximized") != prop:
+            self._shell.setProperty("maximized", prop)
+            self._shell.style().unpolish(self._shell)
+            self._shell.style().polish(self._shell)
+        self._update_window_mask()
+
+    def _update_window_mask(self) -> None:
+        if self.objectName() != "mainWindowFrameless":
+            return
+        if self.isMaximized() or self.isFullScreen() or self.width() <= 0 or self.height() <= 0:
+            self.clearMask()
+            return
+        from PySide6.QtGui import QPainterPath, QRegion
+
+        path = QPainterPath()
+        path.addRoundedRect(0.0, 0.0, float(self.width()), float(self.height()), 10, 10)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_shell_rounding()
+            self._max_btn.setIcon(_make_win_icon("restore" if self.isMaximized() else "max"))
+        super().changeEvent(event)
 
     def update_target_label(self):
         root = self.config['sort_root']
@@ -2255,8 +3219,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName('sorter')
     app.setOrganizationName('vael')
-    app.setStyle('Fusion')
-    app.setStyleSheet(STYLE)
+    apply_style(app)
     try:
         window = Window()
     except Exception as exc:
