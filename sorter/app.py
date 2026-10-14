@@ -1998,6 +1998,7 @@ class FolderSection(QWidget):
         self.path = path
         self.depth = depth
         self.closable = closable
+        self._retired = False
         self.setObjectName("folderSection")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
@@ -2233,7 +2234,7 @@ class FolderSection(QWidget):
         self.browser.thread_pool.start(worker)
 
     def _on_rough_failed(self, path, message):
-        if path != self.path:
+        if path != self.path or self._retired:
             return
         self._rough_started = False
         labels = {
@@ -2249,7 +2250,7 @@ class FolderSection(QWidget):
         self.count_lbl.style().polish(self.count_lbl)
 
     def _on_rough_done(self, path, files, subdirs):
-        if path != self.path:
+        if path != self.path or self._retired:
             return
         self._rough_done = True
         self._files = files
@@ -2304,7 +2305,7 @@ class FolderSection(QWidget):
     def _materialize(self):
         """Turn a completed (possibly cached) scan result into actual
         ThumbnailCard / child-FolderSection widgets. Idempotent."""
-        if self._materialized:
+        if self._materialized or self._retired:
             return
         self._materialized = True
         for filepath in self._files:
@@ -3275,6 +3276,8 @@ class ImageBrowser(QWidget):
     # -- (re)building tabs from Settings -----------------------------------
     def reload_folders(self):
         prev_active = self._current_tab_path() or self._saved_active_tab
+        for section in self._sections_by_path.values():
+            section._retired = True
         old_pages = [self.tabs.widget(i) for i in range(self.tabs.count())]
         self.tabs.clear()
         for page in old_pages:
@@ -3451,6 +3454,7 @@ class ImageBrowser(QWidget):
         prefix = root_path.rstrip(os.sep) + os.sep
         stale = [p for p in self._sections_by_path if p == root_path or p.startswith(prefix)]
         for p in stale:
+            self._sections_by_path[p]._retired = True
             del self._sections_by_path[p]
             self._selected_folder_paths.discard(p)
 
@@ -3613,6 +3617,9 @@ class CoverBrowser(ImageBrowser):
         return bool(self.search.text().strip() or self.extension.text().strip() or self.kind.currentIndex() or self.flagged.isChecked())
 
     def set_details(self, enabled):
+        self._filter_serial += 1
+        if self._filter_task:
+            self._filter_task.cancel.set()
         self._details = enabled
         self.tabs.setVisible(not enabled and bool(self.tabs.count()))
         self.table.setVisible(enabled)
@@ -3936,6 +3943,47 @@ class CoverBrowser(ImageBrowser):
             self.set_details(True)
 
 
+class ShelfCard(ThumbnailCard):
+    def __init__(self, shelf, item):
+        super().__init__(item.data(Qt.UserRole))
+        self.shelf, self.item = shelf, item
+        self.request_image()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
+            self._drag_start_pos = None
+            if event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+                self.item.setSelected(not self.item.isSelected())
+                self.update()
+            else:
+                self.shelf.window.preview(Path(self.filepath))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _start_drag(self):
+        if not self.item.isSelected():
+            self.shelf.list.clearSelection()
+            self.item.setSelected(True)
+        self.shelf.list.startDrag(Qt.CopyAction)
+
+    def contextMenuEvent(self, event):
+        if not self.item.isSelected():
+            self.shelf.list.clearSelection()
+            self.item.setSelected(True)
+        self.shelf.menu(self.shelf.list.mapFromGlobal(event.globalPos()))
+        event.accept()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.item.isSelected():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor('#00d4a0'), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(1, 1, THUMB_W - 2, THUMB_H - 2, 7, 7)
+
+
 class ShelfList(QListWidget):
     def __init__(self, shelf):
         super().__init__()
@@ -3943,11 +3991,21 @@ class ShelfList(QListWidget):
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setViewMode(QListView.IconMode)
         self.setFlow(QListView.LeftToRight)
         self.setWrapping(False)
         self.setSpacing(5)
-        self.setMinimumHeight(65)
-        self.setMaximumHeight(115)
+        self.setGridSize(QSize(THUMB_W + 8, THUMB_H + 8))
+        self.setFixedHeight(THUMB_H + 22)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.itemSelectionChanged.connect(self.repaint_cards)
+
+    def repaint_cards(self):
+        for i in range(self.count()):
+            card = self.itemWidget(self.item(i))
+            if card:
+                card.update()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -3976,14 +4034,13 @@ class Shelf(QWidget):
         super().__init__()
         self.window = window
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
-        self.toggle = QPushButton('▾ Session shelf · 0')
-        self.toggle.setCheckable(True)
-        self.toggle.setChecked(True)
+        self.toggle = QLabel('SESSION SHELF · 0')
+        self.toggle.setObjectName('hint')
         row.addWidget(self.toggle)
         text = QLabel('References only · cleared when you close sorter')
-        text.setObjectName('muted')
+        text.setObjectName('hint')
         row.addWidget(text)
         row.addStretch()
         for name, callback in [('Copy to target', self.copy_to_target), ('Remove selected', self.remove_selected), ('Clear', self.clear)]:
@@ -3996,7 +4053,6 @@ class Shelf(QWidget):
         self.list.customContextMenuRequested.connect(self.menu)
         self.list.itemDoubleClicked.connect(lambda item: window.preview(Path(item.data(Qt.UserRole))))
         layout.addWidget(self.list)
-        self.toggle.toggled.connect(self.list.setVisible)
 
     def add_paths(self, paths):
         existing = {self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())}
@@ -4004,19 +4060,26 @@ class Shelf(QWidget):
             path = normalized(path)
             if str(path) in existing:
                 continue
-            item = QListWidgetItem(path.name)
+            item = QListWidgetItem('')
             item.setData(Qt.UserRole, str(path))
             item.setToolTip(str(path))
-            item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon if path.is_dir() else QStyle.SP_FileIcon))
+            item.setSizeHint(QSize(THUMB_W, THUMB_H))
             self.list.addItem(item)
+            self.list.setItemWidget(item, ShelfCard(self, item))
             existing.add(str(path))
         self.update_count()
 
     def update_count(self):
-        self.toggle.setText(f'▾ Session shelf · {self.list.count()}')
+        self.toggle.setText(f'SESSION SHELF · {self.list.count()}')
+        if hasattr(self.window, 'shelf_button'):
+            self.window.shelf_button.setText(f'Shelf ({self.list.count()})' if self.list.count() else 'Shelf')
 
     def remove_selected(self):
         for item in self.list.selectedItems():
+            card = self.list.itemWidget(item)
+            if card:
+                self.list.removeItemWidget(item)
+                card.deleteLater()
             self.list.takeItem(self.list.row(item))
         self.update_count()
 
@@ -5501,6 +5564,7 @@ class Window(QMainWindow):
         label.setObjectName('hint')
         controls.addWidget(label)
         shelf_button = QToolButton()
+        self.shelf_button = shelf_button
         shelf_button.setObjectName('workflowLockBtn')
         shelf_button.setText('Shelf')
         shelf_button.setCheckable(True)
@@ -5791,8 +5855,13 @@ class Window(QMainWindow):
                 text = mapped(item.data(Qt.UserRole))
                 if text:
                     item.setData(Qt.UserRole, text)
-                    item.setText(Path(text).name)
                     item.setToolTip(text)
+                    card = self.shelf.list.itemWidget(item)
+                    if card:
+                        card.filepath = text
+                        card.setToolTip(text)
+                        card._image_loaded = False
+                        card.request_image()
                 else:
                     self.shelf.list.takeItem(i)
             for browser in self.browsers:
