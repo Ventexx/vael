@@ -1954,10 +1954,46 @@ class _RubberBandArea(QWidget):
         super().mouseReleaseEvent(event)
 
 
+class FolderHeader(QToolButton):
+    """The unchanged Cover header, extended with a file-transfer gesture."""
+    def __init__(self, section):
+        super().__init__()
+        self.section = section
+        self._origin = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._origin = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._origin is not None and event.buttons() & Qt.LeftButton:
+            if (event.position().toPoint() - self._origin).manhattanLength() >= QApplication.startDragDistance():
+                self._origin = None
+                self.setDown(False)
+                browser = self.section.browser
+                if self.section.path not in browser.selected_folder_paths():
+                    browser.clear_selection()
+                    browser.toggle_folder_selection(self.section.path)
+                mime = QMimeData()
+                mime.setUrls([QUrl.fromLocalFile(str(p)) for p in browser.selected_paths()])
+                mime.setData('application/x-vael-sorter', QByteArray(b'1'))
+                drag = QDrag(self)
+                drag.setMimeData(mime)
+                drag.exec(Qt.CopyAction)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._origin = None
+        super().mouseReleaseEvent(event)
+
+
 class FolderSection(QWidget):
     def __init__(self, browser, path, depth=0, closable=False):
         super().__init__()
         self.browser = browser
+        self.setAcceptDrops(browser.editable)
         self.path = path
         self.depth = depth
         self.closable = closable
@@ -2000,7 +2036,7 @@ class FolderSection(QWidget):
         is_deep = depth > RECURSION_DEPTH_WARN
         name_text = Path(path).name or path
 
-        self.header = QToolButton()
+        self.header = FolderHeader(self)
         self.header.setObjectName("sectionHeader")
         self.header.setProperty("depth0", "true" if depth == 0 else "false")
         if is_deep:
@@ -2081,11 +2117,22 @@ class FolderSection(QWidget):
         outer.addWidget(self.body)
         self.body.setVisible(False)
 
+    def dragEnterEvent(self, event):
+        self.browser.accept_drop(event)
+
+    def dragMoveEvent(self, event):
+        self.browser.accept_drop(event)
+
+    def dropEvent(self, event):
+        self.browser.drop_into(event, self.path)
+
     def _close_for_session(self):
         self.browser.close_tab_for_session(self.path)
 
     # -- multi-select (ctrl+click / rubber-band drag) -----------------------
     def _on_header_clicked(self):
+        self.browser._selected_file_paths.clear()
+        self.browser.repaint_content()
         if QApplication.keyboardModifiers() & Qt.ControlModifier:
             self.browser.toggle_folder_selection(self.path)
         else:
@@ -3252,8 +3299,58 @@ class CoverBrowser(ImageBrowser):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(callback)
+        if editable:
+            for key, callback in [('Ctrl+X', lambda: window.copy_selection(self, True)), ('Ctrl+V', lambda: window.paste(self)), ('Delete', lambda: window.trash_selection(self)), ('F2', lambda: window.rename_selection(self)), ('F', lambda: window.toggle_flags(self)), ('Ctrl+Shift+N', lambda: window.new_folders(self)), ('Alt+Up', self.up)]:
+                shortcut = QShortcut(QKeySequence(key), self)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
+            self.setAcceptDrops(True)
+            self.tools_btn = QToolButton()
+            self.tools_btn.setObjectName('browserSettingsBtn')
+            self.tools_btn.setText('⋯')
+            self.tools_btn.setToolTip('Folder tools')
+            self.tools_btn.clicked.connect(lambda: self.action_menu(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height()))))
+            self._status_bar.layout().insertWidget(0, self.tools_btn)
+            self._position_status_bar()
+
+    def accept_drop(self, event):
+        if self.editable and event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+            paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+            move = event.mimeData().hasFormat('application/x-vael-sorter') and paths and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
+            self.window.operation_status.setText('Move into sorting · hold Ctrl to copy' if move else 'Copy into sorting')
+
+    def drop_into(self, event, destination=None):
+        if not self.editable:
+            event.ignore()
+            return
+        paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
+        move = event.mimeData().hasFormat('application/x-vael-sorter') and bool(paths) and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
+        self.window.transfer(paths, Path(destination) if destination else self.current, bool(move))
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+
+    def dragEnterEvent(self, event):
+        self.accept_drop(event)
+
+    def dragMoveEvent(self, event):
+        self.accept_drop(event)
+
+    def dropEvent(self, event):
+        self.drop_into(event)
+
+    def up(self):
+        if self.current and self.current != self.window.service.root:
+            self.navigate(self.current.parent)
 
     def configured_folders(self):
+        if self.editable:
+            root = self.window.config['sort_root']
+            if not root:
+                return []
+            location = self._location if self._location and self.window.service.inside(self._location, True) and self._location.is_dir() else Path(root)
+            return [{'path': p} for p in dict.fromkeys([str(location), *[p for p in self.window.config['pins'] if self.window.service.inside(p, True) and Path(p).is_dir()]])]
         paths = self.window.config['sources']
         if self._location and str(self._location) not in paths:
             paths = paths + [str(self._location)]
@@ -3281,6 +3378,9 @@ class CoverBrowser(ImageBrowser):
 
     def navigate(self, path, remember=True):
         target = normalized(path) if path else None
+        if self.editable and (target is None or not self.window.service.inside(target, True)):
+            self.window.notice('Choose a folder inside the configured sorting folder.')
+            return
         if target and not target.is_dir():
             self.window.notice('This folder is unavailable.')
             return
@@ -3345,12 +3445,35 @@ class CoverBrowser(ImageBrowser):
             menu.addAction('Add to session shelf', lambda: self.window.shelf.add_paths(paths))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
             menu.addAction('Copy to sorting folder…', lambda: self.window.transfer_dialog(self, False))
+        if self.editable:
+            menu.addSeparator()
+            if paths:
+                menu.addAction('Cut', lambda: self.window.copy_selection(self, True))
+                menu.addAction('Move to folder…', lambda: self.window.transfer_dialog(self, True))
+                menu.addAction('Move into new folder…', lambda: self.window.move_to_new(self))
+                menu.addAction('Duplicate', lambda: self.window.duplicate(self))
+                menu.addAction('Rename…', lambda: self.window.rename_selection(self))
+                menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
+                menu.addAction('Toggle flag', lambda: self.window.toggle_flags(self))
+                menu.addAction('Move to trash…', lambda: self.window.trash_selection(self))
+            menu.addAction('Paste', lambda: self.window.paste(self))
+            menu.addAction('New folders…', lambda: self.window.new_folders(self))
+            menu.addAction('Open sorting subfolder…', self.choose_folder)
+            menu.addAction('Parent folder', self.up)
+            menu.addAction('Pin / unpin current folder', lambda: self.window.pin(self))
+            menu.addAction('Undo last file operation', self.window.undo)
+        if paths:
             menu.addSeparator()
             menu.addAction('Information…', lambda: self.window.information(paths))
             menu.addAction('Copy paths', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
             menu.addAction('Open containing folder externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
         menu.addAction('Clear selection', self.clear_selection)
         menu.exec(point)
+
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Open sorting subfolder', str(self.current or self.window.config['sort_root']))
+        if folder:
+            self.navigate(folder)
 
     def clear_selection(self):
         self._selected_file_paths.clear()
@@ -3366,9 +3489,11 @@ class CoverBrowser(ImageBrowser):
         self.repaint_content()
 
     def state(self):
-        return {}
+        return {'path': str(self._location or self.current or '')}
 
     def restore(self, state):
+        if self.editable and state.get('path') and Path(state['path']).is_dir() and self.window.service.inside(state['path'], True):
+            self.navigate(state['path'])
         # Cover starts with the first source tab and collapsed child folders.
         if self.tabs.count():
             self.tabs.setCurrentIndex(0)
@@ -4909,9 +5034,10 @@ class Window(QMainWindow):
         bottom.setObjectName('rosterBar')
         bottom.setAttribute(Qt.WA_StyledBackground)
         b = QVBoxLayout(bottom)
-        b.setContentsMargins(0, 0, 0, 0)
+        b.setContentsMargins(14, 8, 14, 10)
+        b.setSpacing(6)
         self.shelf = Shelf(self)
-        b.addWidget(self.shelf)
+        self.shelf.hide()
         controls = QHBoxLayout()
         settings = QToolButton()
         settings.setObjectName('browserSettingsBtn')
@@ -4921,20 +5047,28 @@ class Window(QMainWindow):
         controls.addWidget(settings)
         self.target_label = QLabel()
         self.target_label.setObjectName('hint')
-        controls.addWidget(self.target_label)
+        self.target_label.hide()
         label = QLabel('SORTING WORKSPACE')
-        label.setObjectName('muted')
+        label.setObjectName('hint')
         controls.addWidget(label)
+        shelf_button = QToolButton()
+        shelf_button.setObjectName('workflowLockBtn')
+        shelf_button.setText('Shelf')
+        shelf_button.setCheckable(True)
+        shelf_button.setToolTip('Show session shelf')
+        shelf_button.toggled.connect(self.shelf.setVisible)
+        controls.addWidget(shelf_button)
         controls.addStretch()
-        self.split_toggle = QCheckBox('Two folders side by side')
+        self.split_toggle = QCheckBox('Split view')
         controls.addWidget(self.split_toggle)
         self.undo_button = QPushButton('Undo last operation')
         self.undo_button.clicked.connect(self.undo)
         controls.addWidget(self.undo_button)
         b.addLayout(controls)
+        b.addWidget(self.shelf)
         self.horizontal = QSplitter(Qt.Horizontal)
-        self.sorter = Browser(self, True, 'Sorting folder')
-        self.second = Browser(self, True, 'Second folder')
+        self.sorter = CoverBrowser(self, True, 'Sorting folder')
+        self.second = CoverBrowser(self, True, 'Second folder')
         self.horizontal.addWidget(self.sorter)
         self.horizontal.addWidget(self.second)
         self.second.hide()
@@ -4945,7 +5079,7 @@ class Window(QMainWindow):
         layout.addWidget(self.vertical, 1)
         operation_bar = QHBoxLayout()
         self.operation_status = QLabel('Ready')
-        self.operation_status.setObjectName('muted')
+        self.operation_status.setObjectName('rosterStatusLabel')
         operation_bar.addWidget(self.operation_status, 1)
         self.progress = QProgressBar()
         self.progress.setFixedWidth(220)
@@ -4955,7 +5089,7 @@ class Window(QMainWindow):
         self.cancel_button.clicked.connect(lambda: self.operation_task.cancel.set() if self.operation_task else None)
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
-        layout.addLayout(operation_bar)
+        b.addLayout(operation_bar)
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
         self._img_viewer = ImgViewerOverlay(self._content_root)
@@ -5425,7 +5559,8 @@ class Window(QMainWindow):
             event.ignore()
             return
         self.poll_timer.stop()
-        self.library.bulk_loader.cancel()
+        for browser in self.browsers:
+            browser.bulk_loader.cancel()
         PIXMAP_WORKER.stop()
         PIXMAP_WORKER.wait()
         _BULK_SCAN_POOL.waitForDone()
