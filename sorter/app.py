@@ -508,6 +508,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
+from shiboken6 import isValid
 
 
 class TaskSignals(QObject):
@@ -2326,6 +2327,8 @@ class FolderSection(QWidget):
 
     # -- reflow (ported from indexer's _relayout_cards) --------------------
     def _relayout_cards(self):
+        if not isValid(self) or not isValid(self.card_widget):
+            return
         avail_w = self.card_widget.width()
         if avail_w < THUMB_W:
             return
@@ -2532,6 +2535,220 @@ class ImgViewerOverlay(QWidget):
 # as "the whole UI is held up right now", and floats only bare text, a
 # progress bar, and a Cancel button in the middle -- no panel chrome.
 # ---------------------------------------------------------------------------
+class MediaViewerOverlay(ImgViewerOverlay):
+    """Cover's viewer surface, with playback controls only for animated media."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._movie = None
+        self._gif_file = None
+        self._zoom = 0
+        self._pan = QPoint()
+        self._pan_origin = None
+        self._img_lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._video = QVideoWidget(self)
+        self._video.hide()
+        self._player = QMediaPlayer(self)
+        self._audio = QAudioOutput(self)
+        self._audio.setVolume(.5)
+        self._player.setAudioOutput(self._audio)
+        self._player.setVideoOutput(self._video)
+        self._controls = QWidget(self)
+        self._controls.setObjectName('browserStatusBar')
+        row = QHBoxLayout(self._controls)
+        row.setContentsMargins(0, 0, 0, 0)
+        pause = QPushButton('Play / pause')
+        pause.clicked.connect(self.toggle_play)
+        row.addWidget(pause)
+        self._timeline = QSlider(Qt.Horizontal)
+        self._timeline.sliderMoved.connect(self._player.setPosition)
+        row.addWidget(self._timeline, 1)
+        self._time = QLabel('0:00 / 0:00')
+        self._time.setObjectName('hint')
+        row.addWidget(self._time)
+        self._volume = QSlider(Qt.Horizontal)
+        self._volume.setRange(0, 100)
+        self._volume.setValue(50)
+        self._volume.setFixedWidth(70)
+        self._volume.setToolTip('Volume')
+        self._volume.valueChanged.connect(lambda value: self._audio.setVolume(value / 100))
+        row.addWidget(self._volume)
+        self._controls.hide()
+        self._player.durationChanged.connect(lambda duration: self._timeline.setRange(0, duration))
+        self._player.positionChanged.connect(self._position_changed)
+        self._player.errorOccurred.connect(lambda _, message: self._show_error('Playback unavailable: ' + message))
+
+    def _stop_media(self):
+        self._player.stop()
+        self._player.setSource(QUrl())
+        if self._movie:
+            self._movie.stop()
+            self._movie.deleteLater()
+            self._movie = None
+        if self._gif_file:
+            self._gif_file.close()
+            self._gif_file.deleteLater()
+            self._gif_file = None
+
+    def close_viewer(self):
+        self._stop_media()
+        self._img_lbl.clear()
+        self._img_lbl.setProperty('_raw_pix', None)
+        super().close_viewer()
+
+    def _load_current(self):
+        self._stop_media()
+        self._zoom = 0
+        self._pan = QPoint()
+        self._img_lbl.clear()
+        self._img_lbl.setProperty('_raw_pix', None)
+        if self._current_card is None:
+            return
+        path = Path(self._current_card.filepath)
+        extension = path.suffix.lower()
+        video = extension in VIDEOS
+        animated = video or extension == '.gif'
+        self._video.setVisible(video)
+        self._img_lbl.setVisible(not video)
+        self._controls.setVisible(animated)
+        self._timeline.setVisible(video)
+        self._volume.setVisible(video)
+        self._time.setVisible(video)
+        self._name_lbl.setText(path.name)
+        self._name_lbl.setToolTip(str(path))
+        if video:
+            self._player.setSource(QUrl.fromLocalFile(str(path)))
+            self._player.play()
+        elif extension == '.gif':
+            self._gif_file = QFile(str(path), self)
+            self._gif_file.open(QIODevice.ReadOnly)
+            self._movie = QMovie(self._gif_file, QByteArray(b'gif'), self)
+            self._movie.frameChanged.connect(self._movie_frame)
+            if self._movie.isValid():
+                self._movie.start()
+            else:
+                self._show_error('This GIF cannot be decoded.')
+        elif extension in IMAGES:
+            reader = QImageReader(str(path))
+            reader.setAutoTransform(True)
+            image = reader.read()
+            if image.isNull():
+                self._show_error(reader.errorString())
+            else:
+                self._img_lbl.setProperty('_raw_pix', QPixmap.fromImage(image))
+                self._scale_image()
+        else:
+            self._show_error('No built-in preview. Right-click to open externally.')
+        self._place_widgets()
+
+    def _show_error(self, message):
+        if self._current_card:
+            self._name_lbl.setText('Cannot preview · ' + Path(self._current_card.filepath).name)
+            self._name_lbl.setToolTip(message + '\nRight-click to open externally.')
+
+    def _movie_frame(self, *_):
+        if self._movie:
+            self._img_lbl.setProperty('_raw_pix', self._movie.currentPixmap())
+            self._scale_image()
+            self._place_widgets()
+
+    def _image_area_size(self):
+        width, height = super()._image_area_size()
+        if hasattr(self, '_controls') and not self._controls.isHidden():
+            height = max(120, height - 50)
+        return width, height
+
+    def _scale_image(self):
+        pix = self._img_lbl.property('_raw_pix')
+        if pix and not pix.isNull() and self._zoom:
+            size = QSize(max(1, int(pix.width() * self._zoom)), max(1, int(pix.height() * self._zoom)))
+            self._img_lbl.setPixmap(pix.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self._img_lbl.resize(size)
+        else:
+            super()._scale_image()
+
+    def _place_widgets(self):
+        if hasattr(self, '_video') and not self._video.isHidden():
+            width, height = self._image_area_size()
+            size = QSize(16, 9)
+            size.scale(width, height, Qt.KeepAspectRatio)
+            self._img_lbl.resize(size)
+        super()._place_widgets()
+        if hasattr(self, '_video'):
+            self._video.setGeometry(self._img_lbl.geometry())
+            if self._zoom:
+                self._img_lbl.move(self._img_lbl.pos() + self._pan)
+            self._controls.setGeometry(max(60, (self.width() - 600) // 2), self.height() - 44, min(600, self.width() - 120), 30)
+            self._name_lbl.move(self._name_lbl.x(), min(self._name_lbl.y(), self.height() - (78 if not self._controls.isHidden() else 40)))
+            for widget in (self._name_lbl, self._prev_btn, self._next_btn, self._close_btn, self._controls):
+                widget.raise_()
+
+    def _position_changed(self, position):
+        if not self._timeline.isSliderDown():
+            self._timeline.setValue(position)
+        def stamp(value):
+            seconds = value // 1000
+            return f'{seconds // 60}:{seconds % 60:02d}'
+        self._time.setText(stamp(position) + ' / ' + stamp(self._player.duration()))
+
+    def toggle_play(self):
+        if self._movie:
+            self._movie.setPaused(self._movie.state() == QMovie.Running)
+        elif self._player.playbackState() == QMediaPlayer.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            self.toggle_play()
+        else:
+            super().keyPressEvent(event)
+
+    def set_zoom(self, value):
+        self._zoom = value
+        self._pan = QPoint()
+        self._scale_image()
+        self._place_widgets()
+
+    def wheelEvent(self, event):
+        if self._img_lbl.property('_raw_pix'):
+            self.set_zoom(min(8, max(.05, (self._zoom or 1) * (1.15 if event.angleDelta().y() > 0 else 1 / 1.15))))
+            event.accept()
+
+    def mousePressEvent(self, event):
+        if self._zoom and self._img_lbl.geometry().contains(event.position().toPoint()) and event.button() == Qt.LeftButton:
+            self._pan_origin = event.position().toPoint()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_origin is not None and event.buttons() & Qt.LeftButton:
+            point = event.position().toPoint()
+            self._pan += point - self._pan_origin
+            self._pan_origin = point
+            self._place_widgets()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pan_origin = None
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        if self._current_card is None:
+            return
+        path = Path(self._current_card.filepath)
+        menu = QMenu(self)
+        owner = self.parent().window()
+        menu.addAction('Add to session shelf', lambda: owner.shelf.add_paths([path]))
+        menu.addAction('Fit image', lambda: self.set_zoom(0))
+        menu.addAction('Actual size', lambda: self.set_zoom(1))
+        menu.addAction('Open externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+        menu.exec(event.globalPos())
+
+
 class _BulkLoadOverlay(QWidget):
     BLUR_RADIUS = 22
 
@@ -2891,6 +3108,8 @@ class ImageBrowser(QWidget):
         QTimer.singleShot(0, lambda s=section: self._scroll_section_into_view(s))
 
     def _scroll_section_into_view(self, section):
+        if not isValid(self) or not isValid(section):
+            return
         scroll = self.tabs.currentWidget()
         if not isinstance(scroll, QScrollArea):
             return
@@ -5322,7 +5541,7 @@ class Window(QMainWindow):
         b.addLayout(operation_bar)
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
-        self._img_viewer = ImgViewerOverlay(self._content_root)
+        self._img_viewer = MediaViewerOverlay(self._content_root)
         self.browsers = [self.library, self.sorter, self.second]
         for browser in self.browsers:
             browser.update_roots()
@@ -5425,6 +5644,16 @@ class Window(QMainWindow):
             self._sync_shell_rounding()
             self._max_btn.setIcon(_make_win_icon("restore" if self.isMaximized() else "max"))
         super().changeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        viewer = getattr(self, '_img_viewer', None)
+        if viewer:
+            viewer.resize(self._content_root.size())
+        for browser in getattr(self, 'browsers', []):
+            if browser.bulk_overlay.isVisible():
+                browser.bulk_overlay.resize(self._content_root.size())
+        self._update_window_mask()
 
     def update_target_label(self):
         root = self.config['sort_root']
@@ -5718,10 +5947,7 @@ class Window(QMainWindow):
         dialog.exec()
 
     def open_image_viewer(self, card, cards):
-        if Path(card.filepath).suffix.lower() in IMAGES:
-            self._img_viewer.open_viewer(card, cards)
-        else:
-            self.preview(Path(card.filepath), [Path(c.filepath) for c in cards])
+        self._img_viewer.open_viewer(card, cards)
 
     def preview(self, path, paths=None):
         if path.is_dir():
@@ -5730,9 +5956,12 @@ class Window(QMainWindow):
         if not path.exists():
             self.notice('This file is no longer at its original location.')
             return
-        dialog = Preview(path, paths or [path], self)
-        dialog.exec()
-        dialog.deleteLater()
+        from types import SimpleNamespace
+        paths = paths or [path]
+        if path not in paths:
+            paths.insert(0, path)
+        cards = [SimpleNamespace(filepath=str(p)) for p in paths]
+        self._img_viewer.open_viewer(cards[paths.index(path)], cards)
 
     def help(self):
         path = APP_DIR / 'README.md'
@@ -5789,6 +6018,7 @@ class Window(QMainWindow):
             event.ignore()
             return
         self.poll_timer.stop()
+        self._img_viewer.close_viewer()
         for browser in self.browsers:
             browser.bulk_loader.cancel()
         PIXMAP_WORKER.stop()
