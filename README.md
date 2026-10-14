@@ -49,6 +49,11 @@ A desktop library for images and their accompanying information. Turn folders of
 ![reviewer cover](./reviewer/cover.png)
 A desktop image reviewer for sorting through generated variations. Group repeated versions of an image, compare them, and decide what to keep, move to the trash, or flag for another run.
 
+### [sorter ›](./sorter/README.md)
+![sorter cover](./sorter/cover.png)
+
+A desktop media workspace for browsing structured content folders and arranging selections for promotion or similar workflows. Search by configurable folder-name fields, collect a temporary selection, and organize files in an independent sorting explorer. Content changes stay inside one chosen sorting folder, with image viewing and GIF/video playback built in.
+
 ---
 
 ## contributing
