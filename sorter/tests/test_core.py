@@ -106,12 +106,38 @@ class OperationsTests(unittest.TestCase):
         try:
             link.symlink_to(self.source, target_is_directory=True)
         except OSError:
-            self.skipTest('Symlink creation needs developer mode or platform permissions.')
+            import os
+            import subprocess
+            if os.name != 'nt':
+                self.skipTest('Symlink creation is not supported on this host.')
+            quote = lambda p: "'" + str(p).replace("'", "''") + "'"
+            subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                            f'New-Item -ItemType Junction -Path {quote(link)} -Target {quote(self.source)} | Out-Null'], check=True)
+            self.addCleanup(link.rmdir)
         self.assertFalse(self.service.inside(link / 'a.png'))
         with self.assertRaises(ValueError):
             self.service.transfer(self.image, link)
         with self.assertRaises(ValueError):
             self.service.transfer(link, self.root)
+
+    def test_cached_scan_replaced_after_external_change(self):
+        from app import cached_scan
+        config = copy.deepcopy(DEFAULTS)
+        database = self.base / 'index.sqlite'
+        scan([self.source], config, True, threading.Event(), database)
+        self.assertEqual(len(cached_scan(database, [self.source], config, True)), 1)
+        self.image.unlink()
+        scan([self.source], config, True, threading.Event(), database)
+        self.assertEqual(cached_scan(database, [self.source], config, True), [])
+
+    def test_child_navigation_retains_parent_fields(self):
+        folder = self.source / 'Misty;Pokemon' / 'set'
+        folder.mkdir(parents=True)
+        (folder / 'a.png').write_bytes(b'example')
+        config = copy.deepcopy(DEFAULTS)
+        config['sources'] = [str(self.source)]
+        entries, _ = scan([folder], config, False, threading.Event())
+        self.assertEqual(entries[0].fields['GENRE'], 'Pokemon')
 
 
 if __name__ == '__main__':

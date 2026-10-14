@@ -175,6 +175,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -205,6 +206,24 @@ class Entry:
 
 def is_link(path):
     return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+
+
+def catalog_key(roots, config, recursive):
+    value = [list(map(str, roots)), recursive, config['fields'], config['rules'], config['inherit'], config['ignored'], config['sources'], config['sort_root']]
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def cached_scan(database, roots, config, recursive):
+    if not Path(database).exists():
+        return []
+    try:
+        with closing(sqlite3.connect(database, timeout=20)) as db:
+            row = db.execute('SELECT payload FROM snapshots WHERE scope = ?', (catalog_key(roots, config, recursive),)).fetchone()
+            if row:
+                return [Entry(Path(p), directory, size, mtime, fields) for p, directory, size, mtime, fields in json.loads(row[0])]
+    except (sqlite3.Error, ValueError, TypeError):
+        pass
+    return []
 
 
 def scan(roots, config, recursive, cancel, database=None):
@@ -252,9 +271,10 @@ def scan(roots, config, recursive, cancel, database=None):
         database = Path(database)
         database.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(database, timeout=20)) as db, db:
-            db.execute("CREATE TABLE IF NOT EXISTS entries (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, fields TEXT, seen REAL)")
-            db.executemany("INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?)",
-                           [(str(e.path), e.size, e.mtime, json.dumps(e.fields), time.time()) for e in result])
+            db.execute('CREATE TABLE IF NOT EXISTS snapshots (scope TEXT PRIMARY KEY, payload TEXT, seen REAL)')
+            payload = json.dumps([(str(e.path), e.is_dir, e.size, e.mtime, e.fields) for e in result])
+            db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?)', (catalog_key(roots, config, recursive), payload, time.time()))
+            db.execute('DELETE FROM snapshots WHERE scope NOT IN (SELECT scope FROM snapshots ORDER BY seen DESC LIMIT 24)')
     return result, warnings
 
 
@@ -468,6 +488,7 @@ from datetime import datetime
 from PySide6.QtCore import (
     Qt, QObject, Signal, QRunnable, QThreadPool, QTimer, QUrl, QSize, QRect,
     QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QMimeData, QByteArray,
+    QFile, QIODevice,
 )
 from PySide6.QtGui import (
     QColor, QImageReader, QPixmap, QIcon, QPainter, QPen, QDrag, QKeySequence,
@@ -488,6 +509,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 
 class TaskSignals(QObject):
     result = Signal(object)
+    partial = Signal(object)
     error = Signal(str)
     progress = Signal(int, str)
     done = Signal()
@@ -516,7 +538,7 @@ class Jobs(QObject):
         self.pool.setMaxThreadCount(4)
         self.tasks = set()
 
-    def start(self, function, result, error=None, progress=None):
+    def start(self, function, result, error=None, progress=None, partial=None):
         task = Task(function)
         self.tasks.add(task)
         task.signals.result.connect(result)
@@ -524,6 +546,8 @@ class Jobs(QObject):
             task.signals.error.connect(error)
         if progress:
             task.signals.progress.connect(progress)
+        if partial:
+            task.signals.partial.connect(partial)
         task.signals.done.connect(lambda: self.tasks.discard(task))
         self.pool.start(task)
         return task
@@ -773,9 +797,9 @@ class Browser(QWidget):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(7)
         bar = QHBoxLayout()
-        heading = QLabel(title)
-        heading.setObjectName('sectionTitle')
-        bar.addWidget(heading)
+        self.heading = QLabel(title)
+        self.heading.setObjectName('sectionTitle')
+        bar.addWidget(self.heading)
         for text, callback, tip in [('‹', self.back, 'Back'), ('›', self.forward, 'Forward'), ('↑', self.up, 'Parent folder'), ('↻', self.refresh, 'Refresh files')]:
             button = QPushButton(text)
             button.setFixedWidth(30)
@@ -783,6 +807,7 @@ class Browser(QWidget):
             button.clicked.connect(callback)
             bar.addWidget(button)
         self.path = QLineEdit()
+        self.path.setMinimumWidth(60)
         self.path.setPlaceholderText('Choose folders in Settings' if not editable else 'Choose a sorting folder in Settings')
         self.path.returnPressed.connect(lambda: self.navigate(self.path.text()))
         bar.addWidget(self.path, 1)
@@ -792,6 +817,7 @@ class Browser(QWidget):
         layout.addLayout(bar)
         search_bar = QHBoxLayout()
         self.search = QLineEdit()
+        self.search.setMinimumWidth(70)
         self.search.setClearButtonEnabled(True)
         self.search.setPlaceholderText('Search here…  Pokemon g  or  g:Pokemon ch:Misty')
         search_bar.addWidget(self.search, 1)
@@ -815,17 +841,21 @@ class Browser(QWidget):
         self.roots.setMaximumWidth(310)
         self.roots.activated.connect(self.choose_root)
         tools.addWidget(self.roots)
+        self.optional_buttons = []
         if editable:
             for text, callback in [('New folder', lambda: window.new_folders(self)), ('Paste', lambda: window.paste(self)), ('Edit ▾', self.edit_menu), ('Pin folder', lambda: window.pin(self))]:
                 button = QPushButton(text)
                 button.clicked.connect(callback)
                 tools.addWidget(button)
+                if text != 'Edit ▾':
+                    self.optional_buttons.append(button)
         else:
             button = QPushButton('Add selection to shelf')
             button.clicked.connect(lambda: window.shelf.add_paths(self.selected_paths()))
             tools.addWidget(button)
         tools.addStretch()
         self.order = QComboBox()
+        self.order.setMaximumWidth(160)
         self.order.addItems(['Name ↑', 'Name ↓', 'Size ↑', 'Size ↓', 'Date ↑', 'Date ↓', 'Group by folder'])
         tools.addWidget(self.order)
         self.tile_size = QSlider(Qt.Horizontal)
@@ -885,6 +915,19 @@ class Browser(QWidget):
         self.install_shortcuts()
         self.sort_rows()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, 'optional_buttons'):
+            return
+        compact = self.width() < 850
+        self.heading.setVisible(not compact)
+        for button in self.optional_buttons:
+            button.setVisible(not compact)
+        self.tile_size.setVisible(not compact)
+        self.roots.setMaximumWidth(200 if compact else 310)
+        self.roots.setMinimumWidth(110 if compact else 150)
+        self.extension.setMaximumWidth(75 if compact else 105)
+
     def install_shortcuts(self):
         actions = {
             'Ctrl+C': lambda: self.window.copy_selection(self, False),
@@ -910,10 +953,10 @@ class Browser(QWidget):
         return self.stack.currentWidget()
 
     def selected_paths(self):
-        return [index.data(Qt.UserRole).path for index in self.grid.selectionModel().selectedRows(0)]
+        return [index.data(Qt.UserRole).path for index in self.grid.selectionModel().selectedIndexes() if index.column() == 0]
 
     def selected_entries(self):
-        return [index.data(Qt.UserRole) for index in self.grid.selectionModel().selectedRows(0)]
+        return [index.data(Qt.UserRole) for index in self.grid.selectionModel().selectedIndexes() if index.column() == 0]
 
     def update_roots(self):
         self.roots.clear()
@@ -941,6 +984,7 @@ class Browser(QWidget):
             self.window.notice('This folder is unavailable.')
             return
         self.current = target
+        self.model.set_entries([])
         if remember:
             self.history = self.history[:self.history_pos + 1]
             self.history.append(target)
@@ -977,6 +1021,21 @@ class Browser(QWidget):
         self.status.setText('Reading folders… You can continue working.')
         config = copy.deepcopy(self.window.config)
         recursive = self.recursive.isChecked()
+        database = DATA_DIR / 'catalog.sqlite'
+        use_cache = not self.model.entries
+
+        def discover(task):
+            if use_cache:
+                cached = cached_scan(database, roots, config, recursive)
+                if cached and not task.cancel.is_set():
+                    task.signals.partial.emit(cached)
+            return scan(roots, config, recursive, task.cancel, database)
+
+        def cached_loaded(entries):
+            if serial == self.scan_serial:
+                self.model.set_entries(entries)
+                self.filter_rows()
+                self.status.setText(f'{len(entries)} cached items · checking for changes…')
 
         def loaded(result):
             if serial != self.scan_serial:
@@ -996,8 +1055,9 @@ class Browser(QWidget):
             self.search.setCompleter(completer)
 
         self.scan_task = self.window.jobs.start(
-            lambda task: scan(roots, config, recursive, task.cancel, DATA_DIR / 'catalog.sqlite'), loaded,
-            lambda error: self.status.setText(error) if serial == self.scan_serial else None)
+            discover, loaded,
+            lambda error: self.status.setText(error) if serial == self.scan_serial else None,
+            partial=cached_loaded)
 
     def filter_rows(self, *_):
         try:
@@ -1005,7 +1065,7 @@ class Browser(QWidget):
         except ValueError as exc:
             self.status.setText(str(exc))
             return
-        self.proxy.invalidateFilter()
+        self.proxy.invalidate()
         self.update_count()
 
     def sort_rows(self, *_):
@@ -1035,7 +1095,7 @@ class Browser(QWidget):
         menu = QMenu(self)
         selected = self.selected_paths()
         if selected:
-            menu.addAction('Open / preview', lambda: self.open_index(self.proxy.index(self.grid.selectionModel().selectedRows(0)[0].row(), 0)))
+            menu.addAction('Open / preview', lambda: self.open_index(next(i for i in self.grid.selectionModel().selectedIndexes() if i.column() == 0)))
             menu.addAction('Add to session shelf', lambda: self.window.shelf.add_paths(selected))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
             menu.addAction('Copy to folder…', lambda: self.window.transfer_dialog(self, False))
@@ -1204,6 +1264,7 @@ class Preview(QDialog):
         self.position = self.paths.index(path)
         self.pixmap = None
         self.movie = None
+        self.gif_file = None
         self.scale = 0
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -1281,6 +1342,18 @@ class Preview(QDialog):
             self.movie.setFileName('')
             self.movie.deleteLater()
             self.movie = None
+        if self.gif_file:
+            self.gif_file.close()
+            self.gif_file.deleteLater()
+            self.gif_file = None
+
+    def done(self, result):
+        self.stop()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self.stop()
+        super().closeEvent(event)
 
     def load(self):
         self.stop()
@@ -1301,7 +1374,9 @@ class Preview(QDialog):
             self.player.setSource(QUrl.fromLocalFile(str(path)))
             self.player.play()
         elif ext == '.gif':
-            self.movie = QMovie(str(path))
+            self.gif_file = QFile(str(path), self)
+            self.gif_file.open(QIODevice.ReadOnly)
+            self.movie = QMovie(self.gif_file, QByteArray(b'gif'), self)
             self.image.setMovie(self.movie)
             if not self.movie.isValid():
                 self.error.setText('This GIF could not be decoded. Try opening it externally.')
@@ -1576,7 +1651,7 @@ class SettingsDialog(QDialog):
                 rule['scope'] = ''
             path, _ = QFileDialog.getSaveFileName(self, 'Export profile inside sorting folder', self.sort_root.text(), 'JSON (*.json)')
             if path:
-                service = FileService(self.sort_root.text())
+                service = self.parent().service
                 target = service.require(path)
                 with target.open('x', encoding='utf-8') as stream:
                     json.dump(data, stream, indent=2, ensure_ascii=False)
@@ -1700,6 +1775,8 @@ QTabBar::tab:selected { background: #405247; }
 QProgressBar { border: 1px solid #3a4940; border-radius: 4px; text-align: center; }
 QProgressBar::chunk { background: #5d8267; }
 QToolTip { background: #303b33; color: #eef1e9; border: 1px solid #6a8170; padding: 5px; }
+QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid #657567; border-radius: 3px; background: #222a26; }
+QCheckBox::indicator:checked { background: #88aa8b; border: 2px solid #c4d8c4; }
 '''
 
 
@@ -1796,7 +1873,7 @@ class Window(QMainWindow):
         self.restore_layout()
         self.update_target_label()
         shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
-        shortcut.activated.connect(self.undo)
+        shortcut.activated.connect(lambda: self.undo() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox)) else None)
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(5000)
         self.poll_timer.timeout.connect(self.poll_folders)
@@ -2100,6 +2177,7 @@ class Window(QMainWindow):
             return
         dialog = Preview(path, paths or [path], self)
         dialog.exec()
+        dialog.deleteLater()
 
     def help(self):
         path = APP_DIR / 'README.md'
@@ -2171,6 +2249,9 @@ class Window(QMainWindow):
 
 
 def main():
+    if sys.platform == 'win32':
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('vael.sorter')
     app = QApplication(sys.argv)
     app.setApplicationName('sorter')
     app.setOrganizationName('vael')
