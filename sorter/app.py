@@ -1354,13 +1354,21 @@ class ThumbnailCard(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
             self._drag_start_pos = None
-            if self.browser and event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+            if self.browser:
                 self.browser.select_card(self, event.modifiers())
             else:
                 self.view_requested.emit(self)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = None
+            self.view_requested.emit(self)
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
     def _start_drag(self):
         mime = QMimeData()
@@ -1716,7 +1724,7 @@ class FolderSection(QWidget):
         # all: presses on blank space here are swallowed and do nothing,
         # rather than bubbling up to the header's rubber-band area, leaving
         # ThumbnailCard's own drag handling untouched.
-        self.card_widget = _InertMouseArea()
+        self.card_widget = _RubberBandArea(browser)
         self.card_widget.setObjectName("cardGrid")
         self.card_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.card_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1772,7 +1780,7 @@ class FolderSection(QWidget):
         # clicking one that isn't selected replaces the selection with just
         # that folder.
         if self.path not in self.browser.selected_folder_paths():
-            self.browser.clear_folder_selection()
+            self.browser.clear_selection()
             self.browser.toggle_folder_selection(self.path)
         self.browser.show_folder_context_menu(self, event.globalPos())
         event.accept()
@@ -1941,6 +1949,7 @@ class FolderSection(QWidget):
             if sub_path in self.browser.saved_expanded_paths or self.browser._filter_map is not None:
                 child.set_expanded(True, persist=False)
         self._pending_subdirs = []
+        self.browser.repaint_content()
 
     # -- reflow (ported from indexer's _relayout_cards) --------------------
     def _relayout_cards(self):
@@ -2803,11 +2812,18 @@ class ImageBrowser(QWidget):
     def begin_rubber_band_drag(self, additive):
         if not additive:
             self.clear_folder_selection()
+            self._selected_file_paths.clear()
+        self._rb_file_selection = set(self._selected_file_paths)
         self._rb_base_selection = set(self._selected_folder_paths)
+        self.repaint_content()
 
     def update_rubber_band_drag(self, global_rect):
         hits = self._sections_intersecting_global_rect(global_rect)
         self.set_folder_selection(self._rb_base_selection | hits)
+        file_hits = {card.filepath for card in self.visible_cards()
+                     if QRect(card.mapToGlobal(QPoint()), card.size()).intersects(global_rect)}
+        self._selected_file_paths = self._rb_file_selection | file_hits
+        self.repaint_content()
 
     def end_rubber_band_drag(self):
         self._rb_base_selection = set()
@@ -3325,11 +3341,15 @@ class CoverBrowser(ImageBrowser):
             self.filter_rows()
 
     def refresh(self, *_):
-        self._selected_file_paths.clear()
-        if self.active_filter() or self._details:
+        files = set(self._selected_file_paths)
+        folders = set(self._selected_folder_paths)
+        if self.active_filter():
             self.filter_rows()
         else:
             self.reload_current_folder()
+        self._selected_file_paths = files
+        self.set_folder_selection(folders)
+        self.repaint_content()
 
     def navigate(self, path, remember=True):
         target = normalized(path) if path else None
@@ -3368,6 +3388,8 @@ class CoverBrowser(ImageBrowser):
             names = [c.filepath for c in cards]
             first, last = sorted((names.index(self._selection_anchor), names.index(card.filepath)))
             self._selected_file_paths.update(names[first:last + 1])
+        elif not modifiers & Qt.ControlModifier:
+            self._selected_file_paths = {card.filepath}
         elif card.filepath in self._selected_file_paths:
             self._selected_file_paths.remove(card.filepath)
         else:
@@ -3391,7 +3413,6 @@ class CoverBrowser(ImageBrowser):
         self.action_menu(point, card)
 
     def show_folder_context_menu(self, origin_section, global_pos):
-        self._selected_file_paths.clear()
         self.repaint_content()
         self.action_menu(global_pos)
 
@@ -3466,6 +3487,8 @@ class CoverBrowser(ImageBrowser):
     def repaint_content(self):
         for section in self._sections_by_path.values():
             for card in section._cards:
+                selected = card.filepath in self._selected_file_paths
+                card._img_lbl.setStyleSheet('border: 3px solid #00d4a0; border-radius: 7px;' if selected else 'border: 3px solid transparent;')
                 card.update()
         if hasattr(self, 'table'):
             self.table.viewport().update()
