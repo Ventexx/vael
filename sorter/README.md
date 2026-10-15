@@ -55,7 +55,7 @@ The upper explorer uses Cover’s window styling, folder tabs, collapsible heade
 
 Click a card to select it; double-click to inspect it. **Ctrl-click** toggles selection and **Shift-click** extends a card selection. Drag selected cards to the shelf or a sorting folder. Folder headers support selection, drag and drop, and rectangular selection across both files and folder headers. Selected media have a bright outline, including when targeted by right-click. Middle-button dragging pans the explorer. Right-click selected folders to load their full contents recursively in the background; loading can be cancelled.
 
-The small **search icon** opens that explorer’s search and filters. Searches cover its configured folder tabs; **Subfolders** includes descendants. Image, GIF, Video, Folder, and Other filters can be combined with extensions such as `png,jpg`. The lower explorers have independent searches and filters, including flags.
+The small **search icon** opens that explorer’s search and filters. Searches cover its configured folder tabs; **Subfolders** includes descendants. Image, GIF, Video, Folder, and Other filters can be combined with extensions such as `png,jpg`. The lower explorers have independent searches and filters.
 
 The upper explorer has one view: expandable folders with media cards. The **⋯** menu beside Search contains explorer-wide options; file actions stay in the right-click menu. The two explorers retain their selections independently. Copying from the source does not refresh it.
 
@@ -73,7 +73,7 @@ Choose one workspace root in Settings. The bottom explorer uses **Grid View**, w
 
 Drop onto a visible folder to target it, or onto empty space to use the current folder. A drag from the library copies external content. A drag from a workspace pane moves its selected items; hold **Ctrl** to copy instead. Shelf drops and drops from other applications always copy. The status bar describes internal drag behavior.
 
-The **⋯** menu contains Refresh, Search and Filters, Select All, and Invert Selection. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Toggle Flag, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste (when the clipboard contains files) and New Folders appear when right-clicking empty workspace space, not selected files. Batch Rename appears only for multiple selected items; a single item gets Rename. Copy to Active Workspace Folder appears only in the source explorer. Open Folder in Explorer opens the selected folder itself, or the parent of a selected file. **Delete** uses the system trash. Undo remains a separate button.
+The **⋯** menu contains Refresh, Search and Filters, Select All, and Invert Selection. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste (when the clipboard contains files) and New Folders appear when right-clicking empty workspace space, not selected files. Batch Rename appears only for multiple selected items; a single item gets Rename. Copy to Active Workspace Folder appears only in the source explorer. Open Folder in Explorer opens the selected folder itself, or the parent of a selected file. **Delete** uses the system trash. Undo remains a separate button.
 
 **Move to Folder** opens a folder-only dialog showing the complete workspace hierarchy. Select a folder, then choose **Save** or **Cancel**. It does not open the operating system's folder picker.
 
@@ -85,7 +85,7 @@ When a selected folder includes other selected descendants, transfer actions pro
 
 Outside the sorting root, sorter can browse and copy content but cannot move, rename, delete, or otherwise modify it. Mutating operations validate actual filesystem paths in a shared service. The sorting root itself cannot be renamed or deleted through sorter, and destinations outside it are rejected. Symbolic links and Windows junctions are not followed or transferred, including links found within a folder being copied.
 
-Local application preferences, flags, and the disposable catalog are stored separately in `sorter/.local/`. Flags never modify the content file. Profile exports must also be saved inside the configured sorting folder.
+Local application preferences and the disposable catalog are stored separately in `sorter/.local/`. Profile exports must also be saved inside the configured sorting folder.
 
 When incoming names conflict, choose **Cancel**, **Overwrite**, or **Auto Rename** before copying begins. Cancel leaves all files and the selection unchanged. Overwrite replaces matching files; when folders overlap, their contents are merged and unmatched files remain. Auto Rename changes only conflicting incoming names to `image1.png`, `image2.png`, and so on, using the first available number. Overwritten files are backed up privately for session Undo; those backups are removed when the session ends. File operations run in the background and report partial failures. **Stop after current item** stops before the next item; it does not interrupt a file midway through a copy.
 
@@ -129,7 +129,7 @@ When inheritance is enabled, recognized fields pass down from the configured sou
 
 Search is case-insensitive and uses partial matches. Multiple terms are combined with AND. Quotes keep multiword values together. The search field’s tooltip shows interpreted search terms, and autocomplete offers field values from the loaded entries. Each explorer's query and filters are independent.
 
-**Profiles & exclusions** configures ignored folder/file names using wildcard patterns, one per line. Export/import shares fields, rules, and relevant preferences as JSON; source paths, sorting root, pins, flags, and rule scope paths are not exported. Importing changes the dialog first; Save applies it.
+**Profiles & exclusions** configures ignored folder/file names using wildcard patterns, one per line. Export/import shares fields, rules, and relevant preferences as JSON; source paths, sorting root, pins, and rule scope paths are not exported. Importing changes the dialog first; Save applies it.
 
 ---
 
@@ -156,7 +156,6 @@ Shortcuts act on the focused explorer and do not run file actions while typing i
 | `Ctrl+Up` / `Ctrl+Down` | Navigate sibling folders |
 | `F5` / `Alt+Up` | Refresh / parent folder |
 | `F2` | Rename; multiple items open batch rename |
-| `F` | Toggle flags in a lower pane |
 | `Delete` | Move selection to trash after confirmation |
 | `Ctrl+Shift+N` | Create folders in the current lower pane |
 | `Ctrl+Z` | Undo the most recent individual file operation |
@@ -176,14 +175,14 @@ README.md                     — this guide and the in-app Help content
 icon.ico / icon.png           — application icons (preferred)
 cover.png                     — optional README artwork and fallback app icon
 cover.ico                     — optional fallback Windows app icon
-.local/settings.json          — local preferences, paths, flags, and layout
+.local/settings.json          — local preferences, paths and layout
 .local/catalog.sqlite         — disposable recent directory snapshots
 venv/                         — local Python environment
 ```
 
 Keep artwork beside `app.py`. The README displays **`cover.png`**. On Windows the app tries **`icon.ico`**, **`cover.ico`**, **`icon.png`**, then **`cover.png`**. The supplied icons and Cover-style artwork naming both work. Restart after changing artwork. Missing artwork does not prevent launch.
 
-`.local` and `venv` are excluded from Git. Deleting the catalog while the app is closed rebuilds it on the next scan. Deleting `settings.json` resets configuration and flags. The shelf, internal cut selection, and undo history are session-only. Window/view preferences and flags are saved locally; no content is uploaded or published.
+`.local` and `venv` are excluded from Git. Deleting the catalog while the app is closed rebuilds it on the next scan. Deleting `settings.json` resets configuration. The shelf, internal cut selection, and undo history are session-only. Window/view preferences are saved locally; no content is uploaded or published.
 
 ---
 

@@ -16,7 +16,7 @@ DEFAULTS = {
     "sources": [], "source_names": {}, "sort_root": "", "pins": [],
     "fields": {}, "rules": [],
     "inherit": False, "ignored": [],
-    "flags": [], "layout": {}, "collision": "rename",
+    "layout": {}, "collision": "rename",
 }
 
 
@@ -30,6 +30,7 @@ def read_settings():
         pass
     except (ValueError, OSError) as exc:
         raise RuntimeError(f"Cannot read local settings: {exc}") from exc
+    config.pop('flags', None)  # Retire legacy flag data when loading an existing installation.
     return config
 
 
@@ -679,8 +680,6 @@ class MediaModel(QAbstractTableModel):
                     datetime.fromtimestamp(entry.mtime).strftime('%Y-%m-%d %H:%M'),
                     str(entry.path.parent), ' · '.join(f'{k}: {v}' for k, v in entry.fields.items())][index.column()]
         if role == Qt.DecorationRole and index.column() == 0:
-            if str(entry.path) in self.owner.window.config['flags']:
-                return self.owner.style().standardIcon(QStyle.SP_DialogApplyButton)
             if entry.is_dir:
                 return QIcon(self.owner.style().standardIcon(QStyle.SP_DirIcon).pixmap(32, 32))
             if entry.kind in ('Image', 'GIF'):
@@ -707,8 +706,6 @@ class MediaFilter(QSortFilterProxyModel):
         entry = self.sourceModel().entries[row]
         kind = self.browser.kind.currentText()
         if kind != 'All types' and entry.kind != kind:
-            return False
-        if self.browser.flagged.isChecked() and str(entry.path) not in self.browser.window.config['flags']:
             return False
         ext = self.browser.extension.text().strip().lower().lstrip('.')
         if ext and (entry.is_dir or entry.path.suffix.lower().lstrip('.') not in [v.strip().lstrip('.') for v in ext.split(',')]):
@@ -1456,8 +1453,7 @@ class ThumbnailCard(QWidget):
         super().paintEvent(event)
         selected = self.browser and self.filepath in self.browser._selected_file_paths
         media = Path(self.filepath).suffix.lower() in VIDEOS | {'.gif'}
-        flagged = self.browser and self.filepath in self.browser.window.config['flags']
-        if self._hovered or selected or media or flagged:
+        if self._hovered or selected or media:
             # Subtle white-grey, almost-transparent highlight outline so
             # it's clear which thumbnail is under the cursor.
             p = QPainter(self)
@@ -1471,10 +1467,6 @@ class ThumbnailCard(QWidget):
                 p.fillRect(QRect(6, THUMB_H - 23, THUMB_W - 12, 17), QColor(10, 10, 10, 190))
                 p.setPen(QColor('#b4b4b4'))
                 p.drawText(QRect(9, THUMB_H - 23, THUMB_W - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
-            if flagged:
-                p.setBrush(QColor('#00d4a0'))
-                p.setPen(Qt.NoPen)
-                p.drawEllipse(THUMB_W - 13, 7, 5, 5)
             p.end()
 
 
@@ -3214,9 +3206,6 @@ class CoverBrowser(ImageBrowser):
         self.recursive = QCheckBox('Subfolders')
         self.recursive.setChecked(True)
         filter_layout.addWidget(self.recursive)
-        self.flagged = QCheckBox('Flagged')
-        self.flagged.setVisible(editable)
-        filter_layout.addWidget(self.flagged)
         self.layout().insertWidget(0, self.filter_panel)
         self.filter_panel.hide()
         self.search_button = QToolButton()
@@ -3230,7 +3219,7 @@ class CoverBrowser(ImageBrowser):
         self.filter_timer.setSingleShot(True)
         self.filter_timer.setInterval(180)
         self.filter_timer.timeout.connect(self.filter_rows)
-        for signal in (self.search.textChanged, self.extension.textChanged, self.kind.currentIndexChanged, self.flagged.toggled, self.recursive.toggled):
+        for signal in (self.search.textChanged, self.extension.textChanged, self.kind.currentIndexChanged, self.recursive.toggled):
             signal.connect(lambda *_: self.filter_timer.start())
         shortcut = QShortcut(QKeySequence('Ctrl+F'), self)
         shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -3260,7 +3249,7 @@ class CoverBrowser(ImageBrowser):
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
         if editable:
-            for key, callback in [('Ctrl+X', lambda: window.copy_selection(self, True)), ('Ctrl+V', lambda: window.paste(self)), ('Delete', lambda: window.trash_selection(self)), ('F2', lambda: window.rename_selection(self)), ('F', lambda: window.toggle_flags(self)), ('Ctrl+Shift+N', lambda: window.new_folders(self)), ('Alt+Up', self.up)]:
+            for key, callback in [('Ctrl+X', lambda: window.copy_selection(self, True)), ('Ctrl+V', lambda: window.paste(self)), ('Delete', lambda: window.trash_selection(self)), ('F2', lambda: window.rename_selection(self)), ('Ctrl+Shift+N', lambda: window.new_folders(self)), ('Alt+Up', self.up)]:
                 shortcut = QShortcut(QKeySequence(key), self)
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
                 shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
@@ -3294,7 +3283,7 @@ class CoverBrowser(ImageBrowser):
             self._status_bar.move(self._status_bar.x(), self._status_bar.y() + self.filter_panel.height() + self.layout().spacing())
 
     def active_filter(self):
-        return bool(self.search.text().strip() or self.extension.text().strip() or self.kind.currentIndex() or self.flagged.isChecked())
+        return bool(self.search.text().strip() or self.extension.text().strip() or self.kind.currentIndex())
 
     def set_details(self, enabled):
         self._filter_serial += 1
@@ -3502,7 +3491,6 @@ class CoverBrowser(ImageBrowser):
                     rename = menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
                     rename.setToolTip('Rename selected items together using find/replace, prefixes, suffixes or numbering. Preview all names before applying.')
                     menu.setToolTipsVisible(True)
-                menu.addAction('Toggle flag', lambda: self.window.toggle_flags(self))
                 menu.addAction('Delete', lambda: self.window.trash_selection(self))
             else:
                 clipboard = QApplication.clipboard().mimeData()
@@ -3586,8 +3574,6 @@ class CoverBrowser(ImageBrowser):
         recursive = self.recursive.isChecked()
         kind = self.kind.currentText()
         extensions = {part.strip().lstrip('.').lower() for part in self.extension.text().split(',') if part.strip()}
-        flagged = self.flagged.isChecked()
-        flags = set(config['flags'])
         self.search_button.setToolTip('Searching…')
 
         def found(result):
@@ -3598,8 +3584,7 @@ class CoverBrowser(ImageBrowser):
             self.proxy.invalidate()
             filtered = [e for e in entries if matches(e, terms)
                         and (kind == 'All types' or e.kind == kind)
-                        and (not extensions or e.path.suffix.lower().lstrip('.') in extensions)
-                        and (not flagged or str(e.path) in flags)]
+                        and (not extensions or e.path.suffix.lower().lstrip('.') in extensions)]
             self.search_button.setToolTip(f'{len(filtered)} matches across {len(roots)} folder tabs' + ('\n' + '\n'.join(warnings[:5]) if warnings else ''))
             self.search.setToolTip(' · '.join(f'{field or "Any"}: {value}' for field, value in terms))
             if not self._details:
@@ -4059,7 +4044,7 @@ class SettingsDialog(QDialog):
         profile_row.addWidget(export)
         profile_row.addWidget(import_button)
         a.addLayout(profile_row)
-        note = QLabel('Profiles contain naming rules and preferences. Source folders, sorting folder, pins and flags remain local. Scope paths in rules are omitted when exporting.\n\nSettings and the disposable catalog are stored in sorter/.local/. The session shelf is never saved.')
+        note = QLabel('Profiles contain naming rules and preferences. Source folders, sorting folder, pins remain local. Scope paths in rules are omitted when exporting.\n\nSettings and the disposable catalog are stored in sorter/.local/. The session shelf is never saved.')
         note.setWordWrap(True)
         a.addWidget(note)
         self._section(layout, 'Profiles & exclusions', 'Share naming rules and exclude filenames or folders with wildcard patterns.').addWidget(advanced)
@@ -5221,6 +5206,7 @@ class Window(QMainWindow):
     def __init__(self, config=None):
         super().__init__()
         self.config = config if config is not None else read_settings()
+        self.config.pop('flags', None)
         validate_config(self.config)
         self.service = FileService(self.config['sort_root'])
         self.jobs = Jobs(self)
@@ -5604,7 +5590,7 @@ class Window(QMainWindow):
             lambda value, label: (self.progress.setValue(value), self.operation_status.setText(title + ' · ' + Path(label).name)))
 
     def reconcile_references(self, results):
-        # Moves and renames update flags, pins, shelf entries and browser paths.
+        # Moves and renames update pins, shelf entries and browser paths.
         for old_text, value in results:
             if isinstance(value, UndoRecord):
                 if value.action == 'rmdir':
@@ -5619,7 +5605,7 @@ class Window(QMainWindow):
                 if path.is_relative_to(old):
                     return str(new / path.relative_to(old)) if new else None
                 return text
-            for key in ('flags', 'pins'):
+            for key in ('pins',):
                 self.config[key] = [mapped(p) for p in self.config[key] if mapped(p)]
             for i in reversed(range(self.shelf.list.count())):
                 item = self.shelf.list.item(i)
@@ -5640,7 +5626,6 @@ class Window(QMainWindow):
                     text = mapped(str(browser.current))
                     browser.current = Path(text) if text else (self.service.root if browser.editable else None)
                     browser.path.setText(str(browser.current) if browser.current else '')
-        self.config['flags'] = [p for p in self.config['flags'] if Path(p).exists()]
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
         self.shelf.update_count()
 
@@ -5801,23 +5786,6 @@ class Window(QMainWindow):
 
     def undo(self):
         self.run_operations('Undo', [('Last operation', self.service.undo)])
-
-    def toggle_flags(self, browser):
-        paths = browser.selected_paths()
-        if not paths:
-            return
-        if not all(self.service.inside(path) for path in paths):
-            self.notice('Flags can be changed only for items inside the sorting folder.')
-            return
-        flags = set(self.config['flags'])
-        remove = all(str(path) in flags for path in paths)
-        for path in paths:
-            flags.discard(str(path)) if remove else flags.add(str(path))
-        self.config['flags'] = sorted(flags)
-        for item in (self.sorter, self.second):
-            item.filter_rows()
-            item.repaint_content()
-        self.persist()
 
     def pin(self, browser):
         if not browser.current:
