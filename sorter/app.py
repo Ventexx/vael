@@ -4120,9 +4120,13 @@ class SettingsDialog(QDialog):
         f = QVBoxLayout(folders)
         f.setContentsMargins(0, 0, 0, 0)
         f.addWidget(QLabel('Sources · browse and copy from any number of folders'))
-        self.sources = QListWidget()
+        self.sources = QTableWidget(0, 2)
+        self.sources.setHorizontalHeaderLabels(['Folder path', 'Display name'])
         self.sources.setMaximumHeight(150)
-        self.sources.setDragDropMode(QAbstractItemView.InternalMove)
+        self.sources.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.sources.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.sources.setColumnWidth(1, 140)
+        self.sources.verticalHeader().hide()
         for path in config['sources']:
             self.append_source(path, config.get('source_names', {}).get(str(normalized(path)), ''))
         f.addWidget(self.sources, 1)
@@ -4130,12 +4134,15 @@ class SettingsDialog(QDialog):
         add = QPushButton('Add source…')
         add.clicked.connect(self.add_source)
         remove = QPushButton('Remove selected')
-        remove.clicked.connect(lambda: [self.sources.takeItem(self.sources.row(item)) for item in self.sources.selectedItems()])
+        remove.clicked.connect(lambda: [self.sources.removeRow(row) for row in sorted({item.row() for item in self.sources.selectedIndexes()}, reverse=True)])
         row.addWidget(add)
         row.addWidget(remove)
-        rename = QPushButton('Display name…')
-        rename.clicked.connect(self.rename_source)
-        row.addWidget(rename)
+        for label, delta in [('↑', -1), ('↓', 1)]:
+            button = QPushButton(label)
+            button.setFixedWidth(30)
+            button.setToolTip('Move source up' if delta < 0 else 'Move source down')
+            button.clicked.connect(lambda checked=False, step=delta: self.move_source(step))
+            row.addWidget(button)
         row.addStretch()
         f.addLayout(row)
         f.addWidget(QLabel('Sorting folder · the only folder where files may be changed'))
@@ -4299,9 +4306,12 @@ class SettingsDialog(QDialog):
             raise ValueError('Field names must be unique.')
         config['fields'] = dict(pairs)
         config['rules'] = [{'pattern': values(self.rules, row, 0), 'scope': values(self.rules, row, 1)} for row in range(self.rules.rowCount())]
-        items = [self.sources.item(i) for i in range(self.sources.count())]
-        config['sources'] = list(dict.fromkeys(item.data(Qt.UserRole) for item in items))
-        config['source_names'] = {item.data(Qt.UserRole): item.data(Qt.UserRole + 1) for item in items if item.data(Qt.UserRole + 1)}
+        sources = [(str(normalized(values(self.sources, row, 0))), values(self.sources, row, 1))
+                   for row in range(self.sources.rowCount()) if values(self.sources, row, 0)]
+        if len({path for path, name in sources}) != len(sources):
+            raise ValueError('Each source folder can only appear once.')
+        config['sources'] = [path for path, name in sources]
+        config['source_names'] = {path: name for path, name in sources if name}
         config['sort_root'] = str(normalized(self.sort_root.text())) if self.sort_root.text().strip() else ''
         config['inherit'] = self.inherit.isChecked()
         config['ignored'] = [line.strip() for line in self.ignored.toPlainText().splitlines() if line.strip()]
@@ -4310,28 +4320,29 @@ class SettingsDialog(QDialog):
 
     def append_source(self, path, display_name=''):
         path = str(normalized(path))
-        item = QListWidgetItem(display_name or path)
-        item.setData(Qt.UserRole, path)
-        item.setData(Qt.UserRole + 1, display_name)
+        row = self.sources.rowCount()
+        self.sources.insertRow(row)
+        item = QTableWidgetItem(path)
         item.setToolTip(path)
-        self.sources.addItem(item)
+        self.sources.setItem(row, 0, item)
+        self.sources.setItem(row, 1, QTableWidgetItem(display_name))
 
-    def rename_source(self):
-        item = self.sources.currentItem()
-        if not item:
+    def move_source(self, delta):
+        row = self.sources.currentRow()
+        target = row + delta
+        if row < 0 or not 0 <= target < self.sources.rowCount():
             return
-        name, accepted = QInputDialog.getText(self, 'Folder display name',
-            'Name shown in the top explorer tabs (empty uses the folder name):',
-            text=item.data(Qt.UserRole + 1) or '')
-        if accepted:
-            name = name.strip()
-            item.setData(Qt.UserRole + 1, name)
-            item.setText(name or item.data(Qt.UserRole))
+        for column in range(2):
+            first = self.sources.takeItem(row, column)
+            second = self.sources.takeItem(target, column)
+            self.sources.setItem(target, column, first)
+            self.sources.setItem(row, column, second)
+        self.sources.setCurrentCell(target, 0)
 
     def add_source(self):
         path = QFileDialog.getExistingDirectory(self, 'Add source folder')
         if path:
-            if not any(self.sources.item(i).data(Qt.UserRole) == str(normalized(path)) for i in range(self.sources.count())):
+            if not any(self.sources.item(row, 0).text() == str(normalized(path)) for row in range(self.sources.rowCount())):
                 self.append_source(path)
 
     def choose_sort_root(self):
