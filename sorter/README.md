@@ -12,13 +12,12 @@ A local media workspace for finding content in structured folders, collecting a 
 ## features
 
 - browse any number of source folders in Cover’s original tabbed, collapsible explorer
-- search both explorers independently, with file-type, extension, and flag filters
+- search both explorers independently, with file-type and extension filters
 - extract searchable fields from user-defined folder-name patterns
 - collect files and folders on a session-only shelf without moving their originals
 - copy selections into a sorting folder through drag and drop or menus
-- manage real files and subfolders in Cover thumbnail cards, a detail list, or two panes side by side
+- browse source thumbnail cards and organize files in a workspace grid, optionally in two panes side by side
 - create folders, copy, move, duplicate, rename, batch rename, and move items to the system trash
-- pin frequently used sorting subfolders and flag selected items
 - inspect images with fit/zoom controls and play GIFs and videos in the larger viewer
 - scan folders and load image thumbnails in the background
 - restore folder locations, views, column layout, and window proportions between launches
