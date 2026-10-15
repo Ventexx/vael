@@ -681,13 +681,13 @@ class MediaModel(QAbstractTableModel):
                     str(entry.path.parent), ' · '.join(f'{k}: {v}' for k, v in entry.fields.items())][index.column()]
         if role == Qt.DecorationRole and index.column() == 0:
             if entry.is_dir:
-                return QIcon(self.owner.style().standardIcon(QStyle.SP_DirIcon).pixmap(32, 32))
+                return QIcon(self.owner.style().standardIcon(QStyle.SP_DirIcon).pixmap(round(32 * self.owner.entry_zoom / 100), round(32 * self.owner.entry_zoom / 100)))
             if entry.kind in ('Image', 'GIF'):
                 pixmap = self.thumbnail(entry)
                 if pixmap and not pixmap.isNull():
                     return QIcon(pixmap)
             if entry.kind == 'Other':
-                return QIcon(document_pixmap(entry.path))
+                return QIcon(document_pixmap(entry.path, self.owner.entry_zoom / 100))
             return self.owner.style().standardIcon(QStyle.SP_MediaPlay if entry.kind == 'Video' else QStyle.SP_FileIcon)
 
     def flags(self, index):
@@ -839,17 +839,17 @@ def _load_pixmap(path: str) -> QImage:
         reader.setAutoTransform(True)
         size = reader.size()
         if size.isValid():
-            size.scale(THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding)
+            size.scale((THUMB_W * 2), (THUMB_H * 2), Qt.KeepAspectRatioByExpanding)
             reader.setScaledSize(size)
         pix = reader.read()
         if not pix.isNull():
             scaled = pix.scaled(
-                THUMB_W, THUMB_H,
+                (THUMB_W * 2), (THUMB_H * 2),
                 Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
             )
-            x = (scaled.width() - THUMB_W) // 2
-            y = (scaled.height() - THUMB_H) // 2
-            pix = scaled.copy(x, y, THUMB_W, THUMB_H)
+            x = (scaled.width() - (THUMB_W * 2)) // 2
+            y = (scaled.height() - (THUMB_H * 2)) // 2
+            pix = scaled.copy(x, y, (THUMB_W * 2), (THUMB_H * 2))
         _PIXMAP_CACHE[path] = pix
         return pix
     return cached
@@ -1277,10 +1277,11 @@ class _AutopanScrollArea(QScrollArea):
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
 
 
-def document_pixmap(path):
-    pixmap = QPixmap(96, 76)
+def document_pixmap(path, scale=1):
+    pixmap = QPixmap(round(96 * scale), round(76 * scale))
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
+    painter.scale(scale, scale)
     painter.setRenderHint(QPainter.Antialiasing)
     painter.setPen(QColor('#b8bec6'))
     painter.setBrush(QColor('#ffffff'))
@@ -1315,6 +1316,7 @@ class ThumbnailCard(QWidget):
         self._drag_start_pos = None
         self._image_loaded = False
         self._image_requested = False
+        self._source_pixmap = None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1336,7 +1338,7 @@ class ThumbnailCard(QWidget):
         extension = Path(self.filepath).suffix.lower()
         if extension not in IMAGES:
             symbol = QStyle.SP_MediaPlay if extension in VIDEOS or extension == '.gif' else QStyle.SP_FileIcon
-            self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(28, 28) if extension in VIDEOS or extension == '.gif' else document_pixmap(self.filepath))
+            self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(round(28 * self.width() / THUMB_W), round(28 * self.width() / THUMB_W)) if extension in VIDEOS or extension == '.gif' else document_pixmap(self.filepath, self.width() / THUMB_W))
             self._image_loaded = True
             return
         cached = _PIXMAP_CACHE.get(self.filepath)
@@ -1355,23 +1357,34 @@ class ThumbnailCard(QWidget):
         except RuntimeError:
             pass
 
+    def set_entry_zoom(self, percent):
+        self.setFixedSize(round(THUMB_W * percent / 100), round(THUMB_H * percent / 100))
+        self._img_lbl.setFixedSize(self.size())
+        if self._source_pixmap is not None:
+            self._apply_pixmap(self._source_pixmap)
+        elif self._image_loaded:
+            self._image_loaded = False
+            self.request_image()
+        self.update()
+
     def _apply_pixmap(self, pix):
         if isinstance(pix, QImage):
             pix = QPixmap.fromImage(pix)
+        self._source_pixmap = pix
         self._image_loaded = True
         if not pix.isNull():
-            rounded = QPixmap(THUMB_W, THUMB_H)
+            rounded = QPixmap(self.size())
             rounded.fill(Qt.GlobalColor.transparent)
-            p = QPainter(rounded)
-            p.setRenderHint(QPainter.Antialiasing)
+            painter = QPainter(rounded)
+            painter.setRenderHint(QPainter.Antialiasing)
             path = QPainterPath()
-            path.addRoundedRect(0, 0, THUMB_W, THUMB_H, 7, 7)
-            p.setClipPath(path)
-            p.drawPixmap(0, 0, pix)
-            p.end()
+            path.addRoundedRect(0, 0, self.width(), self.height(), 7, 7)
+            painter.setClipPath(path)
+            painter.drawPixmap(self.rect(), pix)
+            painter.end()
             self._img_lbl.setPixmap(rounded)
         else:
-            self._img_lbl.setText("?")
+            self._img_lbl.setText('?')
 
     # -- click / drag (mirrors indexer's card interactions) ---------------
     # NOTE: every one of these handlers explicitly accept()s left-button
@@ -1462,11 +1475,11 @@ class ThumbnailCard(QWidget):
             pen.setWidth(1)
             p.setPen(pen)
             p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(1, 1, THUMB_W - 2, THUMB_H - 2, 7, 7)
+            p.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, 7, 7)
             if self._hovered and media:
-                p.fillRect(QRect(6, THUMB_H - 23, THUMB_W - 12, 17), QColor(10, 10, 10, 190))
+                p.fillRect(QRect(6, self.height() - 23, self.width() - 12, 17), QColor(10, 10, 10, 190))
                 p.setPen(QColor('#b4b4b4'))
-                p.drawText(QRect(9, THUMB_H - 23, THUMB_W - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
+                p.drawText(QRect(9, self.height() - 23, self.width() - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
             p.end()
 
 
@@ -1983,6 +1996,7 @@ class FolderSection(QWidget):
         for filepath in self._files:
             card = ThumbnailCard(filepath)
             card.browser = self.browser
+            card.set_entry_zoom(self.browser.entry_zoom)
             card.view_requested.connect(self._on_card_view_requested)
             card.context_menu_requested.connect(self._on_card_context_menu)
             i = len(self._cards)
@@ -2004,10 +2018,11 @@ class FolderSection(QWidget):
         if not isValid(self) or not isValid(self.card_widget):
             return
         available = self.browser.width() - self.card_widget.mapTo(self.browser, QPoint(0, 0)).x() - 12
-        avail_w = min(self.card_widget.width(), max(THUMB_W, available))
-        if avail_w < THUMB_W:
+        card_width = round(THUMB_W * self.browser.entry_zoom / 100)
+        avail_w = min(self.card_widget.width(), max(card_width, available))
+        if avail_w < card_width:
             return
-        cols = max(1, avail_w // (THUMB_W + 6))
+        cols = max(1, avail_w // (card_width + 6))
         if cols == self._current_cols:
             return
         self._current_cols = cols
@@ -3182,6 +3197,7 @@ class CoverBrowser(ImageBrowser):
         self._filter_task = None
         self._filter_serial = 0
         self._details = False
+        self.entry_zoom = 100
         super().__init__(window)
         if not PIXMAP_WORKER.isRunning():
             PIXMAP_WORKER._stop = False
@@ -3269,7 +3285,21 @@ class CoverBrowser(ImageBrowser):
         menu.addSeparator()
         menu.addAction('Select all visible items', self.select_all)
         menu.addAction('Invert visible selection', self.invert_selection)
+        zoom = menu.addMenu('Entry zoom')
+        for percent in (50, 75, 100, 125, 150, 200):
+            action = zoom.addAction(f'{percent}%')
+            action.setCheckable(True)
+            action.setChecked(percent == self.entry_zoom)
+            action.triggered.connect(lambda checked=False, value=percent: self.set_entry_zoom(value))
         menu.exec(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height())))
+
+    def set_entry_zoom(self, percent):
+        self.entry_zoom = max(50, min(200, int(percent)))
+        for section in self._sections_by_path.values():
+            for card in section._cards:
+                card.set_entry_zoom(self.entry_zoom)
+            section._current_cols = 0
+            section._relayout_cards()
 
     def toggle_search(self, visible):
         self.filter_panel.setVisible(visible)
@@ -3613,10 +3643,11 @@ class CoverBrowser(ImageBrowser):
             lambda error: self.search_button.setToolTip(error))
 
     def state(self):
-        return {'path': str(self._location or self.current or ''), 'details': self._details,
+        return {'path': str(self._location or self.current or ''), 'zoom': self.entry_zoom, 'details': self._details,
                 'header': bytes(self.table.horizontalHeader().saveState().toBase64()).decode()}
 
     def restore(self, state):
+        self.set_entry_zoom(state.get('zoom', 100))
         if self.editable and state.get('path') and Path(state['path']).is_dir() and self.window.service.inside(state['path'], True):
             self.navigate(state['path'])
         # Cover starts with the first source tab and collapsed child folders.
@@ -3657,6 +3688,14 @@ class WorkspaceBrowser(CoverBrowser):
         self.navigation_row.addWidget(self._status_bar)
         self.layout().insertWidget(0, self.navigation)
         self._restoring_selection = False
+
+    def set_entry_zoom(self, percent):
+        self.entry_zoom = max(50, min(200, int(percent)))
+        scale = self.entry_zoom / 100
+        self.grid.setIconSize(QSize(round(96 * scale), round(76 * scale)))
+        self.grid.setGridSize(QSize(round(132 * scale), round(76 * scale) + 40))
+        self.grid.doItemsLayout()
+        self.grid.viewport().update()
 
     def _position_status_bar(self):
         if not hasattr(self, 'navigation'):
@@ -3774,9 +3813,10 @@ class WorkspaceBrowser(CoverBrowser):
             selection.select(self.proxy.index(row, 0), QItemSelectionModel.Toggle)
 
     def state(self):
-        return {'path': str(self.current or '')}
+        return {'path': str(self.current or ''), 'zoom': self.entry_zoom}
 
     def restore(self, state):
+        self.set_entry_zoom(state.get('zoom', 100))
         path = state.get('path')
         if path and Path(path).is_dir() and self.window.service.inside(path, True):
             self.navigate(path)
