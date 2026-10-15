@@ -786,13 +786,17 @@ class DragViewMixin:
 class WorkspaceEntryDelegate(QStyledItemDelegate):
     """Compact, evenly spaced tiles with predictable thumbnail and caption bounds."""
 
+    def sizeHint(self, option, index):
+        size = round(96 * self.parent().browser.entry_zoom / 100)
+        return QSize(size, size + 20)
+
     def paint(self, painter, option, index):
         entry = index.data(Qt.UserRole)
         if entry is None:
             return
         browser = self.parent().browser
         size = round(96 * browser.entry_zoom / 100)
-        tile = QRect(option.rect.x(), option.rect.y(), size, size + 20)
+        tile = QRect(option.rect)
         thumbnail = QRect(tile.x(), tile.y(), size, size)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1335,6 +1339,33 @@ def document_pixmap(path, scale=1):
     return pixmap
 
 
+class CardImageLabel(QLabel):
+    """Paint selection above the thumbnail, within the label's own dirty region."""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        card = self.parentWidget()
+        if card is None:
+            return
+        selected = (card.item.isSelected() if hasattr(card, 'item') else
+                    bool(card.browser and card.filepath in card.browser._selected_file_paths))
+        media = Path(card.filepath).suffix.lower() in VIDEOS | {'.gif'}
+        if not (selected or card._hovered or media):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = QColor('#00d4a0') if selected else QColor(103, 139, 169, 110) if media else QColor(235, 235, 240, 90)
+        painter.setPen(QPen(color, 3 if selected else 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), 7, 7)
+        if card._hovered and media:
+            badge = QRect(6, self.height() - 23, self.width() - 12, 17)
+            painter.fillRect(badge, QColor(10, 10, 10, 190))
+            painter.setPen(QColor('#b4b4b4'))
+            painter.drawText(badge, Qt.AlignCenter, Path(card.filepath).suffix.upper())
+        painter.end()
+
+
 class ThumbnailCard(QWidget):
     view_requested = Signal(object)   # emits self on a plain left-click (no drag)
     # Right-click ("open context menu on an image") -- emits self plus the
@@ -1358,7 +1389,7 @@ class ThumbnailCard(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self._img_lbl = QLabel()
+        self._img_lbl = CardImageLabel(self)
         self._img_lbl.setObjectName("cardImage")
         self._img_lbl.setFixedSize(THUMB_W, THUMB_H)
         self._img_lbl.setAlignment(Qt.AlignCenter)
@@ -1488,37 +1519,18 @@ class ThumbnailCard(QWidget):
 
     def enterEvent(self, event):
         self._hovered = True
-        self.update()
+        self._img_lbl.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._hovered = False
-        self.update()
+        self._img_lbl.update()
         super().leaveEvent(event)
 
     def contextMenuEvent(self, event):
         self.context_menu_requested.emit(self, event.globalPos())
         event.accept()
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        selected = self.browser and self.filepath in self.browser._selected_file_paths
-        media = Path(self.filepath).suffix.lower() in VIDEOS | {'.gif'}
-        if self._hovered or selected or media:
-            # Subtle white-grey, almost-transparent highlight outline so
-            # it's clear which thumbnail is under the cursor.
-            p = QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing)
-            pen = QPen(QColor('#00d4a0') if selected else QColor(103, 139, 169, 110) if media else QColor(235, 235, 240, 90))
-            pen.setWidth(1)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, 7, 7)
-            if self._hovered and media:
-                p.fillRect(QRect(6, self.height() - 23, self.width() - 12, 17), QColor(10, 10, 10, 190))
-                p.setPen(QColor('#b4b4b4'))
-                p.drawText(QRect(9, self.height() - 23, self.width() - 18, 17), Qt.AlignCenter, Path(self.filepath).suffix.upper())
-            p.end()
 
 
 class _InertMouseArea(QWidget):
@@ -3687,9 +3699,7 @@ class CoverBrowser(ImageBrowser):
     def repaint_content(self):
         for section in self._sections_by_path.values():
             for card in section._cards:
-                selected = card.filepath in self._selected_file_paths
-                card._img_lbl.setStyleSheet('border: 3px solid #00d4a0; border-radius: 7px;' if selected else 'border: 3px solid transparent;')
-                card.update()
+                card._img_lbl.update()
         if hasattr(self, 'table'):
             self.table.viewport().update()
 
@@ -3969,16 +3979,6 @@ class ShelfCard(ThumbnailCard):
         self.shelf.menu(self.shelf.list.mapFromGlobal(event.globalPos()))
         event.accept()
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.item.isSelected():
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor('#00d4a0'), 1))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(1, 1, THUMB_W - 2, THUMB_H - 2, 7, 7)
-
-
 class ShelfList(QListWidget):
     def __init__(self, shelf):
         super().__init__()
@@ -4000,7 +4000,7 @@ class ShelfList(QListWidget):
         for i in range(self.count()):
             card = self.itemWidget(self.item(i))
             if card:
-                card.update()
+                card._img_lbl.update()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
