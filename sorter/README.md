@@ -53,37 +53,29 @@ Close sorter and delete its folder, including `venv` and `.local`. Your source f
 
 The upper explorer uses Cover’s window styling, folder tabs, collapsible headers, portrait cards, spacing, scrolling, and in-window image viewer. Each configured source gets a tab. Click a folder header to expand it; thumbnails load as folders become visible. Source folders start with collapsed children, as in Cover. Temporarily hidden tabs can be restored from the tab controls.
 
-Click a card to inspect it. **Ctrl-click** toggles selection and **Shift-click** extends a card selection. Drag selected cards to the shelf or a sorting folder. Folder headers support selection, drag and drop, and rectangular selection across headers. Middle-button dragging pans the explorer. Right-click selected folders to load their full contents recursively in the background; loading can be cancelled.
+Click a card to select it; double-click to inspect it. **Ctrl-click** toggles selection and **Shift-click** extends a card selection. Drag selected cards to the shelf or a sorting folder. Folder headers support selection, drag and drop, and rectangular selection across both files and folder headers. Selected media have a bright outline, including when targeted by right-click. Middle-button dragging pans the explorer. Right-click selected folders to load their full contents recursively in the background; loading can be cancelled.
 
 The small **search icon** opens that explorer’s search and filters. Searches cover its configured folder tabs; **Subfolders** includes descendants. Image, GIF, Video, Folder, and Other filters can be combined with extensions such as `png,jpg`. The lower explorers have independent searches and filters, including flags.
 
-The context menu offers **Detail list** for sortable, resizable columns. In that view, searches use the current folder and its descendants when Subfolders is enabled. Double-click a folder to enter it or a file to inspect it. Turn Detail list off to return to Cover’s folder cards.
+The upper explorer has one view: expandable folders with media cards. The **⋯** menu beside Search contains explorer-wide options; file actions stay in the right-click menu. The two explorers retain their selections independently. Copying from the source does not refresh it.
 
 Folder scans and thumbnail decoding run in the background. Search changes cancel outdated scans. Use Refresh / F5 to reload the active folder after external changes; the active directory is also checked periodically. Large recursive searches can take time.
 
 ### session shelf
 
-Open **Shelf** in the lower workspace controls. Use **Add to session shelf** in the context menu, or drag files onto the shelf. Its cards use the same portrait layout as the explorers; Ctrl-click selects references for copying or removal. Repeated references are not added twice. The shelf holds references, not temporary copies, and disappears when the app closes.
+Switch between **Workspace** and **Shelf** in the lower controls; only one is displayed at a time. Shelf is temporary storage for references. Use **Add to Shelf** in the context menu, or drag files onto the shelf. Its cards use the same portrait layout as the explorers; Ctrl-click selects references for copying or removal. Repeated references are not added twice. The shelf holds references, not temporary copies, and disappears when the app closes.
 
-Drag selected shelf entries onto a sorting folder, or use **Copy to target**. That button copies selected entries, or the whole shelf when none are selected, into the last active lower pane. Copied references remain on the shelf for reuse. **Remove selected** and **Clear** only remove references; they never delete the files.
+Use **Copy to Active Workspace Folder** to copy shelf entries into the workspace destination. That button copies selected entries, or the whole shelf when none are selected, into the last active lower pane. Copied references remain on the shelf for reuse. **Remove selected** and **Clear** only remove references; they never delete the files.
 
 ### sorting workspace below
 
-Choose one sorting root in Settings. Both lower panes stay inside that folder. Use **Split view** to organize between two different subfolders. Each pane uses the same Cover explorer, with independent navigation, search, filters, and optional detail list. Pin/unpin the current folder to give it a lower tab. The folder you interact with becomes the current destination; use **Open sorting subfolder…** or **Parent folder** in the menu to navigate explicitly.
+Choose one workspace root in Settings. The bottom explorer uses **Grid View**, with small folder icons and media thumbnails. Double-click a folder to enter it, and click a breadcrumb in **Root › Subfolder › …** to return directly to that level. The root is the explorer itself, with no expandable root header. **Split view** opens a second grid within the same workspace, with its own navigation, selection, and search. Search filters the folder currently shown. The last active lower pane supplies the destination for **Copy to Active Workspace Folder**.
 
-Drop onto a visible folder to target it, or onto empty space to use the current folder. A drag from the library copies external content. An internal drag of items already inside the sorting root moves them; hold **Ctrl** to copy instead. Shelf drops and drops from other applications always copy. The status bar describes internal drag behavior.
+Drop onto a visible folder to target it, or onto empty space to use the current folder. A drag from the library copies external content. A drag from a workspace pane moves its selected items; hold **Ctrl** to copy instead. Shelf drops and drops from other applications always copy. The status bar describes internal drag behavior.
 
-The lower **⋯ folder tools** menu and right-click menu contain:
+The **⋯** menu contains Refresh, Search and Filters, Select All, and Invert Selection. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Toggle Flag, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste and New Folders are also available in the workspace. **Delete** uses the system trash. Undo remains a separate button.
 
-- copy, cut, paste, copy to folder, and move to folder
-- duplicate with an automatically unique name
-- create one or several folders, with one name per line
-- move a selection into a newly created folder
-- rename and batch rename
-- toggle flag and filter flagged items
-- move to system trash
-- undo the most recent individual file operation
-- select all, invert selection, inspect information, copy paths, and open the containing folder externally
+**Move to Folder** opens a folder-only dialog showing the complete workspace hierarchy. Select a folder, then choose **Save** or **Cancel**. It does not open the operating system's folder picker.
 
 When a selected folder includes other selected descendants, transfer actions process the parent only. Copying a folder includes its ordinary files and subfolders. Individual files are independent: selecting an image does not automatically select accompanying JSON or text files. Select those too, or copy the containing folder.
 
@@ -95,13 +87,17 @@ Outside the sorting root, sorter can browse and copy content but cannot move, re
 
 Local application preferences, flags, and the disposable catalog are stored separately in `sorter/.local/`. Flags never modify the content file. Profile exports must also be saved inside the configured sorting folder.
 
-Existing files are never silently overwritten. In Settings, choose **Create a new name**, **Skip existing files**, or **Report a conflict**. New names use a suffix such as `image (2).png`. File operations run in the background and report partial failures. **Stop after current item** stops before the next item; it does not interrupt a file midway through a copy.
+When incoming names conflict, choose **Cancel**, **Overwrite**, or **Auto Rename** before copying begins. Cancel leaves all files and the selection unchanged. Overwrite replaces matching files; when folders overlap, their contents are merged and unmatched files remain. Auto Rename changes only conflicting incoming names to `image1.png`, `image2.png`, and so on, using the first available number. Overwritten files are backed up privately for session Undo; those backups are removed when the session ends. File operations run in the background and report partial failures. **Stop after current item** stops before the next item; it does not interrupt a file midway through a copy.
 
 **Undo** lasts for the current session and reverses one successful copy, move, rename, or folder creation at a time. Press it repeatedly to reverse a batch. It refuses to remove changed content or overwrite an occupied original location. Trashed files must be restored through the operating system's trash. Changes to content made in external programs are outside sorter's control.
 
 ---
 
 ## folder naming & search
+
+New installations start with empty settings fields and no sample naming rules, aliases, exclusion patterns, or test text. Configure only what you need; saved user settings are retained.
+
+**Information** shows readable file properties, image dimensions, and folder file counts and sizes. Expand full metadata for embedded image metadata and ExifTool output when ExifTool is available on PATH.
 
 Open **Settings → Naming & search** to define fields and their unique aliases. For example:
 
@@ -137,13 +133,13 @@ Search is case-insensitive and uses partial matches. Multiple terms are combined
 
 ---
 
-## images, GIFs & videos
+## images, GIFs, videos & documents
 
 Images receive background thumbnails cached for the session. GIFs and videos use static media tiles with a subtle colored outline; their exact extension appears in the tooltip and on hover. They never autoplay in the explorer.
 
-Click a card to open Cover’s in-window viewer (double-click in Detail list). Images support Fit, Actual size, mouse-wheel zoom, and dragging to pan; right-click for viewer actions. Escape or clicking outside closes the viewer. GIFs animate there and can be paused. Videos provide play/pause, seeking, time, and volume. Left/Right moves between media items in the current filtered view, and Space toggles playback. Add to shelf works from the viewer too.
+Double-click a file to open the in-window viewer. Images support Fit, Actual size, mouse-wheel zoom, and dragging to pan; right-click for viewer actions. Escape or clicking outside closes the viewer. GIFs animate there and can be paused. Videos provide play/pause, seeking, time, and volume. Left/Right moves between media items in the current filtered view, and Space toggles playback. Add to shelf works from the viewer too.
 
-Recognized image extensions: PNG, JPG/JPEG, WebP, BMP, TIFF, and AVIF. Video extensions: MP4, MKV, WebM, MOV, AVI, M4V, WMV, MPEG, and MPG. Actual image decoding and video playback depend on the available Qt codecs. Unsupported or damaged files remain manageable, with an explanation and **Open externally** in the viewer.
+Recognized image extensions: PNG, JPG/JPEG, WebP, BMP, TIFF, and AVIF. Video extensions: MP4, MKV, WebM, MOV, AVI, M4V, WMV, MPEG, and MPG. Actual image decoding and video playback depend on the available Qt codecs. Damaged media remain manageable, with an explanation and **Open externally** in the viewer. Text, code, JSON, unknown extensions, and extensionless files use a white page thumbnail labeled with their extension (or FILE). Opening them displays scrollable text without visible scrollbars. UTF-8 and BOM-marked UTF-16 are supported; undecodable bytes are replaced for display.
 
 ---
 
