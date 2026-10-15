@@ -244,7 +244,7 @@ def scan(roots, config, recursive, cancel, database=None):
                             return [], []
                         path = Path(item.path)
                         if any(fnmatch.fnmatch(item.name.casefold(), p.casefold())
-                               for p in config.get("ignored", [])):
+                               for p in ['.sorter-*', *config.get("ignored", [])]):
                             continue
                         try:
                             if is_link(path):
@@ -309,6 +309,7 @@ class UndoRecord:
     source: Path
     target: Path
     stamp: tuple
+    backup: Path | None = None
 
 
 class FileService:
@@ -361,14 +362,16 @@ class FileService:
     def available(self, target, policy):
         if not target.exists() and not target.is_symlink():
             return target
+        if policy == "overwrite":
+            return target
         if policy == "skip":
             return None
         if policy != "rename":
             raise FileExistsError(f"Already exists: {target}")
         stem, suffix = (target.name, "") if target.is_dir() else (target.stem, target.suffix)
-        i = 2
+        i = 1
         while True:
-            candidate = target.with_name(f"{stem} ({i}){suffix}")
+            candidate = target.with_name(f"{stem}{i}{suffix}")
             if not candidate.exists() and not candidate.is_symlink():
                 return candidate
             i += 1
@@ -389,11 +392,31 @@ class FileService:
         if target is None:
             return None
         self.require(target)
+        if target == source:
+            return None
+        if policy == 'overwrite' and target.is_dir() and source.is_dir():
+            for child in list(source.iterdir()):
+                self.transfer(child, target, move, policy)
+            if move:
+                source.rmdir()
+                self.undo_stack.append(UndoRecord('rmdir', source, source, ()))
+            return target
+        backup = None
+        if target.exists():
+            self.check_source(target)
+            backup = self.require(self.root / f'.sorter-{uuid.uuid4().hex}.backup')
+            if target.is_dir() != source.is_dir():
+                raise ValueError('Cannot overwrite a folder with a file or a file with a folder.')
         if move:
-            # Both locations are in the same configured tree. A rename avoids
-            # deleting an original that could change while a copy is running.
-            source.rename(target)
-            self.undo_stack.append(UndoRecord("move", source, target, signature(target)))
+            if backup:
+                target.rename(backup)
+            try:
+                source.rename(target)
+            except Exception:
+                if backup:
+                    backup.rename(target)
+                raise
+            self.undo_stack.append(UndoRecord('move', source, target, signature(target), backup))
             return target
         # Copy to a private staging path; failed copies never become final files.
         stage = destination / f".sorter-{uuid.uuid4().hex}.tmp"
@@ -405,9 +428,16 @@ class FileService:
             self.check_source(stage)
             self.require(target)
             if target.exists():
-                raise FileExistsError(str(target))
-            stage.rename(target)
-            self.undo_stack.append(UndoRecord("copy", source, target, signature(target)))
+                if not backup:
+                    raise FileExistsError(str(target))
+                target.rename(backup)
+            try:
+                stage.rename(target)
+            except Exception:
+                if backup and backup.exists():
+                    backup.rename(target)
+                raise
+            self.undo_stack.append(UndoRecord("copy", source, target, signature(target), backup))
             return target
         finally:
             if stage.exists():
@@ -416,6 +446,14 @@ class FileService:
                     shutil.rmtree(stage)
                 else:
                     stage.unlink()
+
+    def discard_backups(self):
+        for record in self.undo_stack:
+            if record.backup and record.backup.exists():
+                backup = self.require(record.backup)
+                if backup.is_file() and not is_link(backup):
+                    backup.unlink()
+        self.undo_stack.clear()
 
     def mkdir(self, parent, name):
         parent = self.require(parent, allow_root=True)
@@ -448,6 +486,10 @@ class FileService:
         if not self.undo_stack:
             raise ValueError("Nothing to undo in this session.")
         record = self.undo_stack[-1]
+        if record.action == 'rmdir':
+            self.require(record.source).mkdir()
+            self.undo_stack.pop()
+            return record
         target = self.require(record.target)
         self.check_source(target)
         if signature(target) != record.stamp:
@@ -461,6 +503,8 @@ class FileService:
             shutil.rmtree(target)
         else:
             target.unlink()
+        if record.backup and record.backup.exists():
+            self.require(record.backup).rename(target)
         self.undo_stack.pop()
         return record
 
@@ -3948,12 +3992,6 @@ class SettingsDialog(QDialog):
         help_text = QLabel('All subfolders are included. Sources stay read-only unless they are inside this sorting folder. Linked folders are not followed.')
         help_text.setWordWrap(True)
         f.addWidget(help_text)
-        self.collision = QComboBox()
-        self.collision.addItems(['Create a new name', 'Skip existing files', 'Report a conflict'])
-        self.collision.setCurrentIndex(['rename', 'skip', 'error'].index(config['collision']))
-        form = QFormLayout()
-        form.addRow('When a name already exists', self.collision)
-        f.addLayout(form)
         self._section(layout, 'Folders', 'Source order determines the tab order. Content can be modified only inside the chosen sorting folder.').addWidget(folders)
         naming = QWidget()
         n = QVBoxLayout(naming)
@@ -4108,7 +4146,6 @@ class SettingsDialog(QDialog):
         config['sort_root'] = str(normalized(self.sort_root.text())) if self.sort_root.text().strip() else ''
         config['inherit'] = self.inherit.isChecked()
         config['ignored'] = [line.strip() for line in self.ignored.toPlainText().splitlines() if line.strip()]
-        config['collision'] = ['rename', 'skip', 'error'][self.collision.currentIndex()]
         validate_config(config)
         return config
 
@@ -4179,7 +4216,6 @@ class SettingsDialog(QDialog):
             self.populate_tables(candidate)
             self.inherit.setChecked(candidate['inherit'])
             self.ignored.setPlainText('\n'.join(candidate['ignored']))
-            self.collision.setCurrentIndex(['rename', 'skip', 'error'].index(candidate['collision']))
         except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
             QMessageBox.warning(self, 'Import profile', 'Invalid profile: ' + str(exc))
 
@@ -5433,6 +5469,7 @@ class Window(QMainWindow):
             old_root = self.config['sort_root']
             self.config = dialog.config
             if self.config['sort_root'] != old_root:
+                self.service.discard_backups()
                 self.service = FileService(self.config['sort_root'])
             try:
                 save_settings(self.config)
@@ -5528,6 +5565,8 @@ class Window(QMainWindow):
         # Moves and renames update flags, pins, shelf entries and browser paths.
         for old_text, value in results:
             if isinstance(value, UndoRecord):
+                if value.action == 'rmdir':
+                    continue
                 old, new = value.target, value.source if value.action == 'move' else None
             elif isinstance(value, Path) and not Path(old_text).exists():
                 old, new = Path(old_text), value
@@ -5572,9 +5611,32 @@ class Window(QMainWindow):
         except ValueError as exc:
             self.notice(exc)
             return
-        policy = self.config['collision']
+        paths = top_level_selection(paths)
+        destination = Path(destination)
+        names = set()
+        conflicts = []
+        for path in paths:
+            key = path.name.casefold()
+            if (destination / path.name).exists() or key in names:
+                conflicts.append(path.name)
+            names.add(key)
+        policy = 'error'
+        if conflicts:
+            box = QMessageBox(self)
+            box.setWindowTitle('Files with matching names')
+            box.setText(f'{len(conflicts)} selected item(s) have names already used in this destination.')
+            box.setInformativeText('Overwrite replaces matching files. Auto Rename adds an available number before the extension. Cancel leaves everything unchanged.')
+            box.setDetailedText('\n'.join(conflicts))
+            cancel = box.addButton('Cancel', QMessageBox.RejectRole)
+            overwrite = box.addButton('Overwrite', QMessageBox.DestructiveRole)
+            rename = box.addButton('Auto Rename', QMessageBox.AcceptRole)
+            box.setDefaultButton(cancel)
+            self.exec_dialog(box)
+            if box.clickedButton() is cancel or box.clickedButton() is None:
+                return
+            policy = 'overwrite' if box.clickedButton() is overwrite else 'rename'
         self.run_operations('Move' if move else 'Copy',
-            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in top_level_selection(paths)])
+            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths])
 
     def transfer_dialog(self, browser, move):
         destination = QFileDialog.getExistingDirectory(self, 'Choose destination inside sorting folder', self.config['sort_root'])
@@ -5786,6 +5848,7 @@ class Window(QMainWindow):
         for task in list(self.jobs.tasks):
             task.cancel.set()
         self.jobs.pool.waitForDone()
+        self.service.discard_backups()
         self.config['layout'] = {
             'geometry': bytes(self.saveGeometry().toBase64()).decode(),
             'vertical': bytes(self.vertical.saveState().toBase64()).decode(),
