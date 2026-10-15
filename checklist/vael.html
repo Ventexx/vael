@@ -862,11 +862,6 @@ function mkSpacer(item) {
       <div class="header-line-half"></div>
       <button class="spacer-del">${X_SVG}</button>`;
 
-    const txt = el.querySelector('.header-text');
-    el.addEventListener('dblclick', e => {
-      if (e.target.closest('.spacer-del,.drag-handle')) return;
-      editHeader(item, txt);
-    });
   } else {
     el.innerHTML = `
       <div class="drag-handle">${DRAG_SVG}</div>
@@ -876,11 +871,22 @@ function mkSpacer(item) {
 
   el.querySelector('.spacer-del').addEventListener('click', () => del(item.id));
 
+  el.addEventListener('dblclick', e => {
+    if (e.target.closest('.spacer-del,.drag-handle')) return;
+    const txt = e.target.closest('.header-text');
+    if (txt) {
+      if (!txt.isContentEditable) editHeader(item, txt);
+    } else {
+      toggleSection(item);
+    }
+  });
+
   el.addEventListener('contextmenu', e => {
     if (e.target.closest('.header-text[contenteditable=true]')) return;
     e.preventDefault();
     e.stopPropagation();
     showItemContextMenu(e, [
+      ...(hasHeader ? [{ label: 'Rename', onClick: () => editHeader(item, el.querySelector('.header-text')) }] : []),
       { label: hasHeader ? 'Remove Header' : 'Add Header', onClick: () => toggleHeader(item) },
       { divider: true },
       { label: item.collapsed ? 'Expand section' : 'Collapse section', onClick: () => toggleSection(item) },
