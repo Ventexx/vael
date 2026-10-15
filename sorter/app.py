@@ -1224,6 +1224,25 @@ class _AutopanScrollArea(QScrollArea):
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
 
 
+def document_pixmap(path):
+    pixmap = QPixmap(96, 76)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QColor('#b8bec6'))
+    painter.setBrush(QColor('#ffffff'))
+    painter.drawRoundedRect(23, 3, 50, 69, 3, 3)
+    painter.setPen(QColor('#26313e'))
+    font = painter.font()
+    font.setBold(True)
+    font.setPixelSize(11)
+    painter.setFont(font)
+    extension = Path(path).suffix.lstrip('.').upper() or 'FILE'
+    painter.drawText(QRect(25, 8, 46, 60), Qt.AlignCenter | Qt.TextWrapAnywhere, extension)
+    painter.end()
+    return pixmap
+
+
 class ThumbnailCard(QWidget):
     view_requested = Signal(object)   # emits self on a plain left-click (no drag)
     # Right-click ("open context menu on an image") -- emits self plus the
@@ -1264,7 +1283,7 @@ class ThumbnailCard(QWidget):
         extension = Path(self.filepath).suffix.lower()
         if extension not in IMAGES:
             symbol = QStyle.SP_MediaPlay if extension in VIDEOS or extension == '.gif' else QStyle.SP_FileIcon
-            self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(28, 28))
+            self._img_lbl.setPixmap(self.style().standardIcon(symbol).pixmap(28, 28) if extension in VIDEOS or extension == '.gif' else document_pixmap(self.filepath))
             self._image_loaded = True
             return
         cached = _PIXMAP_CACHE.get(self.filepath)
@@ -2138,6 +2157,11 @@ class MediaViewerOverlay(ImgViewerOverlay):
     """Cover's viewer surface, with playback controls only for animated media."""
     def __init__(self, parent):
         super().__init__(parent)
+        self._text = QPlainTextEdit(self)
+        self._text.setReadOnly(True)
+        self._text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._text.hide()
         self._movie = None
         self._gif_file = None
         self._zoom = 0
@@ -2204,10 +2228,12 @@ class MediaViewerOverlay(ImgViewerOverlay):
             return
         path = Path(self._current_card.filepath)
         extension = path.suffix.lower()
+        text_document = extension not in IMAGES | VIDEOS | {'.gif'}
+        self._text.setVisible(text_document)
         video = extension in VIDEOS
         animated = video or extension == '.gif'
         self._video.setVisible(video)
-        self._img_lbl.setVisible(not video)
+        self._img_lbl.setVisible(not video and not text_document)
         self._controls.setVisible(animated)
         self._timeline.setVisible(video)
         self._volume.setVisible(video)
@@ -2236,7 +2262,14 @@ class MediaViewerOverlay(ImgViewerOverlay):
                 self._img_lbl.setProperty('_raw_pix', QPixmap.fromImage(image))
                 self._scale_image()
         else:
-            self._show_error('No built-in preview. Right-click to open externally.')
+            try:
+                raw = path.read_bytes()
+                encoding = 'utf-16' if raw.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig'
+                self._text.setPlainText(raw.decode(encoding, errors='replace'))
+                self._text.verticalScrollBar().setValue(0)
+                self._text.setFocus()
+            except OSError as exc:
+                self._text.setPlainText(str(exc))
         self._place_widgets()
 
     def _show_error(self, message):
@@ -2272,6 +2305,8 @@ class MediaViewerOverlay(ImgViewerOverlay):
             size.scale(width, height, Qt.KeepAspectRatio)
             self._img_lbl.resize(size)
         super()._place_widgets()
+        if hasattr(self, '_text'):
+            self._text.setGeometry(65, 55, max(100, self.width() - 130), max(80, self.height() - 115))
         if hasattr(self, '_video'):
             self._video.setGeometry(self._img_lbl.geometry())
             if self._zoom:
