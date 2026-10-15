@@ -700,7 +700,7 @@ class DragViewMixin:
         mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
         # Always advertise copy to external apps, so an external drop cannot
         # request deletion of a protected original. Internal drops are explicit.
-        mime.setData('application/x-vael-sorter', QByteArray(b'1'))
+        mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.browser.editable else b'source'))
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.CopyAction, Qt.CopyAction)
@@ -711,7 +711,7 @@ class DragViewMixin:
 
     def dragMoveEvent(self, event):
         if self.browser.editable and event.mimeData().hasUrls():
-            internal = event.mimeData().hasFormat('application/x-vael-sorter')
+            internal = bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace'
             paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
             move = internal and paths and all(self.browser.window.service.inside(p) for p in paths) and not (event.modifiers() & Qt.ControlModifier)
             self.browser.window.statusBar().showMessage('Move into sorting folder · hold Ctrl to copy' if move else 'Copy into sorting folder')
@@ -725,7 +725,7 @@ class DragViewMixin:
         index = self.indexAt(event.position().toPoint())
         entry = index.data(Qt.UserRole) if index.isValid() else None
         destination = entry.path if entry and entry.is_dir else self.browser.current
-        internal = event.mimeData().hasFormat('application/x-vael-sorter')
+        internal = bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace'
         move = internal and bool(paths) and all(self.browser.window.service.inside(p) for p in paths) and not (event.modifiers() & Qt.ControlModifier)
         self.browser.window.transfer(paths, destination, move)
         event.setDropAction(Qt.CopyAction)
@@ -1374,7 +1374,7 @@ class ThumbnailCard(QWidget):
         mime = QMimeData()
         paths = self.browser.drag_paths(self) if self.browser else [self.filepath]
         mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
-        mime.setData('application/x-vael-sorter', QByteArray(b'1'))
+        mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.browser.editable else b'source'))
         drag = QDrag(self)
         drag.setMimeData(mime)
         pix = QPixmap.fromImage(_load_pixmap(self.filepath))
@@ -1602,7 +1602,7 @@ class FolderHeader(QToolButton):
                     browser.toggle_folder_selection(self.section.path)
                 mime = QMimeData()
                 mime.setUrls([QUrl.fromLocalFile(str(p)) for p in browser.selected_paths()])
-                mime.setData('application/x-vael-sorter', QByteArray(b'1'))
+                mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.section.browser.editable else b'source'))
                 drag = QDrag(self)
                 drag.setMimeData(mime)
                 drag.exec(Qt.CopyAction)
@@ -3280,7 +3280,7 @@ class CoverBrowser(ImageBrowser):
             event.setDropAction(Qt.CopyAction)
             event.accept()
             paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-            move = event.mimeData().hasFormat('application/x-vael-sorter') and paths and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
+            move = (bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace') and paths and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
             self.window.operation_status.setText('Move into sorting · hold Ctrl to copy' if move else 'Copy into sorting')
 
     def drop_into(self, event, destination=None):
@@ -3288,7 +3288,7 @@ class CoverBrowser(ImageBrowser):
             event.ignore()
             return
         paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-        move = event.mimeData().hasFormat('application/x-vael-sorter') and bool(paths) and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
+        move = (bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace') and bool(paths) and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
         self.window.transfer(paths, Path(destination) if destination else self.current, bool(move))
         event.setDropAction(Qt.CopyAction)
         event.accept()
