@@ -2431,14 +2431,29 @@ class MediaViewerOverlay(ImgViewerOverlay):
             super()._scale_image()
 
     def _place_widgets(self):
+        if hasattr(self, '_text') and not self._text.isHidden():
+            width = min(1000, max(220, self.width() - 180))
+            height = min(720, max(120, self.height() - 150))
+            left = (self.width() - width) // 2
+            top = (self.height() - height) // 2
+            self._text.setGeometry(left, top, width, height)
+            self._close_btn.move(left + width - self._close_btn.width(), top - 40)
+            self._name_lbl.setFixedSize(max(100, width - 100), 28)
+            self._name_lbl.move(left + 50, top + height + 10)
+            for button, x in ((self._prev_btn, left - 54), (self._next_btn, left + width + 10)):
+                button.setFixedSize(36, 48)
+                button.move(x, top + (height - button.height()) // 2)
+            for widget in (self._name_lbl, self._prev_btn, self._next_btn, self._close_btn):
+                widget.raise_()
+            return
+        self._prev_btn.setFixedSize(44, 80)
+        self._next_btn.setFixedSize(44, 80)
         if hasattr(self, '_video') and not self._video.isHidden():
             width, height = self._image_area_size()
             size = QSize(16, 9)
             size.scale(width, height, Qt.KeepAspectRatio)
             self._img_lbl.resize(size)
         super()._place_widgets()
-        if hasattr(self, '_text'):
-            self._text.setGeometry(65, 55, max(100, self.width() - 130), max(80, self.height() - 115))
         if hasattr(self, '_video'):
             self._video.setGeometry(self._img_lbl.geometry())
             if self._zoom:
