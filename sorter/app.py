@@ -13,7 +13,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / ".local"
 DEFAULTS = {
-    "sources": [], "sort_root": "", "pins": [],
+    "sources": [], "source_names": {}, "sort_root": "", "pins": [],
     "fields": {}, "rules": [],
     "inherit": False, "ignored": [],
     "flags": [], "layout": {}, "collision": "rename",
@@ -2980,7 +2980,7 @@ class ImageBrowser(QWidget):
             wrapper_lay.addStretch(1)
             scroll.setWidget(wrapper)
 
-            name = Path(path).name or path
+            name = folder_cfg.get("display_name") or Path(path).name or path
             self.tabs.addTab(scroll, name)
             self.tabs.setTabToolTip(self.tabs.count() - 1, path)
             self._top_sections.append(section)
@@ -3372,7 +3372,7 @@ class CoverBrowser(ImageBrowser):
         paths = self.window.config['sources']
         if self._location and str(self._location) not in paths:
             paths = paths + [str(self._location)]
-        return [{'path': str(normalized(p))} for p in paths]
+        return [{'path': str(normalized(p)), 'display_name': self.window.config.get('source_names', {}).get(str(normalized(p)), '')} for p in paths]
 
     def focus_path(self, path):
         self.current = Path(path)
@@ -3970,7 +3970,8 @@ class SettingsDialog(QDialog):
         self.sources = QListWidget()
         self.sources.setMaximumHeight(150)
         self.sources.setDragDropMode(QAbstractItemView.InternalMove)
-        self.sources.addItems(config['sources'])
+        for path in config['sources']:
+            self.append_source(path, config.get('source_names', {}).get(str(normalized(path)), ''))
         f.addWidget(self.sources, 1)
         row = QHBoxLayout()
         add = QPushButton('Add source…')
@@ -3979,6 +3980,9 @@ class SettingsDialog(QDialog):
         remove.clicked.connect(lambda: [self.sources.takeItem(self.sources.row(item)) for item in self.sources.selectedItems()])
         row.addWidget(add)
         row.addWidget(remove)
+        rename = QPushButton('Display name…')
+        rename.clicked.connect(self.rename_source)
+        row.addWidget(rename)
         row.addStretch()
         f.addLayout(row)
         f.addWidget(QLabel('Sorting folder · the only folder where files may be changed'))
@@ -4142,17 +4146,40 @@ class SettingsDialog(QDialog):
             raise ValueError('Field names must be unique.')
         config['fields'] = dict(pairs)
         config['rules'] = [{'pattern': values(self.rules, row, 0), 'scope': values(self.rules, row, 1)} for row in range(self.rules.rowCount())]
-        config['sources'] = list(dict.fromkeys(str(normalized(self.sources.item(i).text())) for i in range(self.sources.count())))
+        items = [self.sources.item(i) for i in range(self.sources.count())]
+        config['sources'] = list(dict.fromkeys(item.data(Qt.UserRole) for item in items))
+        config['source_names'] = {item.data(Qt.UserRole): item.data(Qt.UserRole + 1) for item in items if item.data(Qt.UserRole + 1)}
         config['sort_root'] = str(normalized(self.sort_root.text())) if self.sort_root.text().strip() else ''
         config['inherit'] = self.inherit.isChecked()
         config['ignored'] = [line.strip() for line in self.ignored.toPlainText().splitlines() if line.strip()]
         validate_config(config)
         return config
 
+    def append_source(self, path, display_name=''):
+        path = str(normalized(path))
+        item = QListWidgetItem(display_name or path)
+        item.setData(Qt.UserRole, path)
+        item.setData(Qt.UserRole + 1, display_name)
+        item.setToolTip(path)
+        self.sources.addItem(item)
+
+    def rename_source(self):
+        item = self.sources.currentItem()
+        if not item:
+            return
+        name, accepted = QInputDialog.getText(self, 'Folder display name',
+            'Name shown in the top explorer tabs (empty uses the folder name):',
+            text=item.data(Qt.UserRole + 1) or '')
+        if accepted:
+            name = name.strip()
+            item.setData(Qt.UserRole + 1, name)
+            item.setText(name or item.data(Qt.UserRole))
+
     def add_source(self):
         path = QFileDialog.getExistingDirectory(self, 'Add source folder')
         if path:
-            self.sources.addItem(str(normalized(path)))
+            if not any(self.sources.item(i).data(Qt.UserRole) == str(normalized(path)) for i in range(self.sources.count())):
+                self.append_source(path)
 
     def choose_sort_root(self):
         path = QFileDialog.getExistingDirectory(self, 'Choose the sorting folder', self.sort_root.text())

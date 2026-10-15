@@ -51,7 +51,7 @@ Close sorter and delete its folder, including `venv` and `.local`. Your source f
 
 ### library above
 
-The upper explorer uses Cover’s window styling, folder tabs, collapsible headers, portrait cards, spacing, scrolling, and in-window image viewer. Each configured source gets a tab. Click a folder header to expand it; thumbnails load as folders become visible. Source folders start with collapsed children, as in Cover. Temporarily hidden tabs can be restored from the tab controls.
+The upper explorer uses Cover’s window styling, folder tabs, collapsible headers, portrait cards, spacing, scrolling, and in-window image viewer. Each configured source gets a tab. In Settings, select a source and choose **Display name…** to customize its tab label without renaming the folder. Clear the display name to use its original folder name. Click a folder header to expand it; thumbnails load as folders become visible. Source folders start with collapsed children, as in Cover. Temporarily hidden tabs can be restored from the tab controls.
 
 Click a card to select it; double-click to inspect it. **Ctrl-click** toggles selection and **Shift-click** extends a card selection. Drag selected cards to the shelf or a sorting folder. Folder headers support selection, drag and drop, and rectangular selection across both files and folder headers. Selected media have a bright outline, including when targeted by right-click. Middle-button dragging pans the explorer. Right-click selected folders to load their full contents recursively in the background; loading can be cancelled.
 
