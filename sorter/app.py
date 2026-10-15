@@ -5508,11 +5508,13 @@ class Window(QMainWindow):
             self.undo_button.setEnabled(True)
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
-            for browser in self.browsers:
+            for browser in (self.sorter, self.second):
                 if browser.current and not browser.current.is_dir():
                     browser.current = self.service.root if browser.editable else browser.current.parent
                     browser.path.setText(str(browser.current) if browser.current else '')
-                browser.refresh()
+                active_workspace = getattr(self, 'active_workspace', self.sorter)
+                browser.navigate(browser.current)
+                self.active_workspace = active_workspace
             if errors:
                 box = QMessageBox(QMessageBox.Warning, 'Some operations could not be completed', '\n'.join(errors[:5]), parent=self)
                 box.setDetailedText('\n'.join(errors))
@@ -5559,8 +5561,6 @@ class Window(QMainWindow):
                     browser.path.setText(str(browser.current) if browser.current else '')
         self.config['flags'] = [p for p in self.config['flags'] if Path(p).exists()]
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
-        for browser in (self.sorter, self.second):
-            browser.update_roots()
         self.shelf.update_count()
 
     def transfer(self, paths, destination, move=False):
@@ -5663,7 +5663,7 @@ class Window(QMainWindow):
         for path in paths:
             flags.discard(str(path)) if remove else flags.add(str(path))
         self.config['flags'] = sorted(flags)
-        for item in self.browsers:
+        for item in (self.sorter, self.second):
             item.filter_rows()
             item.repaint_content()
         self.persist()
