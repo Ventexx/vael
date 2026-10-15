@@ -1317,7 +1317,7 @@ class RosterIcon(QFrame):
         self.changed.emit()
 
     def set_image_path(self, path):
-        pix = QPixmap(path)
+        pix = QPixmap.fromImage(_read_preview(path, 360, 180))
         if pix.isNull():
             QMessageBox.warning(self, "Image error", f"Couldn't load image:\n{path}")
             return
@@ -3947,7 +3947,7 @@ class RosterBar(QWidget):
                 icon = RosterIcon(i, slot["node_id"], slot["caption"], size=self.icon_size)
                 icon.filepath = slot["filepath"]
                 if icon.filepath:
-                    pix = QPixmap(icon.filepath)
+                    pix = QPixmap.fromImage(_read_preview(icon.filepath, 360, 180))
                     if not pix.isNull():
                         icon._pixmap = pix
                 icon._render()
