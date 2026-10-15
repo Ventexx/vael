@@ -14,10 +14,8 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / ".local"
 DEFAULTS = {
     "sources": [], "sort_root": "", "pins": [],
-    "fields": {"GENRE": "g", "CHAR": "ch", "SCENE": "s"},
-    "rules": [{"pattern": "[GENRE]-[CHAR]_[SCENE]", "scope": ""},
-              {"pattern": "[CHAR];[GENRE]", "scope": ""}],
-    "inherit": True, "ignored": [".git", "venv", ".local", ".sorter-*"],
+    "fields": {}, "rules": [],
+    "inherit": False, "ignored": [],
     "flags": [], "layout": {}, "collision": "rename",
 }
 
@@ -3742,7 +3740,7 @@ class SettingsDialog(QDialog):
         self.fields.horizontalHeader().setStretchLastSection(True)
         self.fields.setMaximumHeight(160)
         n.addWidget(self.fields)
-        n.addLayout(self.table_tools(self.fields, ['FIELD', 'alias']))
+        n.addLayout(self.table_tools(self.fields, ['', '']))
         n.addWidget(QLabel('Folder patterns · first matching rule wins at each folder level'))
         self.rules = QTableWidget(0, 2)
         self.rules.setMaximumHeight(170)
@@ -3750,12 +3748,12 @@ class SettingsDialog(QDialog):
         self.rules.horizontalHeader().setStretchLastSection(True)
         self.rules.setColumnWidth(0, 320)
         n.addWidget(self.rules)
-        n.addLayout(self.table_tools(self.rules, ['[GENRE]-[CHAR]_[SCENE]', ''], ordered=True))
+        n.addLayout(self.table_tools(self.rules, ['', ''], ordered=True))
         self.inherit = QCheckBox('Inherit fields from parent folders')
         self.inherit.setChecked(config['inherit'])
         n.addWidget(self.inherit)
         preview_row = QHBoxLayout()
-        self.sample = QLineEdit('Pokemon-Misty_Beach')
+        self.sample = QLineEdit()
         self.sample.setPlaceholderText('Folder name to test')
         preview_row.addWidget(self.sample)
         test = QPushButton('Test pattern')
