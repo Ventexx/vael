@@ -5792,21 +5792,88 @@ class Window(QMainWindow):
 
     def information(self, paths):
         dialog = QDialog(self)
-        dialog.setWindowTitle('Selection information')
-        dialog.resize(650, 440)
+        dialog.setWindowTitle('File Information')
+        dialog.resize(700, 560)
         layout = QVBoxLayout(dialog)
-        text = QPlainTextEdit()
-        text.setReadOnly(True)
-        layout.addWidget(text)
-        rows = []
-        for path in paths:
-            try:
-                stat = path.stat()
-                rows.append(f'{path}\nType: {"Folder" if path.is_dir() else path.suffix or "File"}\nSize: {readable_size(stat.st_size) if path.is_file() else "Folder (contents not summed)"}\nModified: {datetime.fromtimestamp(stat.st_mtime)}\nEditable here: {self.service.inside(path)}\n')
-            except OSError as exc:
-                rows.append(f'{path}\n{exc}\n')
-        text.setPlainText('\n'.join(rows))
+        summary = QLabel('Reading properties…')
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        properties = QPlainTextEdit()
+        properties.setReadOnly(True)
+        layout.addWidget(properties, 1)
+        expand = QToolButton()
+        expand.setText('Show full metadata')
+        expand.setCheckable(True)
+        layout.addWidget(expand)
+        metadata = QPlainTextEdit()
+        metadata.setReadOnly(True)
+        metadata.hide()
+        layout.addWidget(metadata, 1)
+        expand.toggled.connect(metadata.setVisible)
+        expand.toggled.connect(lambda checked: expand.setText('Hide full metadata' if checked else 'Show full metadata'))
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        def inspect(task):
+            import subprocess
+            rows, full, total, file_count, folder_count = [], [], 0, 0, 0
+            exiftool = shutil.which('exiftool')
+            for path in paths:
+                if task.cancel.is_set():
+                    break
+                try:
+                    stat = path.stat()
+                    size, files, folders = stat.st_size, 1, 0
+                    if path.is_dir():
+                        size, files, folders = 0, 0, 1
+                        for base, dirs, names in os.walk(path, followlinks=False):
+                            if task.cancel.is_set():
+                                break
+                            dirs[:] = [name for name in dirs if not is_link(Path(base) / name) and not name.startswith('.sorter-')]
+                            folders += len(dirs)
+                            for name in names:
+                                child = Path(base) / name
+                                if is_link(child) or name.startswith('.sorter-'):
+                                    continue
+                                try:
+                                    size += child.stat().st_size
+                                    files += 1
+                                except OSError:
+                                    pass
+                    total += size
+                    file_count += files
+                    folder_count += folders
+                    row = f'{path.name}\nLocation: {path}\nType: {"Folder" if path.is_dir() else path.suffix.upper().lstrip(".") or "File"}\nSize: {readable_size(size)} ({size:,} bytes)\nModified: {datetime.fromtimestamp(stat.st_mtime):%Y-%m-%d %H:%M:%S}\nCreated: {datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime)):%Y-%m-%d %H:%M:%S}'
+                    if path.is_dir():
+                        row += f'\nContents: {files:,} files, {folders - 1:,} subfolders'
+                    elif path.suffix.lower() in IMAGES | {'.gif'}:
+                        reader = QImageReader(str(path))
+                        dimensions = reader.size()
+                        if dimensions.isValid():
+                            row += f'\nDimensions: {dimensions.width():,} × {dimensions.height():,} pixels'
+                        for key in reader.textKeys():
+                            full.append(f'{path.name} · {key}: {reader.text(key)}')
+                    rows.append(row)
+                    if exiftool and path.is_file():
+                        try:
+                            result = subprocess.run([exiftool, '-G', '-s', str(path)], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                            full.append(f'{path.name}\n{result.stdout or result.stderr}')
+                        except (OSError, subprocess.TimeoutExpired) as exc:
+                            full.append(f'{path.name}: {exc}')
+                except OSError as exc:
+                    rows.append(f'{path}: {exc}')
+            if not exiftool:
+                full.append('ExifTool is not installed. Standard file properties and available embedded image metadata are shown.')
+            return f'{file_count:,} files · {folder_count:,} folders · {readable_size(total)}', '\n\n'.join(rows), '\n\n'.join(full) or 'No additional metadata available.'
+        def loaded(result):
+            if isValid(dialog) and dialog.isVisible():
+                summary.setText(result[0])
+                properties.setPlainText(result[1])
+                metadata.setPlainText(result[2])
+        task = self.jobs.start(inspect, loaded, lambda error: summary.setText(error) if isValid(summary) else None)
         self.exec_dialog(dialog)
+        task.cancel.set()
+        dialog.deleteLater()
 
     def open_image_viewer(self, card, cards):
         self._img_viewer.open_viewer(card, cards)
