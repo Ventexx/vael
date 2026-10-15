@@ -3474,6 +3474,11 @@ class CoverBrowser(ImageBrowser):
 
     def action_menu(self, point, card=None):
         self.window.active_browser = self
+        menu = self.build_action_menu()
+        menu.exec(point)
+        menu.deleteLater()
+
+    def build_action_menu(self):
         paths = self.selected_paths()
         menu = QMenu(self)
         folders = list(self.selected_folder_paths())
@@ -3482,7 +3487,8 @@ class CoverBrowser(ImageBrowser):
         if paths:
             menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
-            menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
+            if not self.editable:
+                menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
         if self.editable:
             menu.addSeparator()
             if paths:
@@ -3490,22 +3496,29 @@ class CoverBrowser(ImageBrowser):
                 menu.addAction('Move to folder…', lambda: self.window.transfer_dialog(self, True))
                 menu.addAction('Move into new folder…', lambda: self.window.move_to_new(self))
                 menu.addAction('Duplicate', lambda: self.window.duplicate(self))
-                menu.addAction('Rename…', lambda: self.window.rename_selection(self))
-                rename = menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
-                rename.setToolTip('Rename selected files together using find/replace, prefixes, suffixes or numbering. Preview all names before applying.')
-                menu.setToolTipsVisible(True)
+                if len(paths) == 1:
+                    menu.addAction('Rename…', lambda: self.window.rename_selection(self))
+                else:
+                    rename = menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
+                    rename.setToolTip('Rename selected items together using find/replace, prefixes, suffixes or numbering. Preview all names before applying.')
+                    menu.setToolTipsVisible(True)
                 menu.addAction('Toggle flag', lambda: self.window.toggle_flags(self))
                 menu.addAction('Delete', lambda: self.window.trash_selection(self))
-            menu.addAction('Paste', lambda: self.window.paste(self))
-            menu.addAction('New folders…', lambda: self.window.new_folders(self))
+            else:
+                clipboard = QApplication.clipboard().mimeData()
+                if clipboard and clipboard.hasUrls():
+                    menu.addAction('Paste', lambda: self.window.paste(self))
+                menu.addAction('New folders…', lambda: self.window.new_folders(self))
         if paths:
             menu.addSeparator()
             menu.addAction('Information…', lambda: self.window.information(paths))
             menu.addAction('Copy as Path', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
-            menu.addAction('Open Folder in Explorer', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
+            if len(paths) == 1:
+                folder = paths[0] if paths[0].is_dir() else paths[0].parent
+                menu.addAction('Open Folder in Explorer', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
         if paths:
             menu.addAction('Clear selection', self.clear_selection)
-        menu.exec(point)
+        return menu
 
     def choose_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Open sorting subfolder', str(self.current or self.window.config['sort_root']))
@@ -3676,6 +3689,8 @@ class WorkspaceBrowser(CoverBrowser):
 
     def context_menu(self, view, point):
         index = view.indexAt(point)
+        if not index.isValid():
+            self.clear_selection()
         if index.isValid() and not view.selectionModel().isSelected(index):
             from PySide6.QtCore import QItemSelectionModel
             view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
