@@ -2225,12 +2225,71 @@ class ImgViewerOverlay(QWidget):
 # as "the whole UI is held up right now", and floats only bare text, a
 # progress bar, and a Cancel button in the middle -- no panel chrome.
 # ---------------------------------------------------------------------------
+class PannableTextEdit(QPlainTextEdit):
+    """Hold the middle button and move vertically to scroll a document."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pan_origin = None
+        self._pan_pointer = None
+        self._pan_timer = QTimer(self)
+        self._pan_timer.setInterval(16)
+        self._pan_timer.timeout.connect(self._pan_tick)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self._pan_origin = event.position().toPoint()
+            self._pan_pointer = self._pan_origin
+            self.viewport().setCursor(Qt.SizeVerCursor)
+            self._pan_timer.start()
+            event.accept()
+            return
+        self.stop_pan()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan_origin is not None:
+            self._pan_pointer = event.position().toPoint()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton:
+            self.stop_pan()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _pan_tick(self):
+        if self._pan_origin is None:
+            return
+        delta = self._pan_pointer.y() - self._pan_origin.y()
+        if abs(delta) > 8:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + (1 if delta > 0 else -1) * max(1, (abs(delta) - 8) // 16))
+
+    def stop_pan(self):
+        self._pan_timer.stop()
+        self._pan_origin = self._pan_pointer = None
+        self.viewport().unsetCursor()
+
+    def hideEvent(self, event):
+        self.stop_pan()
+        super().hideEvent(event)
+
+    def focusOutEvent(self, event):
+        self.stop_pan()
+        super().focusOutEvent(event)
+
+
 class MediaViewerOverlay(ImgViewerOverlay):
     """Cover's viewer surface, with playback controls only for animated media."""
     def __init__(self, parent):
         super().__init__(parent)
-        self._text = QPlainTextEdit(self)
+        self._text = PannableTextEdit(self)
         self._text.setReadOnly(True)
+        self._text.setToolTip('Hold the middle mouse button and move up or down to scroll.')
         self._text.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._text.hide()
@@ -2292,6 +2351,7 @@ class MediaViewerOverlay(ImgViewerOverlay):
 
     def _load_current(self):
         self._stop_media()
+        self._text.stop_pan()
         self._zoom = 0
         self._pan = QPoint()
         self._img_lbl.clear()
