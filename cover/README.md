@@ -13,6 +13,7 @@ A desktop companion for ComfyUI. Browse your image folders, assign inputs to sav
 
 - keep several ComfyUI workflows available and switch between them
 - browse local image folders with thumbnails and a larger image viewer
+- load lightweight previews for thumbnails and input slots; load the original image when opening the larger viewer
 - assign images to workflow input slots through the Input Roster
 - adjust exposed workflow parameters before running
 - run one workflow or process queued jobs in order
