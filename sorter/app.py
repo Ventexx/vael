@@ -681,7 +681,7 @@ class MediaModel(QAbstractTableModel):
                     str(entry.path.parent), ' · '.join(f'{k}: {v}' for k, v in entry.fields.items())][index.column()]
         if role == Qt.DecorationRole and index.column() == 0:
             if entry.is_dir:
-                return QIcon(self.owner.style().standardIcon(QStyle.SP_DirIcon).pixmap(round(32 * self.owner.entry_zoom / 100), round(32 * self.owner.entry_zoom / 100)))
+                return self.owner.folder_icon
             if entry.kind in ('Image', 'GIF'):
                 pixmap = self.thumbnail(entry)
                 if pixmap and not pixmap.isNull():
@@ -3353,6 +3353,9 @@ class CoverBrowser(ImageBrowser):
         shortcut = QShortcut(QKeySequence('Ctrl+F'), self)
         shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         shortcut.activated.connect(lambda: (self.search_button.setChecked(True), self.search.setFocus()))
+        self.folder_icon = QIcon(str(APP_DIR / 'Folder.png'))
+        if self.folder_icon.isNull():
+            self.folder_icon = self.style().standardIcon(QStyle.SP_DirIcon)
         self.model = MediaModel(self)
         self.proxy = MediaFilter(self)
         self.proxy.setSourceModel(self.model)
@@ -5869,7 +5872,7 @@ class Window(QMainWindow):
             for path in result[0]:
                 item = QTreeWidgetItem(items[path.parent], [path.name])
                 item.setData(0, Qt.UserRole, str(path))
-                item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                item.setIcon(0, self.sorter.folder_icon)
                 items[path] = item
             root_item.setExpanded(True)
             status.setText('\n'.join(result[1]) or f'{len(items)} folders')
