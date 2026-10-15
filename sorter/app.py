@@ -546,7 +546,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
     QListWidgetItem, QPlainTextEdit, QFormLayout, QDialogButtonBox, QSpinBox,
     QScrollArea, QGroupBox, QCompleter, QToolButton, QFrame, QGridLayout, QSizePolicy,
-    QSplitterHandle, QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem, QSizeGrip,
+    QTreeWidget, QTreeWidgetItem, QSplitterHandle, QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem, QSizeGrip,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -5639,9 +5639,56 @@ class Window(QMainWindow):
             [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths])
 
     def transfer_dialog(self, browser, move):
-        destination = QFileDialog.getExistingDirectory(self, 'Choose destination inside sorting folder', self.config['sort_root'])
-        if destination:
-            self.transfer(browser.selected_paths(), Path(destination), move)
+        if not move:
+            self.transfer(browser.selected_paths(), self.target_browser().current, False)
+            return
+        root = self.service.root
+        if not root:
+            self.notice('Choose a workspace folder in Settings first.')
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Move to Folder')
+        dialog.resize(520, 500)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel('Select a destination inside the workspace.'))
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        layout.addWidget(tree)
+        root_item = QTreeWidgetItem(tree, ['Root'])
+        root_item.setData(0, Qt.UserRole, str(root))
+        root_item.setToolTip(0, str(root))
+        items = {root: root_item}
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        status = QLabel('Loading folders…')
+        layout.addWidget(status)
+        def folders(task):
+            result, errors = [], []
+            for folder, dirs, _ in os.walk(root, followlinks=False, onerror=lambda e: errors.append(str(e))):
+                if task.cancel.is_set():
+                    break
+                dirs[:] = sorted([name for name in dirs if not name.startswith('.sorter-') and self.service.inside(Path(folder) / name)], key=str.casefold)
+                result.extend(Path(folder) / name for name in dirs)
+            return result, errors
+        def populated(result):
+            if not isValid(dialog) or not dialog.isVisible():
+                return
+            for path in result[0]:
+                item = QTreeWidgetItem(items[path.parent], [path.name])
+                item.setData(0, Qt.UserRole, str(path))
+                item.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                items[path] = item
+            root_item.setExpanded(True)
+            status.setText('\n'.join(result[1]) or f'{len(items)} folders')
+        tree.setCurrentItem(root_item)
+        task = self.jobs.start(folders, populated, lambda error: status.setText(error) if isValid(status) else None)
+        accepted = self.exec_dialog(dialog) == QDialog.Accepted
+        task.cancel.set()
+        if accepted and tree.currentItem():
+            self.transfer(browser.selected_paths(), Path(tree.currentItem().data(0, Qt.UserRole)), True)
+        dialog.deleteLater()
 
     def duplicate(self, browser):
         paths = top_level_selection(browser.selected_paths())
