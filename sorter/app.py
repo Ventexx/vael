@@ -3280,9 +3280,6 @@ class CoverBrowser(ImageBrowser):
 
     def options_menu(self):
         menu = QMenu(self)
-        menu.addAction('Refresh', self.refresh)
-        menu.addAction('Search and Filters', lambda: self.search_button.setChecked(True))
-        menu.addSeparator()
         menu.addAction('Select all visible items', self.select_all)
         menu.addAction('Invert visible selection', self.invert_selection)
         zoom = menu.addMenu('Entry zoom')
