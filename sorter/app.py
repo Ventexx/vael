@@ -1771,7 +1771,7 @@ class FolderSection(QWidget):
         hw_lay.setSpacing(4)
 
         is_deep = depth > RECURSION_DEPTH_WARN
-        name_text = Path(path).name or path
+        name_text = self.browser.folder_display_name(path) if depth == 0 else Path(path).name or path
 
         self.header = FolderHeader(self)
         self.header.setObjectName("sectionHeader")
@@ -2872,6 +2872,10 @@ class ImageBrowser(QWidget):
         self.reload_folders()
         self._position_status_bar()
 
+    def folder_display_name(self, path):
+        name = self.main_window.config.get('source_names', {}).get(str(normalized(path)), '')
+        return name or Path(path).name or str(path)
+
     def ignore_folder_patterns(self):
         return self.main_window.config.get("ignored", [])
 
@@ -3112,7 +3116,7 @@ class ImageBrowser(QWidget):
             wrapper_lay.addStretch(1)
             scroll.setWidget(wrapper)
 
-            name = folder_cfg.get("display_name") or Path(path).name or path
+            name = self.folder_display_name(path)
             self.tabs.addTab(scroll, name)
             self.tabs.setTabToolTip(self.tabs.count() - 1, path)
             self._top_sections.append(section)
@@ -3168,7 +3172,7 @@ class ImageBrowser(QWidget):
         wrapper_lay.addStretch(1)
         scroll.setWidget(wrapper)
 
-        name = Path(path).name or path
+        name = self.folder_display_name(path)
         old_page = self.tabs.widget(index)
         self.tabs.removeTab(index)
         old_page.deleteLater()
@@ -3210,7 +3214,7 @@ class ImageBrowser(QWidget):
         )
         menu = QMenu(self.restore_hidden_btn)
         for path in sorted(self._closed_this_session, key=str.lower):
-            name = Path(path).name or path
+            name = self.folder_display_name(path)
             action = menu.addAction(name)
             action.setToolTip(path)
             action.triggered.connect(lambda checked=False, p=path: self._restore_closed_folder(p))
