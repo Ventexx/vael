@@ -594,7 +594,7 @@ class MediaModel(QAbstractTableModel):
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
-        if entry.kind != 'Image' or key in self.pending or len(self.pending) >= 12:
+        if entry.kind not in ('Image', 'GIF') or key in self.pending or len(self.pending) >= 12:
             return None
         self.pending.add(key)
         generation = self.generation
@@ -637,7 +637,15 @@ class MediaModel(QAbstractTableModel):
         if role == Qt.DecorationRole and index.column() == 0:
             if str(entry.path) in self.owner.window.config['flags']:
                 return self.owner.style().standardIcon(QStyle.SP_DialogApplyButton)
-            return self.owner.style().standardIcon(QStyle.SP_DirIcon if entry.is_dir else QStyle.SP_FileIcon)
+            if entry.is_dir:
+                return QIcon(self.owner.style().standardIcon(QStyle.SP_DirIcon).pixmap(32, 32))
+            if entry.kind in ('Image', 'GIF'):
+                pixmap = self.thumbnail(entry)
+                if pixmap and not pixmap.isNull():
+                    return QIcon(pixmap)
+            if entry.kind == 'Other':
+                return QIcon(document_pixmap(entry.path))
+            return self.owner.style().standardIcon(QStyle.SP_MediaPlay if entry.kind == 'Video' else QStyle.SP_FileIcon)
 
     def flags(self, index):
         if not index.isValid():
@@ -732,6 +740,10 @@ class DragViewMixin:
         event.accept()
 
 
+
+
+class WorkspaceGrid(DragViewMixin, QListView):
+    pass
 
 
 class DetailView(DragViewMixin, QTableView):
@@ -3570,8 +3582,160 @@ class CoverBrowser(ImageBrowser):
             self.tabs.setCurrentIndex(0)
         if state.get('header'):
             self.table.horizontalHeader().restoreState(QByteArray.fromBase64(state['header'].encode()))
-        if self.editable and state.get('details'):
-            self.set_details(True)
+
+
+class WorkspaceBrowser(CoverBrowser):
+    """A single-folder grid with independent selection and breadcrumb navigation."""
+
+    def __init__(self, window, editable=True, title='Workspace'):
+        super().__init__(window, True, title)
+        self.tabs.hide()
+        self.table.hide()
+        self.recursive.setChecked(False)
+        self.recursive.hide()
+        self.grid = WorkspaceGrid()
+        self.grid.setModel(self.proxy)
+        self.grid.setModelColumn(0)
+        self.grid.setViewMode(QListView.IconMode)
+        self.grid.setResizeMode(QListView.Adjust)
+        self.grid.setMovement(QListView.Static)
+        self.grid.setIconSize(QSize(96, 76))
+        self.grid.setGridSize(QSize(132, 116))
+        self.grid.setWordWrap(True)
+        self.grid.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.grid.setup_drag(self)
+        self.grid.setStyleSheet('QListView::item:selected { background: #174b42; border: 2px solid #00d4a0; border-radius: 6px; }')
+        self.grid.selectionModel().selectionChanged.connect(lambda *_: self._remember_selection())
+        self.layout().addWidget(self.grid, 1)
+        self.navigation = QWidget()
+        self.navigation_row = QHBoxLayout(self.navigation)
+        self.navigation_row.setContentsMargins(4, 0, 4, 4)
+        self.breadcrumbs = QHBoxLayout()
+        self.navigation_row.addLayout(self.breadcrumbs, 1)
+        self.navigation_row.addWidget(self._status_bar)
+        self.layout().insertWidget(0, self.navigation)
+        self._restoring_selection = False
+
+    def _position_status_bar(self):
+        if not hasattr(self, 'navigation'):
+            super()._position_status_bar()
+
+    def _remember_selection(self):
+        if not getattr(self, '_restoring_selection', False):
+            self._selected_file_paths = {str(p) for p in self.selected_paths()}
+
+    def selected_paths(self):
+        return [i.data(Qt.UserRole).path for i in self.grid.selectionModel().selectedIndexes() if i.column() == 0]
+
+    def selected_folder_paths(self):
+        return [str(p) for p in self.selected_paths() if p.is_dir()]
+
+    def context_menu(self, view, point):
+        index = view.indexAt(point)
+        if index.isValid() and not view.selectionModel().isSelected(index):
+            from PySide6.QtCore import QItemSelectionModel
+            view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+        self.action_menu(view.viewport().mapToGlobal(point))
+
+    def _update_empty_state(self):
+        self.tabs.hide()
+        self.empty_hint.setVisible(not self.current)
+
+    def update_roots(self):
+        root = self.window.service.root
+        target = self.current if self.current and self.window.service.inside(self.current, True) and self.current.is_dir() else root
+        self.navigate(target)
+
+    def navigate(self, path, remember=True):
+        target = normalized(path) if path else None
+        if target and (not self.window.service.inside(target, True) or not target.is_dir()):
+            self.window.notice('Choose an available folder inside the workspace.')
+            return
+        if target != self.current:
+            self._selected_file_paths.clear()
+        self.current = self._location = target
+        self.path.setText(str(target or ''))
+        self.window.active_workspace = self
+        while self.breadcrumbs.count():
+            item = self.breadcrumbs.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if target:
+            root = self.window.service.root
+            chain = [root]
+            for part in target.relative_to(root).parts:
+                chain.append(chain[-1] / part)
+            for index, folder in enumerate(chain):
+                if index:
+                    self.breadcrumbs.addWidget(QLabel('›'))
+                button = QToolButton()
+                button.setText('Root' if index == 0 else folder.name)
+                button.setToolTip(str(folder))
+                button.clicked.connect(lambda checked=False, p=folder: self.navigate(p))
+                self.breadcrumbs.addWidget(button)
+        self.breadcrumbs.addStretch()
+        self._update_empty_state()
+        self.refresh()
+
+    def reload_current_folder(self):
+        self.refresh()
+
+    def refresh(self, *_):
+        self.filter_rows()
+
+    def filter_rows(self):
+        if not hasattr(self, 'navigation'):
+            return
+        self._filter_serial += 1
+        serial = self._filter_serial
+        if self._filter_task:
+            self._filter_task.cancel.set()
+        try:
+            self.proxy.terms = parse_query(self.search.text(), self.window.config['fields'])
+        except ValueError as exc:
+            self.search.setToolTip(str(exc))
+            return
+        config = copy.deepcopy(self.window.config)
+        roots = [str(self.current)] if self.current else []
+        def found(result):
+            if serial != self._filter_serial or self._closing:
+                return
+            from PySide6.QtCore import QItemSelectionModel
+            selected = set(self._selected_file_paths)
+            self._restoring_selection = True
+            self.model.set_entries(result[0])
+            self.proxy.invalidate()
+            self.proxy.sort(0)
+            for row in range(self.proxy.rowCount()):
+                index = self.proxy.index(row, 0)
+                if str(index.data(Qt.UserRole).path) in selected:
+                    self.grid.selectionModel().select(index, QItemSelectionModel.Select)
+            self._restoring_selection = False
+            self._selected_file_paths = {str(p) for p in self.selected_paths()}
+            self.search.setToolTip('\n'.join(result[1]))
+        self._filter_task = self.window.jobs.start(lambda task: scan(roots, config, False, task.cancel), found,
+            lambda error: self.search.setToolTip(error))
+
+    def clear_selection(self):
+        self.grid.clearSelection()
+        self._selected_file_paths.clear()
+
+    def select_all(self):
+        self.grid.selectAll()
+
+    def invert_selection(self):
+        from PySide6.QtCore import QItemSelectionModel
+        selection = self.grid.selectionModel()
+        for row in range(self.proxy.rowCount()):
+            selection.select(self.proxy.index(row, 0), QItemSelectionModel.Toggle)
+
+    def state(self):
+        return {'path': str(self.current or '')}
+
+    def restore(self, state):
+        path = state.get('path')
+        if path and Path(path).is_dir() and self.window.service.inside(path, True):
+            self.navigate(path)
 
 
 class ShelfCard(ThumbnailCard):
@@ -5083,8 +5247,8 @@ class Window(QMainWindow):
         b.addLayout(controls)
         b.addWidget(self.shelf)
         self.horizontal = QSplitter(Qt.Horizontal)
-        self.sorter = CoverBrowser(self, True, 'Sorting folder')
-        self.second = CoverBrowser(self, True, 'Second folder')
+        self.sorter = WorkspaceBrowser(self)
+        self.second = WorkspaceBrowser(self)
         self.horizontal.addWidget(self.sorter)
         self.horizontal.addWidget(self.second)
         self.second.hide()
@@ -5233,9 +5397,12 @@ class Window(QMainWindow):
             for browser in getattr(self, 'browsers', []):
                 if browser == new or browser.isAncestorOf(new):
                     self.active_browser = browser
+                    if browser.editable:
+                        self.active_workspace = browser
 
     def target_browser(self):
-        return self.active_browser if self.active_browser in (self.sorter, self.second) and self.active_browser.isVisible() else self.sorter
+        active = getattr(self, 'active_workspace', self.sorter)
+        return active if active is self.sorter or self.split_toggle.isChecked() else self.sorter
 
     def notice(self, text):
         QMessageBox.information(self, 'sorter', str(text))
