@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeImage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const naturalCompare = require('./natural-sort');
 
 let win;
 
@@ -204,9 +205,6 @@ function scanSnapshot() {
 ipcMain.handle('scan-snapshot', scanSnapshot);
 ipcMain.handle('scan', async () => (await scanSnapshot()).repeated);
 ipcMain.handle('scan-all', async () => (await scanSnapshot()).all);
-function naturalCompare(a, b) {
-  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
-}
 
 ipcMain.handle('read-image-bytes', async (_, dir, name, expectedVersion) => {
   const filePath = path.join(dir, name);

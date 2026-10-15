@@ -6,6 +6,7 @@
   "license": "CC-BY-NC-4.0",
   "main": "main.js",
   "scripts": {
+    "test": "node --test",
     "start": "electron .",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux"
@@ -13,7 +14,7 @@
   "build": {
     "appId": "com.vael.reviewer",
     "productName": "reviewer.",
-    "files": ["reviewer.html", "main.js", "preload.js", "scanner.js", "preview-worker.js", "previews.js", "icon.ico", "icon.png"],
+    "files": ["reviewer.html", "main.js", "preload.js", "scanner.js", "natural-sort.js", "preview-worker.js", "previews.js", "icon.ico", "icon.png"],
     "win": {
       "target": "nsis",
       "icon": "icon.ico"

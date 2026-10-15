@@ -632,6 +632,7 @@
 </div>
 
 <script src="previews.js"></script>
+<script src="natural-sort.js"></script>
 <script>
 const api = window.electronAPI;
 
@@ -901,16 +902,6 @@ function watchedRootFor(dir) {
   return best;
 }
 function escapeHtml(s) { return s.replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
-
-// Plain .sort() on set names is lexicographic, so "B10" sorts before "B2"
-// (chars compare '1' < '2'). Set names carry a run of digits that's meant to
-// be read as a single number, not compared character-by-character, so use
-// locale-aware numeric comparison instead -- this treats "10" as the number
-// 10, not the string "1","0". Fixes ordering everywhere a folder's set names
-// get sorted (the wall order coming from main.js, the accordion list here).
-function naturalCompare(a, b) {
-  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
-}
 
 // ---------------------------------------------------------------- SIDEBAR (folders / characters only)
 function emptyStateHtml(msg, btnLabel) {

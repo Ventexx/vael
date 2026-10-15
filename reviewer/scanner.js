@@ -4,7 +4,7 @@ const { isMainThread, parentPort, workerData } = require('node:worker_threads');
 
 const extensions = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 const iteration = /^(.+)_(\d{3,})_?\.(png|jpe?g|webp|bmp|gif)$/i;
-const naturalCompare = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+const naturalCompare = require('./natural-sort');
 const directoryKey = dir => process.platform === 'win32' ? path.resolve(dir).toLowerCase() : path.resolve(dir);
 function canonicalRoot(dir) {
   try { return fs.realpathSync.native(dir); }
