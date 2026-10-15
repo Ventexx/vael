@@ -783,6 +783,44 @@ class DragViewMixin:
 
 
 
+class WorkspaceEntryDelegate(QStyledItemDelegate):
+    """Compact, evenly spaced tiles with predictable thumbnail and caption bounds."""
+
+    def paint(self, painter, option, index):
+        entry = index.data(Qt.UserRole)
+        if entry is None:
+            return
+        browser = self.parent().browser
+        size = round(96 * browser.entry_zoom / 100)
+        tile = QRect(option.rect.x(), option.rect.y(), size, size + 20)
+        thumbnail = QRect(tile.x(), tile.y(), size, size)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        selected = bool(option.state & QStyle.State_Selected)
+        painter.setPen(QPen(QColor('#00d4a0'), 2) if selected else Qt.NoPen)
+        painter.setBrush(QColor('#174b42') if selected else QColor('#181818'))
+        painter.drawRoundedRect(QRectF(tile).adjusted(1, 1, -1, -1), 6, 6)
+        icon = index.data(Qt.DecorationRole)
+        if isinstance(icon, QIcon):
+            icon_size = round(size * .67) if entry.is_dir else size
+            pixmap = icon.pixmap(QSize(icon_size, icon_size))
+            if not pixmap.isNull():
+                if entry.kind in ('Image', 'GIF'):
+                    pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                    pixmap = pixmap.copy((pixmap.width() - size) // 2, (pixmap.height() - size) // 2, size, size)
+                painter.save()
+                clip = QPainterPath()
+                clip.addRoundedRect(QRectF(thumbnail).adjusted(3, 3, -3, -3), 4, 4)
+                painter.setClipPath(clip)
+                painter.drawPixmap(thumbnail.center().x() - pixmap.width() // 2,
+                                   thumbnail.center().y() - pixmap.height() // 2, pixmap)
+                painter.restore()
+        painter.setPen(QColor('#eeeeee'))
+        caption = QRect(tile.x() + 4, tile.y() + size, size - 8, 20)
+        painter.drawText(caption, Qt.AlignCenter, option.fontMetrics.elidedText(entry.name, Qt.ElideRight, caption.width()))
+        painter.restore()
+
+
 class WorkspaceGrid(DragViewMixin, QListView):
     pass
 
@@ -3744,11 +3782,14 @@ class WorkspaceBrowser(CoverBrowser):
         self.grid.setViewMode(QListView.IconMode)
         self.grid.setResizeMode(QListView.Adjust)
         self.grid.setMovement(QListView.Static)
-        self.grid.setIconSize(QSize(96, 76))
-        self.grid.setGridSize(QSize(132, 116))
+        self.grid.setIconSize(QSize(96, 96))
+        self.grid.setGridSize(QSize(102, 122))
+        self.grid.setSpacing(0)
+        self.grid.setUniformItemSizes(True)
         self.grid.setWordWrap(True)
         self.grid.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.grid.setup_drag(self)
+        self.grid.setItemDelegate(WorkspaceEntryDelegate(self.grid))
         self.grid.setStyleSheet('QListView::item:selected { background: #174b42; border: 2px solid #00d4a0; border-radius: 6px; }')
         self.grid.selectionModel().selectionChanged.connect(lambda *_: self._remember_selection())
         self.layout().addWidget(self.grid, 1)
@@ -3764,8 +3805,8 @@ class WorkspaceBrowser(CoverBrowser):
     def set_entry_zoom(self, percent):
         self.entry_zoom = max(50, min(200, int(percent)))
         scale = self.entry_zoom / 100
-        self.grid.setIconSize(QSize(round(96 * scale), round(76 * scale)))
-        self.grid.setGridSize(QSize(round(132 * scale), round(76 * scale) + 40))
+        self.grid.setIconSize(QSize(round(96 * scale), round(96 * scale)))
+        self.grid.setGridSize(QSize(round(96 * scale) + 6, round(96 * scale) + 26))
         self.grid.doItemsLayout()
         self.grid.viewport().update()
 
