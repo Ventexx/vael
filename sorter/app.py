@@ -1466,6 +1466,10 @@ class _RubberBandArea(QWidget):
         self._edge_timer.setInterval(16)
         self._edge_timer.timeout.connect(self._edge_scroll_tick)
 
+    def contextMenuEvent(self, event):
+        self._browser.action_menu(event.globalPos())
+        event.accept()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             scroll = self._browser.tabs.currentWidget()
@@ -2337,7 +2341,7 @@ class MediaViewerOverlay(ImgViewerOverlay):
         path = Path(self._current_card.filepath)
         menu = QMenu(self)
         owner = self.parent().window()
-        menu.addAction('Add to session shelf', lambda: owner.shelf.add_paths([path]))
+        menu.addAction('Add to Shelf', lambda: owner.shelf.add_paths([path]))
         menu.addAction('Fit image', lambda: self.set_zoom(0))
         menu.addAction('Actual size', lambda: self.set_zoom(1))
         menu.addAction('Open externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
@@ -3090,7 +3094,7 @@ class CoverBrowser(ImageBrowser):
         filter_layout.setContentsMargins(4, 2, 4, 6)
         filter_layout.setSpacing(6)
         self.search = QLineEdit()
-        self.search.setPlaceholderText('Search folders and files · Pokemon g · g:Pokemon ch:Misty')
+        self.search.setPlaceholderText('Search folders and files…')
         self.search.setClearButtonEnabled(True)
         filter_layout.addWidget(self.search, 1)
         self.kind = QComboBox()
@@ -3154,13 +3158,22 @@ class CoverBrowser(ImageBrowser):
                 shortcut.setContext(Qt.WidgetWithChildrenShortcut)
                 shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
             self.setAcceptDrops(True)
-            self.tools_btn = QToolButton()
-            self.tools_btn.setObjectName('browserSettingsBtn')
-            self.tools_btn.setText('⋯')
-            self.tools_btn.setToolTip('Folder tools')
-            self.tools_btn.clicked.connect(lambda: self.action_menu(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height()))))
-            self._status_bar.layout().insertWidget(0, self.tools_btn)
-            self._position_status_bar()
+        self.tools_btn = QToolButton()
+        self.tools_btn.setObjectName('browserSettingsBtn')
+        self.tools_btn.setText('⋯')
+        self.tools_btn.setToolTip('Explorer options')
+        self.tools_btn.clicked.connect(self.options_menu)
+        self._status_bar.layout().insertWidget(0, self.tools_btn)
+        self._position_status_bar()
+
+    def options_menu(self):
+        menu = QMenu(self)
+        menu.addAction('Refresh', self.refresh)
+        menu.addAction('Search and Filters', lambda: self.search_button.setChecked(True))
+        menu.addSeparator()
+        menu.addAction('Select all visible items', self.select_all)
+        menu.addAction('Invert visible selection', self.invert_selection)
+        menu.exec(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height())))
 
     def toggle_search(self, visible):
         self.filter_panel.setVisible(visible)
@@ -3351,15 +3364,13 @@ class CoverBrowser(ImageBrowser):
         self.window.active_browser = self
         paths = self.selected_paths()
         menu = QMenu(self)
-        if card:
-            menu.addAction('View', lambda: self.open_card(card, [card]))
         folders = list(self.selected_folder_paths())
-        if folders:
+        if folders and not self.editable:
             menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))
         if paths:
-            menu.addAction('Add to session shelf', lambda: self.window.shelf.add_paths(paths))
+            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
-            menu.addAction('Copy to sorting folder…', lambda: self.window.transfer_dialog(self, False))
+            menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
         if self.editable:
             menu.addSeparator()
             if paths:
@@ -3368,29 +3379,20 @@ class CoverBrowser(ImageBrowser):
                 menu.addAction('Move into new folder…', lambda: self.window.move_to_new(self))
                 menu.addAction('Duplicate', lambda: self.window.duplicate(self))
                 menu.addAction('Rename…', lambda: self.window.rename_selection(self))
-                menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
+                rename = menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
+                rename.setToolTip('Rename selected files together using find/replace, prefixes, suffixes or numbering. Preview all names before applying.')
+                menu.setToolTipsVisible(True)
                 menu.addAction('Toggle flag', lambda: self.window.toggle_flags(self))
-                menu.addAction('Move to trash…', lambda: self.window.trash_selection(self))
+                menu.addAction('Delete', lambda: self.window.trash_selection(self))
             menu.addAction('Paste', lambda: self.window.paste(self))
             menu.addAction('New folders…', lambda: self.window.new_folders(self))
-            menu.addAction('Open sorting subfolder…', self.choose_folder)
-            menu.addAction('Parent folder', self.up)
-            menu.addAction('Pin / unpin current folder', lambda: self.window.pin(self))
-            menu.addAction('Undo last file operation', self.window.undo)
         if paths:
             menu.addSeparator()
             menu.addAction('Information…', lambda: self.window.information(paths))
-            menu.addAction('Copy paths', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
-            menu.addAction('Open containing folder externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
-        menu.addAction('Clear selection', self.clear_selection)
-        menu.addSeparator()
-        details = menu.addAction('Detail list')
-        details.setCheckable(True)
-        details.setChecked(self._details)
-        details.triggered.connect(self.set_details)
-        menu.addAction('Search and filters', lambda: self.search_button.setChecked(True))
-        menu.addAction('Select all visible items', self.select_all)
-        menu.addAction('Invert visible selection', self.invert_selection)
+            menu.addAction('Copy as Path', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
+            menu.addAction('Open Folder in Explorer', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths[0].parent))))
+        if paths:
+            menu.addAction('Clear selection', self.clear_selection)
         menu.exec(point)
 
     def choose_folder(self):
