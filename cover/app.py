@@ -1570,7 +1570,7 @@ class WorkflowState(QObject):
 # ---------------------------------------------------------------------------
 # In-memory thumbnail cache + background loader — ported one-to-one from
 # vael. indexer's image-handling approach: no disk thumb cache at all, just
-# a process-lifetime dict of already-scaled QPixmaps, filled in by a single
+# a process-lifetime dict of already-scaled QImages, filled in by a single
 # long-lived worker thread that drains a queue of (card, path) requests and
 # delivers finished pixmaps back to the GUI thread via a signal.
 # ---------------------------------------------------------------------------
@@ -1598,21 +1598,31 @@ def _natural_sort_key(path_str):
 THUMB_W = 106
 THUMB_H = 159
 
-_PIXMAP_CACHE: dict[str, QPixmap] = {}
+_PIXMAP_CACHE: dict[str, QImage] = {}
 
 
-def _load_pixmap(path: str) -> QPixmap:
-    """Return a cached thumbnail pixmap, or load+scale synchronously."""
+def _read_preview(path: str, width: int, height: int,
+                  aspect=Qt.KeepAspectRatio) -> QImage:
+    """Request a small decode; keep full-resolution images for the viewer."""
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid():
+        reader.setScaledSize(size.scaled(QSize(width, height), aspect))
+    image = reader.read()
+    if not image.isNull():
+        image = image.scaled(width, height, aspect, Qt.SmoothTransformation)
+    return image
+
+
+def _load_pixmap(path: str) -> QImage:
+    """Return a cached thumbnail image, safe to decode on a worker thread."""
     if path not in _PIXMAP_CACHE:
-        pix = QPixmap(path)
+        pix = _read_preview(path, THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding)
         if not pix.isNull():
-            scaled = pix.scaled(
-                THUMB_W, THUMB_H,
-                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
-            )
-            x = (scaled.width() - THUMB_W) // 2
-            y = (scaled.height() - THUMB_H) // 2
-            pix = scaled.copy(x, y, THUMB_W, THUMB_H)
+            x = (pix.width() - THUMB_W) // 2
+            y = (pix.height() - THUMB_H) // 2
+            pix = pix.copy(x, y, THUMB_W, THUMB_H)
         _PIXMAP_CACHE[path] = pix
     return _PIXMAP_CACHE[path]
 
@@ -1621,7 +1631,7 @@ class PixmapWorker(QThread):
     """Loads and scales thumbnail pixmaps off the main thread, one shared
     long-lived instance for the whole app session (mirrors vael. indexer)."""
 
-    pixmap_ready = Signal(object, QPixmap)   # (card, pixmap)
+    pixmap_ready = Signal(object, QImage)   # (card, image)
 
     def __init__(self):
         super().__init__()
@@ -2090,6 +2100,7 @@ class ThumbnailCard(QWidget):
     def _apply_pixmap(self, pix):
         self._image_loaded = True
         if not pix.isNull():
+            pix = QPixmap.fromImage(pix)
             rounded = QPixmap(THUMB_W, THUMB_H)
             rounded.fill(Qt.GlobalColor.transparent)
             p = QPainter(rounded)
@@ -2147,7 +2158,7 @@ class ThumbnailCard(QWidget):
         mime.setUrls([QUrl.fromLocalFile(self.filepath)])
         drag = QDrag(self)
         drag.setMimeData(mime)
-        pix = _load_pixmap(self.filepath)
+        pix = QPixmap.fromImage(_load_pixmap(self.filepath))
         if not pix.isNull():
             drag.setPixmap(pix.scaled(THUMB_W // 2, THUMB_H // 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         drag.exec(Qt.CopyAction)
