@@ -3797,7 +3797,7 @@ def _workflow_lock_icon(locked):
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(QPen(QColor("#858585"), 1.2))
+    painter.setPen(QPen(QColor("#6fa88b" if locked else "#858585"), 1.2))
     painter.drawRoundedRect(3, 6, 8, 7, 1, 1)
     shackle = QPainterPath()
     shackle.moveTo(5, 6)
