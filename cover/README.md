@@ -16,6 +16,7 @@ A desktop companion for ComfyUI. Browse your image folders, assign inputs to sav
 - load lightweight previews for thumbnails and input slots; load the original image when opening the larger viewer
 - assign images to workflow input slots through the Input Roster
 - adjust exposed workflow parameters before running
+- for supported count-based workflows, require only the images used by the selected count; faded slots remain editable
 - run one workflow or process queued jobs in order
 - retry failed jobs and check jobs whose server status is still pending
 - reconnect to submitted jobs without automatically submitting duplicates
@@ -60,6 +61,14 @@ Cover is designed around **ComfyUI workflows that take one or more image inputs 
 - Keep the workflow focused on the intended single-image result. Cover checks that ComfyUI produced an image, but it does not enforce exactly one output or choose among multiple outputs for you.
 
 Drag across folder headers to select multiple folders. While holding the mouse button, move near the top or bottom of the Image Browser to scroll and extend the selection beyond the screen. Hold Ctrl when starting the drag to keep your existing selection.
+
+### variable image counts
+
+For Cover-Cover, expose the `COUNT 2-5` node as the workflow parameter. Changing its value updates which input slots are needed. Unused slots appear faded, but you can still assign, replace, clear, or swap their images. Assigned images remain available when you increase the count. Input usage follows the workflow connections, even when you reorder the roster. Automatic selection advances only to empty inputs needed for the current run; click a faded slot to prepare it manually.
+
+Run and queued jobs submit a temporary workflow containing the selected output and its dependencies, uploading only the required images. The saved workflow stays unchanged. Queued jobs retain the count and image assignments from when they were added.
+
+This supports a `PrimitiveInt` titled `COUNT min-max`, with `ComfyMathExpression` comparisons such as `a == 3` connected to `ComfySwitchNode` selectors and standard Save Image/Preview Image outputs. Unknown conditions remain intact and their inputs remain required; Cover does not execute arbitrary workflow expressions locally.
 
 ### folder workflows and settings
 

@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QSpinBox, QDoubleSpinBox,
     QSizePolicy, QStackedWidget, QMenu, QCheckBox,
     QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem,
+    QGraphicsOpacityEffect,
 )
 
 # ===========================================================================
@@ -319,6 +320,80 @@ def node_label(workflow, node_id):
     title = node.get("_meta", {}).get("title")
     cls = node.get("class_type", "?")
     return f"{title} (#{node_id})" if title else f"{cls} (#{node_id})"
+
+
+def workflow_count_range(workflow, node_id):
+    node = (workflow or {}).get(node_id, {})
+    title = node.get("_meta", {}).get("title", "")
+    match = re.fullmatch(r"COUNT\s+(\d+)-(\d+)", title.strip(), re.IGNORECASE)
+    if node.get("class_type") == "PrimitiveInt" and match:
+        low, high = map(int, match.groups())
+        if 1 <= low <= high:
+            return low, high
+    return None
+
+
+def prepare_workflow(raw_workflow, optional_node_id, param_values):
+    """Prepare a private submission copy; resolve only known count switches.
+
+    Do not evaluate arbitrary expressions from imported workflow files. Unknown
+    switches retain both branches and therefore still require their inputs.
+    """
+    wf = copy.deepcopy(raw_workflow)
+    if optional_node_id in wf:
+        inputs = wf[optional_node_id].get("inputs", {})
+        for key, value in (param_values or {}).items():
+            if key in inputs:
+                inputs[key] = value
+    limits = workflow_count_range(wf, optional_node_id)
+    if limits is None:
+        return wf
+    count = wf[optional_node_id]["inputs"].get("value")
+    if type(count) is not int or not limits[0] <= count <= limits[1]:
+        raise ValueError(f"Image count must be between {limits[0]} and {limits[1]}.")
+
+    selected = {}
+    for nid, node in wf.items():
+        if node.get("class_type") != "ComfySwitchNode":
+            continue
+        inputs = node.get("inputs", {})
+        switch = inputs.get("switch")
+        if not isinstance(switch, list) or len(switch) != 2 or switch[1] != 2:
+            continue
+        condition = wf.get(switch[0], {})
+        condition_inputs = condition.get("inputs", {})
+        match = re.fullmatch(r"\s*a\s*==\s*(\d+)\s*", condition_inputs.get("expression", ""))
+        if (condition.get("class_type") == "ComfyMathExpression" and match
+                and condition_inputs.get("values.a") == [optional_node_id, 0]):
+            branch = inputs.get("on_true" if count == int(match[1]) else "on_false")
+            if isinstance(branch, list) and len(branch) == 2 and branch[0] in wf:
+                selected[nid] = branch
+    outputs = find_output_node_ids(wf)
+    if not selected or not outputs:
+        return wf
+
+    def resolve(link):
+        seen = set()
+        while link[0] in selected and link[1] == 0:
+            if link[0] in seen:
+                raise ValueError("The workflow contains a circular count switch.")
+            seen.add(link[0])
+            link = selected[link[0]]
+        return list(link)
+
+    reachable = set()
+    pending = list(outputs)
+    while pending:
+        nid = pending.pop()
+        if nid in reachable:
+            continue
+        reachable.add(nid)
+        for key, value in wf[nid].get("inputs", {}).items():
+            if isinstance(value, list) and len(value) == 2 and value[0] in wf:
+                value = resolve(value)
+                wf[nid]["inputs"][key] = value
+                pending.append(value[0])
+    return {nid: node for nid, node in wf.items() if nid in reachable}
 
 # ===========================================================================
 # style.qss — embedded stylesheet (was a separate file)
@@ -1061,18 +1136,14 @@ def execute_workflow_sync(server, raw_workflow, image_map, optional_node_id, par
         raise PendingRunError("Submission response was lost. Check ComfyUI before creating another run.")
     prompt_id = run_state.get("prompt_id")
     if not prompt_id:
-        wf = copy.deepcopy(raw_workflow)
-        for node_id, path in image_map.items():
+        wf = prepare_workflow(raw_workflow, optional_node_id, param_values)
+        for node_id in find_load_image_nodes(wf):
+            path = image_map.get(node_id)
             check_stopped()
             if not path:
                 raise RuntimeError(f"Missing image for node #{node_id}")
             name, subfolder, ftype = api.upload_image(path)
             wf[node_id]["inputs"]["image"] = name
-
-        if optional_node_id and optional_node_id in wf:
-            for key, val in (param_values or {}).items():
-                if key in wf[optional_node_id].get("inputs", {}):
-                    wf[optional_node_id]["inputs"][key] = val
 
         # A lost POST response does not mean that ComfyUI rejected the job.
         check_stopped()
@@ -1202,6 +1273,7 @@ class RosterIcon(QFrame):
         self.index = index
         self.node_id = node_id
         self.caption = caption
+        self.used_for_run = True
         self.filepath = None
         self._pixmap = None
         self._press_pos = None
@@ -1222,8 +1294,19 @@ class RosterIcon(QFrame):
         self.canvas.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.canvas)
 
+        self._usage_effect = QGraphicsOpacityEffect(self.canvas)
+        self._usage_effect.setOpacity(1.0)
+        self.canvas.setGraphicsEffect(self._usage_effect)
+
+    def set_used_for_run(self, used):
+        self.used_for_run = used
+        self._usage_effect.setOpacity(1.0 if used else 0.35)
+        self._update_tooltip()
+
     def _update_tooltip(self):
         base = f"Input #{self.index + 1}: {self.caption}"
+        if not self.used_for_run:
+            base += "\nNot used for this run. You can still assign, replace, or clear this image."
         hint = "\n\nClick to arm for the Image Browser.\nDouble-click or drag a file here to assign manually.\nDrag onto another icon to reorder or swap.\nRight-click to clear."
         self.setToolTip(base + hint)
 
@@ -1472,11 +1555,21 @@ class WorkflowState(QObject):
     def _gather_image_map(self):
         return {s["node_id"]: s["filepath"] for s in self.slots}
 
+    def required_image_nodes(self):
+        return set(find_load_image_nodes(prepare_workflow(
+            self.raw_workflow or {}, self.optional_node_id, self.param_values)))
+
     def _validate(self):
         if not self.raw_workflow:
             QMessageBox.warning(self.main_window, "No workflow", f"'{self.name}' has no valid workflow loaded.")
             return False
-        missing = [s["caption"] for s in self.slots if not s["filepath"]]
+        try:
+            required = self.required_image_nodes()
+        except ValueError as exc:
+            QMessageBox.warning(self.main_window, "Invalid workflow", str(exc))
+            return False
+        missing = [s["caption"] for s in self.slots
+                   if s["node_id"] in required and not s["filepath"]]
         if missing:
             QMessageBox.warning(self.main_window, "Missing images", "Please fill in:\n- " + "\n- ".join(missing))
             return False
@@ -3958,6 +4051,17 @@ class RosterBar(QWidget):
                 self.roster_row.addWidget(icon)
                 self.icons.append(icon)
         self.roster_row.addStretch(1)
+        self._refresh_input_usage()
+
+    def _refresh_input_usage(self):
+        if self.state is None:
+            return
+        try:
+            required = self.state.required_image_nodes()
+        except ValueError:
+            required = {slot["node_id"] for slot in self.state.slots}
+        for icon in self.icons:
+            icon.set_used_for_run(icon.node_id in required)
 
     def _rebuild_params(self):
         while self.param_form.rowCount():
@@ -3972,7 +4076,11 @@ class RosterBar(QWidget):
             if type_name == "int":
                 w = QSpinBox()
                 w.setRange(-2_147_483_648, 2_147_483_647)
+                limits = workflow_count_range(self.state.raw_workflow, self.state.optional_node_id)
+                if key == "value" and limits:
+                    w.setRange(*limits)
                 w.setValue(int(value))
+                self.state.param_values[key] = w.value()
                 w.valueChanged.connect(lambda v, k=key: self._on_param_changed(k, v))
             elif type_name == "float":
                 w = QDoubleSpinBox()
@@ -3989,10 +4097,12 @@ class RosterBar(QWidget):
             self.param_widgets[key] = w
         self._size_param_fields()
         self.param_form_widget.show()
+        self._refresh_input_usage()
 
     def _on_param_changed(self, key, value):
         if self.state is not None:
             self.state.param_values[key] = value
+            self._refresh_input_usage()
             self.main_window.persist_all()
 
     # -- roster interactions -------------------------------------------
@@ -4011,7 +4121,7 @@ class RosterBar(QWidget):
             return
         self.icons[self.armed_index].set_image_path(filepath)
         next_empty = next(
-            (i for i, icon in enumerate(self.icons) if not icon.filepath), None
+            (i for i, icon in enumerate(self.icons) if not icon.filepath and icon.used_for_run), None
         )
         self.armed_index = next_empty
         for icon in self.icons:
