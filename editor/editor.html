@@ -446,6 +446,12 @@
   /* OVERLAYS */
   .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 1000; }
   .overlay.open { display: flex; }
+  #category-loading { z-index: 2000; background: rgba(48,48,48,.72); cursor: wait; -webkit-app-region: no-drag; }
+  .category-loading-content { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+  .category-loading-spinner { width: 34px; height: 34px; border: 3px solid rgba(255,255,255,.16); border-top-color: var(--text-bright); border-radius: 50%; animation: category-loading-spin .8s linear infinite; }
+  .category-loading-title { color: var(--text-bright); font-size: 12px; }
+  #category-loading-detail { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+  @keyframes category-loading-spin { to { transform: rotate(360deg); } }
   .overlay-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; padding: 16px; width: 280px; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
   #overlay-export .overlay-box { width: 380px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow-y: auto; font-size: 11px; font-weight: 400; line-height: 1.5; }
   #overlay-export input, #overlay-export select { background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 3px; padding: 4px; font: inherit; }
@@ -732,6 +738,14 @@
 </div>
 
 <input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="onFileInput(event)">
+
+<div class="overlay" id="category-loading" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true">
+  <div class="category-loading-content">
+    <div class="category-loading-spinner" aria-hidden="true"></div>
+    <div class="category-loading-title">Getting category ready…</div>
+    <div id="category-loading-detail">Preparing images for editing</div>
+  </div>
+</div>
 
 <!-- METADATA OVERLAY -->
 <div class="overlay" id="overlay-saves" role="dialog" aria-label="Background saves">
@@ -2871,6 +2885,19 @@ function categoryPromptAction(action) {
 // next.
 let _selectToken = 0;
 let selectionLoadTimer;
+function updateCategoryLoadingProgress(ready, total, failed = 0) {
+  $('category-loading-detail').textContent = `${ready} / ${total} images ready${failed ? ` · ${failed} failed` : ''}`;
+}
+function setCategoryLoading(loading) {
+  state.categoryLoading = loading;
+  $('category-loading').classList.toggle('open', loading);
+  $('category-loading').setAttribute('aria-hidden', String(!loading));
+  $('app').setAttribute('aria-busy', String(loading));
+  if (loading) {
+    const images = plannedReadAhead();
+    updateCategoryLoadingProgress(images.filter(imageReady).length, images.length);
+  }
+}
 function selectImage(idx) {
   if (idx < 0 || idx >= state.images.length) return;
   const myToken = ++_selectToken;
@@ -2878,7 +2905,7 @@ function selectImage(idx) {
   state.activeIdx = idx;
   const img = state.images[idx];
   delete img._readAheadError; // Explicit selection retries a previously failed image.
-  state.categoryLoading = !plannedReadAhead().every(item => imageReady(item) || item._readAheadError);
+  setCategoryLoading(!plannedReadAhead().every(item => imageReady(item) || item._readAheadError));
   img._loadFailed = false;
   // Keep the filmstrip's category filter following whatever image just
   // became active. Without this, the filmstrip only updates its highlight
@@ -2901,7 +2928,7 @@ function selectImage(idx) {
   updateStatusBar();
   if (state.categoryLoading) {
     // Nothing to draw yet — keep the previous frame off-screen rather than
-    // drawing null/stale pixels, and let the status line show it's working.
+    // drawing null/stale pixels while the loading overlay shows progress.
     displayCanvas.style.display = 'none';
     setStatus('Loading category…', true);
     // Coalesce rapid skips; already prepared images still display immediately.
@@ -2911,12 +2938,15 @@ function selectImage(idx) {
       prepare: hydrateImage,
       cancelled: () => myToken !== _selectToken || img._disposed,
       progress: (ready, total, failed) => {
-        if (myToken === _selectToken) $('sb-read-ahead').textContent =
-          `Loading category ${ready}/${total}${failed ? ` (${failed} failed)` : ''}`;
+        if (myToken === _selectToken) {
+          updateCategoryLoadingProgress(ready, total, failed);
+          $('sb-read-ahead').textContent =
+            `Loading category ${ready}/${total}${failed ? ` (${failed} failed)` : ''}`;
+        }
       },
     }).then(failed => {
       if (myToken !== _selectToken || img._disposed) return; // superseded by a newer selection
-      state.categoryLoading = false;
+      setCategoryLoading(false);
       if (!imageReady(img)) throw new Error(img._readAheadError || 'Image could not be loaded');
       fitImage(false);
       renderDisplay();
@@ -2928,7 +2958,7 @@ function selectImage(idx) {
       img._loadFailed = true;
       console.error(err);
       if (myToken === _selectToken) {
-        state.categoryLoading = false;
+        setCategoryLoading(false);
         setStatus(`Failed to open ${img.name}: ${err.message}`, false);
       }
     }), 35);
@@ -2947,7 +2977,7 @@ function removeImage(idx) {
   state.multiSelected.forEach(i => { if (i !== idx) remapped.add(i > idx ? i - 1 : i); });
   state.multiSelected = remapped;
   if (state.images.length === 0) {
-    state.categoryLoading = false;
+    setCategoryLoading(false);
     ++_selectToken;
     clearTimeout(selectionLoadTimer);
     state.activeIdx = -1;
@@ -3041,7 +3071,7 @@ function removeImages(indices) {
   state.multiSelected = newMultiSelected;
 
   if (state.images.length === 0) {
-    state.categoryLoading = false;
+    setCategoryLoading(false);
     ++_selectToken;
     clearTimeout(selectionLoadTimer);
     state.activeIdx = -1;
