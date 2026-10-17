@@ -4089,36 +4089,13 @@ class WorkspaceBrowser(CoverBrowser):
             self.navigate(path)
 
 
-class ShelfCard(ThumbnailCard):
-    def __init__(self, shelf, item):
-        super().__init__(item.data(Qt.UserRole))
-        self.shelf, self.item = shelf, item
-        self.request_image()
+class ShelfEntryDelegate(WorkspaceEntryDelegate):
+    def paint(self, painter, option, index):
+        class ShelfIndex:
+            def data(self, role):
+                return index.data(Qt.UserRole + 1) if role == Qt.UserRole else index.data(role)
+        super().paint(painter, option, ShelfIndex())
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self._drag_start_pos is not None:
-            self._drag_start_pos = None
-            if event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
-                self.item.setSelected(not self.item.isSelected())
-                self.update()
-            else:
-                self.shelf.window.preview(Path(self.filepath))
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def _start_drag(self):
-        if not self.item.isSelected():
-            self.shelf.list.clearSelection()
-            self.item.setSelected(True)
-        self.shelf.list.startDrag(Qt.CopyAction)
-
-    def contextMenuEvent(self, event):
-        if not self.item.isSelected():
-            self.shelf.list.clearSelection()
-            self.item.setSelected(True)
-        self.shelf.menu(self.shelf.list.mapFromGlobal(event.globalPos()))
-        event.accept()
 
 class ShelfList(QListWidget):
     def __init__(self, shelf):
@@ -4129,13 +4106,18 @@ class ShelfList(QListWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setViewMode(QListView.IconMode)
         self.setFlow(QListView.LeftToRight)
-        self.setWrapping(False)
-        self.setSpacing(5)
-        self.setGridSize(QSize(THUMB_W + 8, THUMB_H + 8))
-        self.setFixedHeight(THUMB_H + 22)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.itemSelectionChanged.connect(self.repaint_cards)
+        from types import SimpleNamespace
+        self.browser = SimpleNamespace(window=shelf.window, entry_zoom=100)
+        self.setWrapping(True)
+        self.setResizeMode(QListView.Adjust)
+        self.setMovement(QListView.Static)
+        self.setSpacing(0)
+        self.setGridSize(QSize(102, 134))
+        self.setIconSize(QSize(96, 96))
+        self.setUniformItemSizes(True)
+        self.setItemDelegate(ShelfEntryDelegate(self))
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
     def repaint_cards(self):
         for i in range(self.count()):
@@ -4175,11 +4157,11 @@ class Shelf(QWidget):
         self.toggle = QLabel('SESSION SHELF · 0')
         self.toggle.setObjectName('hint')
         row.addWidget(self.toggle)
-        text = QLabel('Temporary storage · references only · cleared when you close Sorter')
+        text = QLabel('Session references')
         text.setObjectName('hint')
         row.addWidget(text)
         row.addStretch()
-        for name, callback in [('Copy to Active Workspace Folder', self.copy_to_target), ('Remove selected', self.remove_selected), ('Clear', self.clear)]:
+        for name, callback in [('Copy to Workspace', self.copy_to_target), ('Remove', self.remove_selected), ('Clear', self.clear)]:
             button = QPushButton(name)
             button.clicked.connect(callback)
             row.addWidget(button)
@@ -4188,7 +4170,7 @@ class Shelf(QWidget):
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self.menu)
         self.list.itemDoubleClicked.connect(lambda item: window.preview(Path(item.data(Qt.UserRole))))
-        layout.addWidget(self.list)
+        layout.addWidget(self.list, 1)
 
     def add_paths(self, paths):
         existing = {self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())}
@@ -4199,11 +4181,35 @@ class Shelf(QWidget):
             item = QListWidgetItem('')
             item.setData(Qt.UserRole, str(path))
             item.setToolTip(str(path))
-            item.setSizeHint(QSize(THUMB_W, THUMB_H))
             self.list.addItem(item)
-            self.list.setItemWidget(item, ShelfCard(self, item))
+            self.refresh_item(item)
             existing.add(str(path))
         self.update_count()
+
+    def refresh_item(self, item):
+        from types import SimpleNamespace
+        path = Path(item.data(Qt.UserRole))
+        kind = 'Folder' if path.is_dir() else 'GIF' if path.suffix.lower() == '.gif' else 'Image' if path.suffix.lower() in IMAGES else 'Video' if path.suffix.lower() in VIDEOS else 'Other'
+        item.setData(Qt.UserRole + 1, SimpleNamespace(path=path, name=path.name, is_dir=path.is_dir(), kind=kind))
+        item.setText(path.name)
+        item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon if path.is_dir() else QStyle.SP_FileIcon))
+        if kind in ('Image', 'GIF'):
+            def decode(task):
+                reader = QImageReader(str(path))
+                reader.setAutoTransform(True)
+                size = reader.size()
+                if size.isValid():
+                    size.scale(192, 192, Qt.KeepAspectRatioByExpanding)
+                    reader.setScaledSize(size)
+                return reader.read()
+            def ready(image):
+                if image.isNull():
+                    return
+                for i in range(self.list.count()):
+                    target = self.list.item(i)
+                    if target.data(Qt.UserRole) == str(path):
+                        target.setIcon(QIcon(QPixmap.fromImage(image)))
+            self.window.jobs.start(decode, ready)
 
     def update_count(self):
         self.toggle.setText(f'SESSION SHELF · {self.list.count()}')
@@ -4228,11 +4234,15 @@ class Shelf(QWidget):
         self.window.transfer([Path(i.data(Qt.UserRole)) for i in items], self.window.target_browser().current, False)
 
     def menu(self, point):
+        item = self.list.itemAt(point)
+        if item and not item.isSelected():
+            self.list.clearSelection()
+            item.setSelected(True)
         menu = QMenu(self)
         menu.addAction('Copy to Active Workspace Folder', self.copy_to_target)
         menu.addAction('Remove selected references', self.remove_selected)
         menu.addAction('Clear shelf', self.clear)
-        menu.exec(self.list.mapToGlobal(point))
+        menu.exec(self.list.viewport().mapToGlobal(point))
 
 
 
@@ -5738,7 +5748,7 @@ class Window(QMainWindow):
         controls.addWidget(label)
         shelf_button = QToolButton()
         self.shelf_button = shelf_button
-        shelf_button.setObjectName('workflowLockBtn')
+        shelf_button.setObjectName('modeTab')
         shelf_button.setText('Shelf')
         shelf_button.setCheckable(True)
         shelf_button.setToolTip('Show session shelf')
@@ -5751,7 +5761,7 @@ class Window(QMainWindow):
         self.undo_button.clicked.connect(self.undo)
         controls.addWidget(self.undo_button)
         b.addLayout(controls)
-        b.addWidget(self.shelf)
+        b.addWidget(self.shelf, 1)
         self.horizontal = QSplitter(Qt.Horizontal)
         self.sorter = WorkspaceBrowser(self)
         self.second = WorkspaceBrowser(self)
@@ -5762,6 +5772,8 @@ class Window(QMainWindow):
         b.addWidget(self.horizontal, 1)
         shelf_button.toggled.connect(lambda shelf: (self.horizontal.setVisible(not shelf), self.split_toggle.setEnabled(not shelf)))
         workspace_button = QToolButton()
+        self.workspace_button = workspace_button
+        workspace_button.setObjectName('modeTab')
         workspace_button.setText('Workspace')
         workspace_button.setCheckable(True)
         workspace_button.setChecked(True)
@@ -5770,6 +5782,9 @@ class Window(QMainWindow):
         workspace_button.clicked.connect(lambda: shelf_button.setChecked(False))
         shelf_button.toggled.connect(lambda shelf: workspace_button.setChecked(not shelf))
         workspace_button.clicked.connect(lambda: workspace_button.setChecked(True))
+        mode_style = 'QToolButton { color: #777; background: transparent; border: 1px solid transparent; padding: 4px 8px; border-radius: 3px; } QToolButton:checked { color: #eee; background: #111; border: 1px solid #353535; } QToolButton:hover { color: #eee; }'
+        shelf_button.setStyleSheet(mode_style)
+        workspace_button.setStyleSheet(mode_style)
         self.vertical.addWidget(bottom)
         self.vertical.setSizes([470, 450])
         layout.addWidget(self.vertical, 1)
@@ -6093,7 +6108,6 @@ class Window(QMainWindow):
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
         return menu
 
-
     def reconcile_references(self, results):
         # Moves and renames update pins, shelf entries and browser paths.
         for old_text, value in results:
@@ -6122,6 +6136,7 @@ class Window(QMainWindow):
                 if text:
                     item.setData(Qt.UserRole, text)
                     item.setToolTip(text)
+                    self.shelf.refresh_item(item)
                     card = self.shelf.list.itemWidget(item)
                     if card:
                         card.filepath = text
