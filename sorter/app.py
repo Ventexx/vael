@@ -16,8 +16,58 @@ DEFAULTS = {
     "sources": [], "source_names": {}, "sort_root": "", "pins": [],
     "fields": {}, "rules": [],
     "inherit": False, "ignored": [],
-    "layout": {}, "collision": "rename",
+    "layout": {}, "collision": "rename", "groups": [], "notes": [],
 }
+
+
+def group_for(config, path):
+    text = str(path)
+    return next((group for group in config.get('groups', []) if text in group['members']), None)
+
+
+def new_group_color(used):
+    # Random hues with a restrained saturation; no duplicate within a folder.
+    import random
+    import colorsys
+    while True:
+        rgb = colorsys.hsv_to_rgb(random.random(), .48, .72)
+        color = '#' + ''.join(f'{round(c * 255):02x}' for c in rgb)
+        if color not in used:
+            return color
+
+
+def organize_groups(config):
+    """Keep groups folder-local after moves, retaining their assigned notes."""
+    import uuid
+    result, colors = [], {}
+    for group in config.get('groups', []):
+        folders = {}
+        for member in dict.fromkeys(group['members']):
+            folders.setdefault(str(Path(member).parent), []).append(member)
+        for index, (folder, members) in enumerate(folders.items()):
+            used = colors.setdefault(folder, set())
+            color = group['color'] if group['color'] not in used else new_group_color(used)
+            used.add(color)
+            result.append(dict(group, id=group['id'] if index == 0 else uuid.uuid4().hex,
+                               members=members, color=color))
+    config['groups'] = result
+
+
+def create_group(config, paths):
+    import uuid
+    paths = list(dict.fromkeys(str(normalized(p)) for p in paths))
+    if len(paths) < 2 or len({str(Path(p).parent) for p in paths}) != 1:
+        raise ValueError('Select at least two files in the same folder.')
+    if any(not Path(p).is_file() for p in paths):
+        raise ValueError('Groups contain files, not folders.')
+    for group in config.setdefault('groups', []):
+        group['members'] = [p for p in group['members'] if p not in paths]
+    config['groups'] = [g for g in config['groups'] if g['members']]
+    folder = Path(paths[0]).parent
+    used = {g['color'] for g in config['groups'] if Path(g['members'][0]).parent == folder}
+    group = dict(id=uuid.uuid4().hex, members=paths, color=new_group_color(used), notes=[])
+    config['groups'].append(group)
+    return group
 
 
 def read_settings():
@@ -543,7 +593,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox, QSplitter, QStackedWidget,
     QListView, QTableView, QAbstractItemView, QStyledItemDelegate, QStyle,
-    QMenu, QMessageBox, QFileDialog, QInputDialog, QSlider, QProgressBar,
+    QMenu, QWidgetAction, QMessageBox, QFileDialog, QInputDialog, QSlider, QProgressBar,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
     QListWidgetItem, QPlainTextEdit, QFormLayout, QDialogButtonBox, QSpinBox,
     QScrollArea, QGroupBox, QCompleter, QToolButton, QFrame, QGridLayout, QSizePolicy,
@@ -716,6 +766,15 @@ class MediaFilter(QSortFilterProxyModel):
         a, b = self.sourceModel().entries[left.row()], self.sourceModel().entries[right.row()]
         if a.is_dir != b.is_dir:
             return a.is_dir
+        if self.browser.editable and not a.is_dir:
+            ga = group_for(self.browser.window.config, a.path)
+            gb = group_for(self.browser.window.config, b.path)
+            if bool(ga) != bool(gb):
+                return bool(ga)
+            if ga and gb:
+                if ga['id'] != gb['id']:
+                    return ga['id'] < gb['id']
+                return (a.name.casefold(), a.name) < (b.name.casefold(), b.name)
         column = left.column()
         if column == 2:
             return a.size < b.size
@@ -800,6 +859,11 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
         thumbnail = QRect(tile.x(), tile.y(), size, size)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
+        group = group_for(browser.window.config, entry.path)
+        if group:
+            color = QColor(group['color'])
+            color.setAlpha(70)
+            painter.fillRect(tile.adjusted(-3, -3, 3, 3), color)
         selected = bool(option.state & QStyle.State_Selected)
         painter.setPen(QPen(QColor('#00d4a0'), 2) if selected else Qt.NoPen)
         painter.setBrush(QColor('#174b42') if selected else QColor('#181818'))
@@ -3632,6 +3696,9 @@ class CoverBrowser(ImageBrowser):
         folders = list(self.selected_folder_paths())
         if folders and not self.editable:
             menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))
+        if self.editable and len(paths) >= 2 and all(p.is_file() for p in paths):
+            menu.addAction('Group selected entries', lambda: self.window.group_selection(self))
+            menu.addSeparator()
         if paths:
             menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
@@ -3848,7 +3915,15 @@ class WorkspaceBrowser(CoverBrowser):
         if index.isValid() and not view.selectionModel().isSelected(index):
             from PySide6.QtCore import QItemSelectionModel
             view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
-        self.action_menu(view.viewport().mapToGlobal(point))
+        entry = index.data(Qt.UserRole) if index.isValid() else None
+        group = group_for(self.window.config, entry.path) if entry else None
+        selected_groups = {group_for(self.window.config, p)['id'] if group_for(self.window.config, p) else None for p in self.selected_paths()}
+        if group and selected_groups == {group['id']}:
+            menu = self.window.group_menu(group, self)
+            menu.exec(view.viewport().mapToGlobal(point))
+            menu.deleteLater()
+        else:
+            self.action_menu(view.viewport().mapToGlobal(point))
 
     def _update_empty_state(self):
         self.tabs.hide()
@@ -5378,6 +5453,8 @@ class Window(QMainWindow):
         super().__init__()
         self.config = config if config is not None else read_settings()
         self.config.pop('flags', None)
+        self.config.setdefault('groups', [])
+        self.config.setdefault('notes', [])
         validate_config(self.config)
         self.service = FileService(self.config['sort_root'])
         self.jobs = Jobs(self)
@@ -5760,6 +5837,31 @@ class Window(QMainWindow):
             lambda error: finished(([], [error], False)),
             lambda value, label: (self.progress.setValue(value), self.operation_status.setText(title + ' · ' + Path(label).name)))
 
+    def groups_changed(self):
+        self.persist()
+        for browser in (self.sorter, self.second):
+            browser.proxy.invalidate()
+            browser.proxy.sort(0)
+            browser.grid.doItemsLayout()
+            browser.grid.viewport().update()
+
+    def group_selection(self, browser):
+        try:
+            create_group(self.config, browser.selected_paths())
+        except ValueError as exc:
+            self.notice(exc)
+            return
+        self.groups_changed()
+
+    def dissolve_group(self, group):
+        self.config['groups'] = [g for g in self.config['groups'] if g['id'] != group['id']]
+        self.groups_changed()
+
+    def group_menu(self, group, parent):
+        menu = QMenu(parent)
+        menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
+        return menu
+
     def reconcile_references(self, results):
         # Moves and renames update pins, shelf entries and browser paths.
         for old_text, value in results:
@@ -5776,6 +5878,8 @@ class Window(QMainWindow):
                 if path.is_relative_to(old):
                     return str(new / path.relative_to(old)) if new else None
                 return text
+            for group in self.config['groups']:
+                group['members'] = [mapped(p) for p in group['members'] if mapped(p)]
             for key in ('pins',):
                 self.config[key] = [mapped(p) for p in self.config[key] if mapped(p)]
             for i in reversed(range(self.shelf.list.count())):
@@ -5797,6 +5901,7 @@ class Window(QMainWindow):
                     text = mapped(str(browser.current))
                     browser.current = Path(text) if text else (self.service.root if browser.editable else None)
                     browser.path.setText(str(browser.current) if browser.current else '')
+        organize_groups(self.config)
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
         self.shelf.update_count()
 
