@@ -363,10 +363,12 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 .ctx-menu-item:hover { background: var(--accent-faint); color: var(--accent); }
 .ctx-menu-divider { height: 1px; margin: 4px 6px; background: var(--border); }
 .collapse-expand {
-  display: block; margin: 0 auto; padding: 0 12px; height: 18px;
+  display: flex; align-items: center; justify-content: center;
+  align-self: center; flex: 0 0 14px; margin: -6px 0 10px; padding: 0 12px; height: 14px;
   border: 0; background: none; color: var(--text-dim); cursor: pointer;
   font-family: var(--font-mono); font-size: 13px; line-height: 14px;
 }
+.spacer-item + .collapse-expand { transform: translateX(-7px); }
 .collapse-expand:hover, .collapse-expand:focus-visible { color: var(--accent); }
 
 .profile-del, .profile-load {
@@ -731,8 +733,7 @@ function render(newId = null) {
       const el = node.type === 'spacer' ? mkSpacer(node) : mkTask(node);
       if (newId && node.id === newId) el.classList.add('new');
       list.appendChild(el);
-      if (node.collapsed) {
-        collapsed = true;
+      if (node.collapsed && (node.type === 'spacer' || node.notes?.length)) {
         list.appendChild(mkCollapseExpand(node));
       }
       if (node.type === 'task' && !node.collapsed && node.notes && node.notes.length) {
@@ -753,7 +754,7 @@ function render(newId = null) {
 function mkCollapseExpand(item) {
   const button = document.createElement('button');
   button.className = 'collapse-expand';
-  button.textContent = '...';
+  button.innerHTML = '<svg width="14" height="4" viewBox="0 0 14 4" aria-hidden="true"><g fill="currentColor"><circle cx="2" cy="2" r="1"/><circle cx="7" cy="2" r="1"/><circle cx="12" cy="2" r="1"/></g></svg>';
   button.title = item.type === 'task' ? 'Expand task' : 'Expand section';
   button.setAttribute('aria-label', button.title);
   button.disabled = !hasStorageLock;
@@ -864,8 +865,10 @@ function mkTask(item) {
     e.stopPropagation();
     showItemContextMenu(e, [
       { label: 'Add Note', onClick: () => addNote(item) },
-      { divider: true },
-      { label: item.collapsed ? 'Expand Task' : 'Collapse Task', onClick: () => toggleSection(item) }
+      ...(item.notes?.length ? [
+        { divider: true },
+        { label: item.collapsed ? 'Expand Task' : 'Collapse Task', onClick: () => toggleSection(item) }
+      ] : [])
     ]);
   });
 
@@ -1088,8 +1091,10 @@ function toggleSection(item) {
   if (index < 0) return;
   const before = cloneItems();
   item.collapsed = !item.collapsed;
-  for (let i = index + 1; i < items.length && items[i].type !== 'spacer'; i++) {
-    delete items[i].visibleWhileCollapsed;
+  if (item.type === 'spacer') {
+    for (let i = index + 1; i < items.length && items[i].type !== 'spacer'; i++) {
+      delete items[i].visibleWhileCollapsed;
+    }
   }
   pushHistory(before);
   render();
@@ -1169,8 +1174,7 @@ function setupDrag(el, item) {
 
 function isCollapsedAt(index) {
   for (let i = index - 1; i >= 0; i--) {
-    if (items[i].collapsed) return true;
-    if (items[i].type === 'spacer') break;
+    if (items[i].type === 'spacer') return items[i].collapsed === true;
   }
   return false;
 }

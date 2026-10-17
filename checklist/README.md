@@ -16,7 +16,7 @@ A minimal to-do app for keeping tasks, notes, and repeatable lists together. Org
 - double-click a separator's name to rename it, or choose Rename from its right-click menu; double-click the surrounding line to collapse or expand the section
 - right-click a separator to collapse or expand everything until the next separator; hidden tasks still count, and the view is saved
 - collapsed sections show a small centered `...`; click it to expand again
-- right-click a task and choose Collapse Task to hide its notes and following entries until the next separator, with the same saved collapse behavior
+- right-click a task with notes and choose Collapse Task to hide only its notes, with the same saved collapse behavior
 - tasks added to a collapsed section stay visible until you expand and collapse it again
 - right-click a separator and choose Add Task to append an empty task to that section and start typing
 - drag items to reorder them
