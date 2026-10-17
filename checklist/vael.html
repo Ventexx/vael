@@ -362,6 +362,12 @@ body.theme-white .theme-btn:hover { background: rgba(0,0,0,0.03); }
 }
 .ctx-menu-item:hover { background: var(--accent-faint); color: var(--accent); }
 .ctx-menu-divider { height: 1px; margin: 4px 6px; background: var(--border); }
+.collapse-expand {
+  display: block; margin: 0 auto; padding: 0 12px; height: 18px;
+  border: 0; background: none; color: var(--text-dim); cursor: pointer;
+  font-family: var(--font-mono); font-size: 13px; line-height: 14px;
+}
+.collapse-expand:hover, .collapse-expand:focus-visible { color: var(--accent); }
 
 .profile-del, .profile-load {
   opacity: 0; background: none; border: none; color: var(--text-dim);
@@ -622,10 +628,10 @@ function validateItems(value, renewIds = false) {
   return value.map(node => {
     if (!node || typeof node !== 'object' || !['task', 'spacer'].includes(node.type)) throw new Error('Each item must be a task or separator.');
     const result = { id: identifier(node.id), type: node.type };
+    if (node.collapsed !== undefined && typeof node.collapsed !== 'boolean') throw new Error('Collapsed state must be true or false.');
+    if (node.collapsed === true) result.collapsed = true;
     if (node.type === 'spacer') {
       if (node.header != null) result.header = text(node.header);
-      if (node.collapsed !== undefined && typeof node.collapsed !== 'boolean') throw new Error('Collapsed state must be true or false.');
-      if (node.collapsed === true) result.collapsed = true;
     } else {
       result.text = text(node.text);
       if (node.visibleWhileCollapsed !== undefined && typeof node.visibleWhileCollapsed !== 'boolean') throw new Error('Collapsed visibility must be true or false.');
@@ -725,7 +731,11 @@ function render(newId = null) {
       const el = node.type === 'spacer' ? mkSpacer(node) : mkTask(node);
       if (newId && node.id === newId) el.classList.add('new');
       list.appendChild(el);
-      if (node.type === 'task' && node.notes && node.notes.length) {
+      if (node.collapsed) {
+        collapsed = true;
+        list.appendChild(mkCollapseExpand(node));
+      }
+      if (node.type === 'task' && !node.collapsed && node.notes && node.notes.length) {
         node.notes.forEach((note, idx) => {
           const isLast = idx === node.notes.length - 1;
           const noteEl = mkNote(node, note, isLast);
@@ -740,7 +750,20 @@ function render(newId = null) {
   applyReadOnlyState();
 }
 
-// Context menu shared by tasks (Add Note) and separators (Add/Remove Header)
+function mkCollapseExpand(item) {
+  const button = document.createElement('button');
+  button.className = 'collapse-expand';
+  button.textContent = '...';
+  button.title = item.type === 'task' ? 'Expand task' : 'Expand section';
+  button.setAttribute('aria-label', button.title);
+  button.disabled = !hasStorageLock;
+  button.addEventListener('click', () => {
+    if (hasStorageLock && item.collapsed) toggleSection(item);
+  });
+  return button;
+}
+
+// Context menu shared by tasks and separators
 function closeItemContextMenu() {
   const existing = document.getElementById('item-ctx-menu');
   if (existing) existing.remove();
@@ -840,7 +863,9 @@ function mkTask(item) {
     e.preventDefault();
     e.stopPropagation();
     showItemContextMenu(e, [
-      { label: 'Add Note', onClick: () => addNote(item) }
+      { label: 'Add Note', onClick: () => addNote(item) },
+      { divider: true },
+      { label: item.collapsed ? 'Expand Task' : 'Collapse Task', onClick: () => toggleSection(item) }
     ]);
   });
 
@@ -1142,6 +1167,14 @@ function setupDrag(el, item) {
   });
 }
 
+function isCollapsedAt(index) {
+  for (let i = index - 1; i >= 0; i--) {
+    if (items[i].collapsed) return true;
+    if (items[i].type === 'spacer') break;
+  }
+  return false;
+}
+
 function addTaskToSection(section) {
   const index = items.indexOf(section);
   if (index < 0 || section.type !== 'spacer') return;
@@ -1149,7 +1182,7 @@ function addTaskToSection(section) {
   let end = index + 1;
   while (end < items.length && items[end].type !== 'spacer') end++;
   const task = { id: ++idCounter, type: 'task', text: '', done: false };
-  if (section.collapsed) task.visibleWhileCollapsed = true;
+  if (isCollapsedAt(end)) task.visibleWhileCollapsed = true;
   items.splice(end, 0, task);
   pushHistory(before);
   render(task.id);
@@ -1166,8 +1199,7 @@ function addTask() {
   const b = cloneItems();
   const it = { id: ++idCounter, type: 'task', text, done: false };
   // Newly appended tasks remain visible until this section is toggled again.
-  const section = items.findLast(node => node.type === 'spacer');
-  if (section?.collapsed) it.visibleWhileCollapsed = true;
+  if (isCollapsedAt(items.length)) it.visibleWhileCollapsed = true;
   items.push(it);
   input.value = '';
   pushHistory(b);
