@@ -886,11 +886,11 @@ function mkSpacer(item) {
     e.preventDefault();
     e.stopPropagation();
     showItemContextMenu(e, [
+      { label: 'Add Task', onClick: () => addTaskToSection(item) },
       ...(hasHeader ? [{ label: 'Rename', onClick: () => editHeader(item, el.querySelector('.header-text')) }] : []),
       { label: hasHeader ? 'Remove Header' : 'Add Header', onClick: () => toggleHeader(item) },
       { divider: true },
-      { label: item.collapsed ? 'Expand section' : 'Collapse section', onClick: () => toggleSection(item) },
-      { label: 'Add Task', onClick: () => addTaskToSection(item) }
+      { label: item.collapsed ? 'Expand section' : 'Collapse section', onClick: () => toggleSection(item) }
     ]);
   });
 
