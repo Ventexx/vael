@@ -868,7 +868,7 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option, index):
         size = round(96 * self.parent().browser.entry_zoom / 100)
-        return QSize(size, size + 20)
+        return QSize(size, size + 32)
 
     def paint(self, painter, option, index):
         entry = index.data(Qt.UserRole)
@@ -876,15 +876,10 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
             return
         browser = self.parent().browser
         size = round(96 * browser.entry_zoom / 100)
-        tile = QRect(option.rect)
+        tile = QRect(option.rect).adjusted(0, 6, 0, -6)
         thumbnail = QRect(tile.x(), tile.y(), size, size)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        group = group_for(browser.window.config, entry.path)
-        if group:
-            color = QColor(group['color'])
-            color.setAlpha(70)
-            painter.fillRect(tile.adjusted(-3, -3, 3, 3), color)
         selected = bool(option.state & QStyle.State_Selected)
         painter.setPen(QPen(QColor('#00d4a0'), 2) if selected else Qt.NoPen)
         painter.setBrush(QColor('#174b42') if selected else QColor('#181818'))
@@ -911,35 +906,46 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
 
 
 class WorkspaceGrid(DragViewMixin, QListView):
-    def group_index_at(self, point):
-        index = self.indexAt(point)
-        if index.isValid():
-            return index
-        for row in range(self.model().rowCount()):
-            candidate = self.model().index(row, 0)
-            entry = candidate.data(Qt.UserRole)
-            if group_for(self.browser.window.config, entry.path) and self.visualRect(candidate).adjusted(-3, -3, 3, 3).contains(point):
-                return candidate
-        return QModelIndex()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # The view clips delegates to item rectangles. Paint the actual gaps
-        # here as well so adjacent group cards share one continuous color.
-        from PySide6.QtGui import QRegion
-        painter = QPainter(self.viewport())
+    def group_bands(self):
+        bands = []
         for row in range(self.model().rowCount()):
             index = self.model().index(row, 0)
             rect = self.visualRect(index)
-            if not rect.intersects(event.rect()):
-                continue
             entry = index.data(Qt.UserRole)
             group = group_for(self.browser.window.config, entry.path)
-            if group:
-                color = QColor(group['color'])
-                color.setAlpha(70)
-                painter.setClipRegion(QRegion(rect.adjusted(-3, -3, 3, 3)) - QRegion(rect))
-                painter.fillRect(rect.adjusted(-3, -3, 3, 3), color)
+            if not group:
+                continue
+            if bands and bands[-1][0]['id'] == group['id'] and bands[-1][1].top() == rect.top():
+                bands[-1][1] = bands[-1][1].united(rect)
+                bands[-1][2].append(rect.adjusted(0, 6, 0, -6))
+            else:
+                bands.append([group, QRect(rect), [rect.adjusted(0, 6, 0, -6)]])
+        return bands
+
+    def group_at(self, point):
+        for group, rect, tiles in self.group_bands():
+            if rect.adjusted(-3, 0, 3, 0).contains(point) and not any(tile.contains(point) for tile in tiles):
+                return group
+        return None
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        from PySide6.QtGui import QRegion
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing)
+        for group, rect, tiles in self.group_bands():
+            if not rect.intersects(event.rect()):
+                continue
+            band = rect.adjusted(-3, 0, 3, 0)
+            region = QRegion(band)
+            for tile in tiles:
+                region -= QRegion(tile)
+            painter.setClipRegion(region)
+            color = QColor(group['color'])
+            color.setAlpha(85)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(band).adjusted(0, 1, 0, -1), 7, 7)
         painter.end()
 
 
@@ -3922,7 +3928,7 @@ class WorkspaceBrowser(CoverBrowser):
         self.grid.setResizeMode(QListView.Adjust)
         self.grid.setMovement(QListView.Static)
         self.grid.setIconSize(QSize(96, 96))
-        self.grid.setGridSize(QSize(102, 122))
+        self.grid.setGridSize(QSize(102, 134))
         self.grid.setSpacing(0)
         self.grid.setUniformItemSizes(True)
         self.grid.setWordWrap(True)
@@ -3945,7 +3951,7 @@ class WorkspaceBrowser(CoverBrowser):
         self.entry_zoom = max(50, min(200, int(percent)))
         scale = self.entry_zoom / 100
         self.grid.setIconSize(QSize(round(96 * scale), round(96 * scale)))
-        self.grid.setGridSize(QSize(round(96 * scale) + 6, round(96 * scale) + 26))
+        self.grid.setGridSize(QSize(round(96 * scale) + 6, round(96 * scale) + 38))
         self.grid.doItemsLayout()
         self.grid.viewport().update()
 
@@ -3964,21 +3970,24 @@ class WorkspaceBrowser(CoverBrowser):
         return [str(p) for p in self.selected_paths() if p.is_dir()]
 
     def context_menu(self, view, point):
-        index = view.group_index_at(point)
-        if not index.isValid():
-            self.clear_selection()
-        if index.isValid() and not view.selectionModel().isSelected(index):
-            from PySide6.QtCore import QItemSelectionModel
-            view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
-        entry = index.data(Qt.UserRole) if index.isValid() else None
-        group = group_for(self.window.config, entry.path) if entry else None
-        selected_groups = {group_for(self.window.config, p)['id'] if group_for(self.window.config, p) else None for p in self.selected_paths()}
-        if group and selected_groups == {group['id']}:
+        group = view.group_at(point)
+        if group:
             menu = self.window.group_menu(group, self)
-            menu.exec(view.viewport().mapToGlobal(point))
-            menu.deleteLater()
         else:
-            self.action_menu(view.viewport().mapToGlobal(point))
+            index = view.indexAt(point)
+            if not index.isValid():
+                self.clear_selection()
+            elif not view.selectionModel().isSelected(index):
+                from PySide6.QtCore import QItemSelectionModel
+                view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
+            menu = self.build_action_menu()
+            entry = index.data(Qt.UserRole) if index.isValid() else None
+            group = group_for(self.window.config, entry.path) if entry else None
+            if group:
+                menu.addSeparator()
+                self.window.populate_group_menu(menu, group)
+        menu.exec(view.viewport().mapToGlobal(point))
+        menu.deleteLater()
 
     def _update_empty_state(self):
         self.tabs.hide()
@@ -6080,13 +6089,18 @@ class Window(QMainWindow):
 
     def group_menu(self, group, parent):
         menu = QMenu(parent)
+        self.populate_group_menu(menu, group)
+        return menu
+
+    def populate_group_menu(self, menu, group):
+        initial_count = len(menu.actions())
         notes = self.config['notes']
         for note in notes:
             if note['id'] in group['notes']:
                 action = menu.addAction(note['title'])
                 action.setToolTip('Copy this note’s text')
                 action.triggered.connect(lambda checked=False, text=note['body']: QApplication.clipboard().setText(text))
-        if menu.actions():
+        if len(menu.actions()) > initial_count:
             menu.addSeparator()
         if notes:
             assignments = CheckMenu('Assign Notes', menu)
@@ -6098,6 +6112,7 @@ class Window(QMainWindow):
                 action.toggled.connect(lambda checked, key=note['id']: self.assign_note(group, key, checked))
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
         return menu
+
 
     def reconcile_references(self, results):
         # Moves and renames update pins, shelf entries and browser paths.
