@@ -29,9 +29,20 @@ def new_group_color(used):
     # Random hues with a restrained saturation; no duplicate within a folder.
     import random
     import colorsys
+    used_hues = [colorsys.rgb_to_hsv(*(int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)))[0] for color in used]
+    candidates = []
+    for step in range(1440):
+        hue = step / 1440
+        color = '#' + ''.join(f'{round(c * 255):02x}' for c in colorsys.hsv_to_rgb(hue, .48, .72))
+        if color not in used:
+            distance = min((min(abs(hue - other), 1 - abs(hue - other)) for other in used_hues), default=1)
+            candidates.append((distance, color))
+    if candidates:
+        best = max(distance for distance, color in candidates)
+        return random.choice([color for distance, color in candidates if distance >= best * .8])
+    # Very large folders can exhaust the hue palette; vary saturation as well.
     while True:
-        rgb = colorsys.hsv_to_rgb(random.random(), .48, .72)
-        color = '#' + ''.join(f'{round(c * 255):02x}' for c in rgb)
+        color = '#' + ''.join(f'{round(c * 255):02x}' for c in colorsys.hsv_to_rgb(random.random(), random.uniform(.35, .65), .72))
         if color not in used:
             return color
 
@@ -39,17 +50,27 @@ def new_group_color(used):
 def organize_groups(config):
     """Keep groups folder-local after moves, retaining their assigned notes."""
     import uuid
-    result, colors = [], {}
+    result, colors, fragments = [], {}, {}
     for group in config.get('groups', []):
-        folders = {}
+        family = group.get('family', group['id'])
         for member in dict.fromkeys(group['members']):
-            folders.setdefault(str(Path(member).parent), []).append(member)
-        for index, (folder, members) in enumerate(folders.items()):
-            used = colors.setdefault(folder, set())
-            color = group['color'] if group['color'] not in used else new_group_color(used)
-            used.add(color)
-            result.append(dict(group, id=group['id'] if index == 0 else uuid.uuid4().hex,
-                               members=members, color=color))
+            key = (family, str(Path(member).parent))
+            if key not in fragments:
+                fragments[key] = dict(group, family=family, members=[], notes=list(group['notes']))
+            fragment = fragments[key]
+            if member not in fragment['members']:
+                fragment['members'].append(member)
+            fragment['notes'] = list(dict.fromkeys(fragment['notes'] + group['notes']))
+    ids = set()
+    for (family, folder), group in fragments.items():
+        used = colors.setdefault(folder, set())
+        if group['color'] in used:
+            group['color'] = new_group_color(used)
+        used.add(group['color'])
+        if group['id'] in ids:
+            group['id'] = uuid.uuid4().hex
+        ids.add(group['id'])
+        result.append(group)
     config['groups'] = result
 
 
@@ -890,7 +911,36 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
 
 
 class WorkspaceGrid(DragViewMixin, QListView):
-    pass
+    def group_index_at(self, point):
+        index = self.indexAt(point)
+        if index.isValid():
+            return index
+        for row in range(self.model().rowCount()):
+            candidate = self.model().index(row, 0)
+            entry = candidate.data(Qt.UserRole)
+            if group_for(self.browser.window.config, entry.path) and self.visualRect(candidate).adjusted(-3, -3, 3, 3).contains(point):
+                return candidate
+        return QModelIndex()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # The view clips delegates to item rectangles. Paint the actual gaps
+        # here as well so adjacent group cards share one continuous color.
+        from PySide6.QtGui import QRegion
+        painter = QPainter(self.viewport())
+        for row in range(self.model().rowCount()):
+            index = self.model().index(row, 0)
+            rect = self.visualRect(index)
+            if not rect.intersects(event.rect()):
+                continue
+            entry = index.data(Qt.UserRole)
+            group = group_for(self.browser.window.config, entry.path)
+            if group:
+                color = QColor(group['color'])
+                color.setAlpha(70)
+                painter.setClipRegion(QRegion(rect.adjusted(-3, -3, 3, 3)) - QRegion(rect))
+                painter.fillRect(rect.adjusted(-3, -3, 3, 3), color)
+        painter.end()
 
 
 class DetailView(DragViewMixin, QTableView):
@@ -3914,7 +3964,7 @@ class WorkspaceBrowser(CoverBrowser):
         return [str(p) for p in self.selected_paths() if p.is_dir()]
 
     def context_menu(self, view, point):
-        index = view.indexAt(point)
+        index = view.group_index_at(point)
         if not index.isValid():
             self.clear_selection()
         if index.isValid() and not view.selectionModel().isSelected(index):
@@ -6058,6 +6108,8 @@ class Window(QMainWindow):
                 old, new = value.target, value.source if value.action == 'move' else None
             elif isinstance(value, Path) and not Path(old_text).exists():
                 old, new = Path(old_text), value
+            elif value is None and Path(old_text).is_absolute() and not Path(old_text).exists():
+                old, new = Path(old_text), None
             else:
                 continue
             def mapped(text):
