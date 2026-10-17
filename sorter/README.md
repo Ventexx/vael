@@ -74,13 +74,23 @@ Drop onto a visible folder to target it, or onto empty space to use the current 
 
 Use **⋯ → Entry zoom** to choose 50–200% sizes independently in each explorer. In the source explorer, only entries inside folders scale; folder headers remain unchanged. Workspace zoom scales file entries and folder icons together. Zoom levels are remembered.
 
-The **⋯** menu contains Select All, Invert Selection, and Entry Zoom. Refresh and Search remain dedicated buttons beside it. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste (when the clipboard contains files) and New Folders appear when right-clicking empty workspace space, not selected files. Batch Rename appears only for multiple selected items; a single item gets Rename. Copy to Active Workspace Folder appears only in the source explorer. Open Folder in Explorer opens the selected folder itself, or the parent of a selected file. **Delete** uses the system trash. Undo remains a separate button.
+The **⋯** menu contains Select All, Invert Selection, and Entry Zoom. In the workspace it also contains **Notes**. Refresh and Search remain dedicated buttons beside it. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste (when the clipboard contains files) and New Folders appear when right-clicking empty workspace space, not selected files. Batch Rename appears only for multiple selected items; a single item gets Rename. Copy to Active Workspace Folder appears only in the source explorer. Open Folder in Explorer opens the selected folder itself, or the parent of a selected file. **Delete** uses the system trash. Undo remains a separate button.
 
 **Move to Folder** opens a folder-only dialog showing the complete workspace hierarchy. Select a folder, then choose **Save** or **Cancel**. It does not open the operating system's folder picker.
 
 When a selected folder includes other selected descendants, transfer actions process the parent only. Copying a folder includes its ordinary files and subfolders. Individual files are independent: selecting an image does not automatically select accompanying JSON or text files. Select those too, or copy the containing folder.
 
 **Batch rename** previews each new name before applying it. Combine literal find/replace, prefix, suffix, and sequential numbering; file extensions are preserved. Invalid, duplicate, or existing destination names prevent applying the preview.
+
+### groups & notes
+
+Select two or more files in one workspace folder, then right-click → **Group selected entries**. Groups are visual collections: no folder is created and no file is changed. Folders stay first, followed by groups, then ordinary files. Each group stays together and sorts its members alphabetically. The gaps between grouped cards share a subtle, randomly chosen rainbow color; colors are distinct within a folder and chosen to remain visually distinguishable. Search can hide nonmatching members without changing the group.
+
+Right-click a grouped card or its colored gap for the group menu. **Dissolve Group** returns its members to ordinary sorting without deleting anything. Selecting entries from different groups or ordinary files lets you group that selection anew. Groups persist between launches. Renames and moves made through Sorter update memberships; moving part of a group separates it by destination folder, and undoing that move reunites the fragments. Copies are ordinary entries. External file moves cannot be tracked automatically.
+
+Open **workspace ⋯ → Notes** to read the reusable text library. To add, edit, or delete entries, **right-click Notes → Manage Notes…**. Each note has a unique title and a plain-text body. **Save** applies edits; **Cancel** discards them. This is the only management entry point; the read view does not allow changes.
+
+When notes exist, a group’s context menu offers **Assign Notes**. Tick any number of titles; the menu stays open while you choose. Assigned titles appear at the top of the group menu, above a separator and the group controls. Click a title to copy its entire body to the system clipboard. Editing a note updates it for all assigned groups; deleting it removes those assignments. Groups and notes are local metadata in `.local/settings.json`, separate from source content and shared naming profiles.
 
 ### the editing boundary
 
