@@ -3476,6 +3476,11 @@ class CoverBrowser(ImageBrowser):
 
     def options_menu(self):
         menu = QMenu(self)
+        if self.editable:
+            action = QWidgetAction(menu)
+            action.setDefaultWidget(NotesButton(self.window, menu))
+            menu.addAction(action)
+            menu.addSeparator()
         menu.addAction('Select all visible items', self.select_all)
         menu.addAction('Invert visible selection', self.invert_selection)
         zoom = menu.addMenu('Entry zoom')
@@ -4178,6 +4183,156 @@ class Shelf(QWidget):
 # ========================================================================
 # SETTINGS AND BATCH RENAME DIALOGS
 # ========================================================================
+class CheckMenu(QMenu):
+    """Keep the assignment menu open while several checkboxes are toggled."""
+
+    def mouseReleaseEvent(self, event):
+        action = self.actionAt(event.position().toPoint())
+        if event.button() == Qt.LeftButton and action and action.isCheckable() and action.isEnabled():
+            action.trigger()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        action = self.activeAction()
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter) and action and action.isCheckable():
+            action.trigger()
+            return
+        super().keyPressEvent(event)
+
+
+class NotesButton(QToolButton):
+    def __init__(self, window, menu):
+        super().__init__(menu)
+        self.setText('Notes')
+        self.setToolTip('Read reusable notes. Right-click to manage titles and text.')
+        self.setStyleSheet('QToolButton { text-align: left; padding: 6px 20px; border: none; } QToolButton:hover { background: #252525; }')
+        self.clicked.connect(lambda: (menu.close(), window.show_notes(False)))
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda point: self.manage(window, menu, point))
+
+    def manage(self, window, parent_menu, point):
+        menu = QMenu(self)
+        action = menu.addAction('Manage Notes…')
+        chosen = menu.exec(self.mapToGlobal(point))
+        menu.deleteLater()
+        if chosen == action:
+            parent_menu.close()
+            window.show_notes(True)
+
+
+class NotesDialog(QDialog):
+    """Read-only by default; edits are a transaction committed with Save."""
+
+    def __init__(self, window, editable=False):
+        super().__init__(window)
+        self.setWindowTitle('Manage Notes' if editable else 'Notes')
+        self.resize(580, 420)
+        self.notes = copy.deepcopy(window.config['notes'])
+        self.editable = editable
+        self.current_id = None
+        layout = QVBoxLayout(self)
+        hint = QLabel('Reusable text for groups. Changes apply to every assigned group.' if editable else 'Select a note to read it. Right-click Notes in the workspace menu to manage entries.')
+        hint.setWordWrap(True)
+        hint.setObjectName('hint')
+        layout.addWidget(hint)
+        body = QHBoxLayout()
+        self.list = QListWidget()
+        self.list.setMaximumWidth(200)
+        body.addWidget(self.list)
+        editor = QVBoxLayout()
+        self.title = QLineEdit()
+        self.title.setPlaceholderText('Title')
+        self.title.setReadOnly(not editable)
+        self.body = QPlainTextEdit()
+        self.body.setPlaceholderText('Text to copy when this note is chosen on a group')
+        self.body.setReadOnly(not editable)
+        editor.addWidget(self.title)
+        editor.addWidget(self.body)
+        body.addLayout(editor, 1)
+        layout.addLayout(body, 1)
+        controls = QHBoxLayout()
+        if editable:
+            add = QPushButton('Add')
+            add.clicked.connect(self.add_note)
+            delete = QPushButton('Delete')
+            delete.clicked.connect(self.delete_note)
+            controls.addWidget(add)
+            controls.addWidget(delete)
+        else:
+            copy_button = QPushButton('Copy text')
+            copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.body.toPlainText()))
+            controls.addWidget(copy_button)
+        controls.addStretch()
+        layout.addLayout(controls)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel if editable else QDialogButtonBox.Close)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.list.currentItemChanged.connect(self.select_note)
+        self.title.textEdited.connect(self.update_title)
+        self.body.textChanged.connect(self.update_body)
+        self.populate()
+
+    def current_note(self):
+        return next((note for note in self.notes if note['id'] == self.current_id), None)
+
+    def populate(self, selected=None):
+        self.list.blockSignals(True)
+        self.list.clear()
+        for note in self.notes:
+            item = QListWidgetItem(note['title'])
+            item.setData(Qt.UserRole, note['id'])
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        row = next((i for i, note in enumerate(self.notes) if note['id'] == selected), 0)
+        if self.notes:
+            self.list.setCurrentRow(row)
+        else:
+            self.select_note(None)
+
+    def select_note(self, item, previous=None):
+        self.current_id = item.data(Qt.UserRole) if item else None
+        note = self.current_note()
+        self.title.setText(note['title'] if note else '')
+        self.body.blockSignals(True)
+        self.body.setPlainText(note['body'] if note else '')
+        self.body.blockSignals(False)
+        self.title.setEnabled(note is not None)
+        self.body.setEnabled(note is not None)
+
+    def update_title(self, text):
+        note = self.current_note()
+        if self.editable and note:
+            note['title'] = text
+            self.list.currentItem().setText(text or '(Untitled)')
+
+    def update_body(self):
+        note = self.current_note()
+        if self.editable and note:
+            note['body'] = self.body.toPlainText()
+
+    def add_note(self):
+        note = dict(id=uuid.uuid4().hex, title='New note', body='')
+        self.notes.append(note)
+        self.populate(note['id'])
+        self.title.setFocus()
+        self.title.selectAll()
+
+    def delete_note(self):
+        self.notes = [note for note in self.notes if note['id'] != self.current_id]
+        self.populate()
+
+    def save(self):
+        titles = [note['title'].strip() for note in self.notes]
+        if any(not title for title in titles) or len({t.casefold() for t in titles}) != len(titles):
+            QMessageBox.warning(self, 'Note titles', 'Give each note a non-empty, unique title.')
+            return
+        for note, title in zip(self.notes, titles):
+            note['title'] = title
+        self.accept()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config, parent):
         super().__init__(parent)
@@ -5857,8 +6012,40 @@ class Window(QMainWindow):
         self.config['groups'] = [g for g in self.config['groups'] if g['id'] != group['id']]
         self.groups_changed()
 
+    def show_notes(self, editable=False):
+        dialog = NotesDialog(self, editable)
+        if self.exec_dialog(dialog) == QDialog.Accepted and editable:
+            self.config['notes'] = dialog.notes
+            existing = {note['id'] for note in dialog.notes}
+            for group in self.config['groups']:
+                group['notes'] = [key for key in group['notes'] if key in existing]
+            self.persist()
+        dialog.deleteLater()
+
+    def assign_note(self, group, note_id, checked):
+        ids = set(group['notes'])
+        ids.add(note_id) if checked else ids.discard(note_id)
+        group['notes'] = sorted(ids)
+        self.persist()
+
     def group_menu(self, group, parent):
         menu = QMenu(parent)
+        notes = self.config['notes']
+        for note in notes:
+            if note['id'] in group['notes']:
+                action = menu.addAction(note['title'])
+                action.setToolTip('Copy this note’s text')
+                action.triggered.connect(lambda checked=False, text=note['body']: QApplication.clipboard().setText(text))
+        if menu.actions():
+            menu.addSeparator()
+        if notes:
+            assignments = CheckMenu('Assign Notes', menu)
+            menu.addMenu(assignments)
+            for note in notes:
+                action = assignments.addAction(note['title'])
+                action.setCheckable(True)
+                action.setChecked(note['id'] in group['notes'])
+                action.toggled.connect(lambda checked, key=note['id']: self.assign_note(group, key, checked))
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
         return menu
 
