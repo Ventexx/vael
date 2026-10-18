@@ -6,7 +6,6 @@
   "license": "CC-BY-NC-4.0",
   "main": "main.js",
   "scripts": {
-    "test": "node --test",
     "start": "electron .",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux"
