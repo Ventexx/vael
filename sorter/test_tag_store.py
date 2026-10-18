@@ -101,6 +101,31 @@ class StoreTests(unittest.TestCase):
         self.store.remap(moved, folder)
         self.assertTrue(self.store.has_tags(folder / 'image.png'))
 
+    def test_recreated_folder_does_not_inherit_association(self):
+        folder = self.root / 'folder'
+        folder.mkdir()
+        self.store.associate(folder, 'old_tag')
+        # Keep the old directory alive to rule out filesystem ID reuse.
+        folder.rename(self.base / 'outside')
+        folder.mkdir()
+        self.assertEqual(self.store.folder_text(folder), '')
+        self.store.health([self.root])
+        self.assertEqual(self.store.data['folders'], {})
+
+    def test_corrupt_json_is_not_overwritten(self):
+        self.store.filename.write_text('{broken', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            TagStore(self.store.filename)
+        self.assertEqual(self.store.filename.read_text(), '{broken')
+
+    def test_restart_restores_metadata(self):
+        image = self.root / 'one.png'
+        self.tagged(image)
+        self.store.associate(self.root, 'parent_tag')
+        reopened = TagStore(self.store.filename)
+        reopened.health([self.root])
+        self.assertEqual(reopened.copy_text(image, [self.root]), 'parent_tag blue_hair solo')
+
 
 if __name__ == '__main__':
     unittest.main()

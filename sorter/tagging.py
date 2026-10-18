@@ -46,6 +46,7 @@ class Tagging(QObject):
         self.summary.setWordWrap(True)
         body.addWidget(self.summary)
         self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
         body.addWidget(self.progress)
         self.current = QPlainTextEdit()
         self.current.setReadOnly(True)
@@ -156,7 +157,8 @@ class Tagging(QObject):
         elapsed = max(0, int((state.get('ended') or time.monotonic()) - state['started'])) if state['started'] else 0
         self.summary.setText(f'{phase}\nCompleted: {done} / {total}    Remaining: {max(0, total - done)}\nElapsed: {elapsed}s')
         self.current.setPlainText(state['current'])
-        self.progress.setRange(0, total if total else (0 if self.busy else 1))
+        loading = phase.startswith(('Loading', 'Downloading'))
+        self.progress.setRange(0, 0 if loading else (total if total else (0 if self.busy else 1)))
         self.progress.setValue(done if total else 0)
         self.stop.setEnabled(self.busy)
         self.check.setEnabled(not self.busy and self.store is not None and not self.window.operation_task)

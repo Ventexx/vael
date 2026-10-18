@@ -6478,6 +6478,9 @@ class Window(QMainWindow):
                 if previous is not None and previous != stamp:
                     browser.refresh()
                     changed = True
+            except FileNotFoundError:
+                if self.folder_stamps.pop(str(browser.current), None) is not None:
+                    changed = True
             except OSError:
                 pass
         if changed and not self.tagging.busy:
