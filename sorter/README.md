@@ -48,6 +48,139 @@ Close sorter and delete its folder, including `venv` and `.local`. Your source f
 
 ## the workspace
 
+### Auto-tagging setup
+
+Auto-tagging is optional. Sorter ships its integration and metadata manager, but
+**does not distribute a WD14 backend, model weights, tag vocabulary, or Python
+environment**. The entire `sorter/wd14-tagger/` directory is local-only and ignored
+by Git. Third-party software and models retain their upstream terms; Vael's
+project license does not relicense them. No third-party license or model files
+are bundled in this repository.
+
+To use your existing standalone WD14 tagger:
+
+1. Put the compatible `tagger.py` and its `requirements.txt` in
+   `sorter/wd14-tagger/`. Reuse the standalone backend supplied separately for
+   this integration; a stock Kohya training script is **not** a drop-in backend.
+   Users of a fresh GitHub checkout must supply this local backend themselves.
+2. In a terminal opened in `sorter`, create its separate environment and install
+   the backend dependencies:
+
+   ```powershell
+   python -m venv wd14-tagger\.venv
+   .\wd14-tagger\.venv\Scripts\python.exe -m pip install -r wd14-tagger\requirements.txt
+   ```
+
+3. Keep your existing `wd14-tagger/model-cache/` if you have already downloaded
+   the model. The supported backend uses ONNX and
+   `SmilingWolf/wd-v1-4-convnextv2-tagger-v2`, release `v2.0`.
+4. Run Sorter normally. Select images or folders and choose **Auto-Tag Image/s**.
+   The worker starts silently, without a console or the standalone tagger window.
+   The model stays loaded for later jobs until Sorter exits or model settings change.
+5. Optionally click the bottom-right tagger status, open **Settings**, and select
+   a folder containing both `model.onnx` and its matching `selected_tags.csv`.
+   This bypasses downloading and supports offline use. Otherwise the compatible
+   backend reuses its cache, or downloads the model on first use. That download
+   requires internet access; images are processed locally.
+
+Use the same general and character thresholds as your Kohya setup if you want
+similar results. The initial defaults are 0.35 and 0.85. Settings are saved when
+you start a tagging job. Lower thresholds return more tags and can include more
+mistakes. Names come from the model's vocabulary, so review site-specific tags
+before posting. Model information: [SmilingWolf WD14 ConvNextV2](https://huggingface.co/SmilingWolf/wd-v1-4-convnextv2-tagger-v2).
+
+Backend authors can provide a compatible local implementation with this interface:
+
+```python
+class Tagger:
+    def __init__(self, model_dir=None, progress=lambda text: None):
+        ...
+
+    def tags(self, path, general, character, excluded, separator):
+        # Return one string of tags separated by separator; raise on failure.
+        ...
+```
+
+`progress` is optional and reports human-readable loading/download phases.
+`model_dir` is only supplied when the user selects an existing model folder.
+The backend must support this interface, be safe to import without opening a UI,
+and leave all tag persistence to Sorter. Backend installation and model downloads
+remain the user's local setup, subject to the respective upstream terms.
+
+### Auto-tagging, status and errors
+
+**Auto-Tag Image/s** appears for ordinary images, folders, or selections containing
+only those types. It is hidden for mixed selections containing videos, GIFs,
+documents or other unsupported files. PNG, JPG/JPEG, WebP, BMP, TIFF and AVIF are
+eligible; actual decoding requires backend support. Animated or multipage image
+formats use the backend's first-frame policy. GIF is a separate media type and
+is not queued. Folder scans include every subfolder regardless of thumbnail
+loading, collapsed sections or search filters. Links/junctions and Sorter's private
+operation backup/staging entries are excluded. Overlapping selections are deduplicated.
+
+The queue processes one image at a time. **Any scan, image, model, or tag-save
+error stops the queue**, preserving results already saved. No supported images
+also opens an error notification. Choose the selection again to start a new job;
+explicitly tagging an already-tagged image refreshes its generated tags.
+
+The clickable status at the bottom right is separate from the file-operation
+status on the left. Its window contains **Progress**, **Errors**, and **Settings**.
+Progress shows the current phase/image, completed and remaining counts, elapsed
+time, **Stop after current image**, and **Check tag health**. Loading/downloading
+uses an indeterminate progress indicator when no exact progress is available.
+Errors automatically open this same window with the Errors tab selected. Up to
+200 recent error entries are kept for the current session; **Clear errors** clears
+that list. Closing this window does not cancel the queue.
+
+Only one tagging, verification, or health-check job runs at a time. Browsing stays
+available; file operations and changing configured roots wait until the job ends.
+The stop button finishes and saves the current inference, then stops before the
+next image. During scanning/health checks it stops at the next check point.
+Closing Sorter terminates its worker and keeps previously saved results.
+
+**Copy Tags** appears directly below Auto-Tag for one tagged image. Sorter verifies
+the image content before copying, then places space-separated tags on the clipboard.
+Replacing an image under the same filename never intentionally reuses the old
+content's tags. An empty generated list is a valid result; associated folder tags
+can still be copied.
+
+### Folder tag associations and storage
+
+Select one folder and choose **Associate Tags**. Enter tags in the text field,
+then **Save** or **Cancel**. Opening it again loads the saved text for editing.
+Saving an empty field removes the association. Separate tags with spaces, commas
+or newlines; use underscores within a tag name.
+
+When copying an image's tags, Sorter places associations from outer folders first,
+then inner folders, then generated image tags. Repeated exact tags appear only
+once, at their first position. Associations apply throughout all subfolders and
+are calculated when copying, so editing an association or moving an image takes
+effect without rerunning the model. Source-folder associations do not follow a
+copied image into an unrelated workspace folder; its destination folders apply.
+
+All image tags and folder associations live in `sorter/.local/tags.json`. Image
+records use SHA-256 content fingerprints, with separate path records; identical
+copies share generated tags. Changes to image bytes require tagging again. Folder
+records use filesystem identity plus their current path, so application renames,
+moves and undo retain associations. Ordinary external folder renames can be
+reconciled on filesystems providing stable identities; external cross-drive moves
+cannot reliably retain folder identity and require reassociation.
+
+Every startup checks tag health in the background. It scans the configured source
+folders and sorting workspace before removing unreferenced tags, finds moved or
+copied images by content, and removes associations for missing folders. Full
+content verification can take time with large libraries. Application file
+operations also trigger reconciliation; changes detected in visible folders
+trigger another check. Use **Check tag health** for changes elsewhere while the
+app is open. Unavailable or inaccessible roots retain their records and report
+an error rather than being treated as deleted. Removing a root from Settings
+removes records no longer represented in any remaining root at the next check.
+
+Writes use a temporary file and atomic replacement. A damaged or unsupported
+`tags.json` is reported and preserved, not silently reset. Back up this file if
+your manual folder associations are important. User data, model caches, backend
+files and environments are excluded from Git; do not force-add them.
+
 ### library above
 
 The upper explorer uses Cover’s window styling, folder tabs, collapsible headers, portrait cards, spacing, scrolling, and in-window image viewer. Each configured source gets a tab. In Settings, edit the **Display name** cell beside its **Folder path** to customize the tab label without renaming the folder. Use the arrow buttons to reorder source rows. Clear the display name to use its original folder name. Click a folder header to expand it; thumbnails load as folders become visible. Source folders start with collapsed children, as in Cover. Temporarily hidden tabs can be restored from the tab controls.
