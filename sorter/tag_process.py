@@ -11,9 +11,12 @@ class TagProcess:
         self.app_dir = Path(app_dir)
         self.process = None
         self.lock = threading.Lock()
+        self.closed = False
 
     def start(self):
         with self.lock:
+            if self.closed:
+                raise RuntimeError('Tagging worker is shutting down.')
             if self.process and self.process.poll() is None:
                 return
             bundle = self.app_dir / 'wd14-tagger'
@@ -58,8 +61,9 @@ class TagProcess:
             self.close()
             raise
 
-    def close(self):
+    def close(self, permanent=False):
         with self.lock:
+            self.closed = self.closed or permanent
             process, self.process = self.process, None
             if process:
                 if process.poll() is None:

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
+from tagging import Tagging
 DATA_DIR = APP_DIR / ".local"
 DEFAULTS = {
     "sources": [], "source_names": {}, "sort_root": "", "pins": [],
@@ -5800,6 +5801,8 @@ class Window(QMainWindow):
         self.cancel_button.clicked.connect(lambda: self.operation_task.cancel.set() if self.operation_task else None)
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
+        self.tagging = Tagging(self, APP_DIR)
+        operation_bar.addWidget(self.tagging.button)
         b.addLayout(operation_bar)
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
@@ -5946,6 +5949,9 @@ class Window(QMainWindow):
             self._modal_dim_overlay.hide_overlay()
 
     def settings(self):
+        if self.tagging.busy:
+            self.tagging.error('Finish or stop the tagging job / health check before changing folders.')
+            return
         if self.operation_task:
             self.notice('Wait for the current file operation before changing settings.')
             return
@@ -5974,6 +5980,7 @@ class Window(QMainWindow):
                 else:
                     browser.refresh()
             self.update_target_label()
+            self.tagging.health()
 
     def copy_selection(self, browser, cut):
         paths = browser.selected_paths()
@@ -5998,6 +6005,9 @@ class Window(QMainWindow):
             self.clip_cut = False
 
     def run_operations(self, title, work):
+        if self.tagging.busy:
+            self.tagging.error('Finish or stop the tagging job / health check before changing files. Browsing is still available.')
+            return
         if self.operation_task:
             self.notice('A file operation is already running. You can keep browsing or stop after the current item.')
             return
@@ -6481,6 +6491,7 @@ class Window(QMainWindow):
             self.notice('A file operation is still running. Use “Stop after current item” and close once it finishes.')
             event.ignore()
             return
+        self.tagging.shutdown()
         self.poll_timer.stop()
         self._img_viewer.close_viewer()
         for browser in self.browsers:
