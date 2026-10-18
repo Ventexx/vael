@@ -4242,6 +4242,9 @@ class Shelf(QWidget):
             self.list.clearSelection()
             item.setSelected(True)
         menu = QMenu(self)
+        paths = [Path(entry.data(Qt.UserRole)) for entry in self.list.selectedItems()]
+        self.window.tagging.add_image_actions(menu, paths)
+        self.window.tagging.add_folder_action(menu, paths)
         menu.addAction('Copy to Active Workspace Folder', self.copy_to_target)
         menu.addAction('Remove selected references', self.remove_selected)
         menu.addAction('Clear shelf', self.clear)

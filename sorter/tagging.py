@@ -21,6 +21,7 @@ class Tagging(QObject):
         self.process = TagProcess(app_dir)
         self.process_config = None
         self.errors = []
+        self.folder_drafts = {}
         self.store = None
         self.load_error = None
         self.state = dict(phase='Ready', done=0, total=0, current='', started=None, ended=None)
@@ -320,7 +321,7 @@ class Tagging(QObject):
         if not self.available():
             return
         try:
-            initial = self.store.folder_text(path)
+            initial = self.folder_drafts.get(canonical(path), self.store.folder_text(path))
         except Exception as error:
             self.error(f'{path}\n{error}')
             return
@@ -339,9 +340,14 @@ class Tagging(QObject):
         def save():
             try:
                 self.store.associate(path, text.toPlainText())
+                self.folder_drafts.pop(canonical(path), None)
                 editor.accept()
             except Exception as error:
-                self.error(f'Could not save folder tags for {path}: {error}')
+                # End the modal editor before opening the shared error window.
+                self.folder_drafts[canonical(path)] = text.toPlainText()
+                editor.reject()
+                self.error(f'Could not save folder tags for {path}: {error}\n'
+                           'Your draft is kept for this session. Reopen Associate Tags to retry.')
         buttons.accepted.connect(save)
         layout.addWidget(buttons)
         self.window.exec_dialog(editor)
