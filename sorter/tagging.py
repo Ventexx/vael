@@ -132,7 +132,6 @@ class Tagging(QObject):
 
     def error(self, text):
         self.errors.append(f'{time.strftime("%H:%M:%S")} — {text}')
-        self.errors = self.errors[-200:]
         self.error_text.setPlainText('\n\n'.join(self.errors))
         self.tabs.setTabText(1, f'Errors ({len(self.errors)})')
         if not self.closing:

@@ -128,8 +128,8 @@ status on the left. Its window contains **Progress**, **Errors**, and **Settings
 Progress shows the current phase/image, completed and remaining counts, elapsed
 time, **Stop after current image**, and **Check tag health**. Loading/downloading
 uses an indeterminate progress indicator when no exact progress is available.
-Errors automatically open this same window with the Errors tab selected. Up to
-200 recent error entries are kept for the current session; **Clear errors** clears
+Errors automatically open this same window with the Errors tab selected. All
+error entries are kept for the current session; **Clear errors** clears
 that list. Closing this window does not cancel the queue.
 
 Only one tagging, verification, or health-check job runs at a time. Browsing stays
