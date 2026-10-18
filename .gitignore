@@ -45,6 +45,13 @@ cover/workflows_config.json
 # sorter local preferences, flags, and disposable catalog
 sorter/.local/
 
+# Optional local WD14 installation (backend, weights, vocabulary and environment).
+# This third-party/local bundle is not distributed under Vael's project license.
+sorter/wd14-tagger/
+sorter/**/model-cache/
+sorter/**/*.onnx
+sorter/**/selected_tags.csv
+
 # === OS cruft ===
 .DS_Store
 Thumbs.db
