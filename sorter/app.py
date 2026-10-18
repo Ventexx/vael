@@ -3753,6 +3753,7 @@ class CoverBrowser(ImageBrowser):
     def build_action_menu(self):
         paths = self.selected_paths()
         menu = QMenu(self)
+        self.window.tagging.add_image_actions(menu, paths)
         folders = list(self.selected_folder_paths())
         if folders and not self.editable:
             menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))

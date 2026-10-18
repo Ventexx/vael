@@ -280,3 +280,32 @@ class Tagging(QObject):
             self.task.cancel.set()
         self.process.close(permanent=True)
         self.dialog.hide()
+
+    def add_image_actions(self, menu, paths):
+        if not paths or any(linked(p) or not (p.is_dir() or
+                (p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)) for p in paths):
+            return
+        if any(not any(within(p, root) for root in self.roots()) for p in paths):
+            return
+        menu.addSeparator()
+        action = menu.addAction('Auto-Tag Image/s', lambda: self.start(list(paths)))
+        action.setEnabled(not self.busy and not self.window.operation_task)
+        if len(paths) == 1 and paths[0].is_file() and self.store and self.store.has_tags(paths[0]):
+            action = menu.addAction('Copy Tags', lambda: self.copy_tags(paths[0]))
+            action.setEnabled(not self.busy and not self.window.operation_task)
+
+    def copy_tags(self, path):
+        if not self.available():
+            return
+        roots = self.roots()
+        self._begin('Verifying image for Copy Tags')
+        def execute(task):
+            return self.store.copy_text(path, roots, task.cancel)
+        def finished(text):
+            if self.closing:
+                return
+            QApplication.clipboard().setText(text)
+            self._finish(dict(phase='Tags copied', current=str(path)))
+        self.task = self.window.jobs.start(execute, finished,
+            lambda error: self._finish(dict(phase='Copy failed', errors=[f'{path}\n{error}'])))
+        self.render()
