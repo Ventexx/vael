@@ -6042,6 +6042,7 @@ class Window(QMainWindow):
             self.undo_button.setEnabled(True)
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
+            self.tagging.health()
             for browser in (self.sorter, self.second):
                 if browser.current and not browser.current.is_dir():
                     browser.current = self.service.root if browser.editable else browser.current.parent
@@ -6138,6 +6139,11 @@ class Window(QMainWindow):
                 if path.is_relative_to(old):
                     return str(new / path.relative_to(old)) if new else None
                 return text
+            if self.tagging.store is not None:
+                try:
+                    self.tagging.store.remap(old, new)
+                except Exception as exc:
+                    self.tagging.error('Could not update tag locations: ' + str(exc))
             for group in self.config['groups']:
                 group['members'] = [mapped(p) for p in group['members'] if mapped(p)]
             for key in ('pins',):
@@ -6458,6 +6464,7 @@ class Window(QMainWindow):
     def poll_folders(self):
         if self.operation_task or QApplication.activeModalWidget():
             return
+        changed = False
         for browser in self.browsers:
             if not browser.isVisible() or not browser.current:
                 continue
@@ -6467,8 +6474,11 @@ class Window(QMainWindow):
                 self.folder_stamps[str(browser.current)] = stamp
                 if previous is not None and previous != stamp:
                     browser.refresh()
+                    changed = True
             except OSError:
                 pass
+        if changed and not self.tagging.busy:
+            self.tagging.health()
 
     def restore_layout(self):
         state = self.config.get('layout', {})
