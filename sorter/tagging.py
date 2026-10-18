@@ -309,3 +309,40 @@ class Tagging(QObject):
         self.task = self.window.jobs.start(execute, finished,
             lambda error: self._finish(dict(phase='Copy failed', errors=[f'{path}\n{error}'])))
         self.render()
+
+    def add_folder_action(self, menu, paths):
+        if (len(paths) == 1 and paths[0].is_dir() and not linked(paths[0])
+                and any(within(paths[0], root) for root in self.roots())):
+            action = menu.addAction('Associate Tags', lambda: self.associate(paths[0]))
+            action.setEnabled(not self.busy and not self.window.operation_task)
+
+    def associate(self, path):
+        if not self.available():
+            return
+        try:
+            initial = self.store.folder_text(path)
+        except Exception as error:
+            self.error(f'{path}\n{error}')
+            return
+        editor = QDialog(self.window)
+        editor.setWindowTitle('Associate Tags')
+        editor.resize(460, 240)
+        layout = QVBoxLayout(editor)
+        label = QLabel(f'{path}\nTags apply to every image in this folder and all subfolders.\n'
+                       'Separate tags with spaces or commas; use underscores inside a tag.')
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        text = QPlainTextEdit(initial)
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.rejected.connect(editor.reject)
+        def save():
+            try:
+                self.store.associate(path, text.toPlainText())
+                editor.accept()
+            except Exception as error:
+                self.error(f'Could not save folder tags for {path}: {error}')
+        buttons.accepted.connect(save)
+        layout.addWidget(buttons)
+        self.window.exec_dialog(editor)
+        editor.deleteLater()
