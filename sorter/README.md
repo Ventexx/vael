@@ -74,7 +74,7 @@ To use your existing standalone WD14 tagger:
 3. Keep your existing `wd14-tagger/model-cache/` if you have already downloaded
    the model. The supported backend uses ONNX and
    `SmilingWolf/wd-v1-4-convnextv2-tagger-v2`, release `v2.0`.
-4. Run Sorter normally. Select images or folders and choose **Auto-Tag Image/s**.
+4. Run Sorter normally. Select images or folders in the bottom workspace and choose **Auto-Tag Image/s**.
    The worker starts silently, without a console or the standalone tagger window.
    The model stays loaded for later jobs until Sorter exits or model settings change.
 5. Optionally click the bottom-right tagger status, open **Settings**, and select
@@ -109,8 +109,9 @@ remain the user's local setup, subject to the respective upstream terms.
 
 ### Auto-tagging, status and errors
 
-**Auto-Tag Image/s** appears for ordinary images, folders, or selections containing
-only those types. It is hidden for mixed selections containing videos, GIFs,
+**Auto-Tag Image/s** appears only in the bottom workspace (including split view),
+for ordinary images, folders, or selections containing only those types. The upper
+library and Shelf have no tagging or association actions. It is hidden for mixed selections containing videos, GIFs,
 documents or other unsupported files. PNG, JPG/JPEG, WebP, BMP, TIFF and AVIF are
 eligible; actual decoding requires backend support. Animated or multipage image
 formats use the backend's first-frame policy. GIF is a separate media type and
@@ -146,7 +147,7 @@ can still be copied.
 
 ### Folder tag associations and storage
 
-Select one folder and choose **Associate Tags**. Enter tags in the text field,
+Select one folder in the bottom workspace and choose **Associate Tags**. Enter tags in the text field,
 then **Save** or **Cancel**. Opening it again loads the saved text for editing.
 Saving an empty field removes the association. Separate tags with spaces, commas
 or newlines; use underscores within a tag name.
@@ -155,8 +156,9 @@ When copying an image's tags, Sorter places associations from outer folders firs
 then inner folders, then generated image tags. Repeated exact tags appear only
 once, at their first position. Associations apply throughout all subfolders and
 are calculated when copying, so editing an association or moving an image takes
-effect without rerunning the model. Source-folder associations do not follow a
-copied image into an unrelated workspace folder; its destination folders apply.
+effect without rerunning the model. The destination workspace folders determine
+the inherited tags; previously saved source-folder records are retained but the
+source explorer no longer offers tagging or association actions.
 
 All image tags and folder associations live in `sorter/.local/tags.json`. Image
 records use SHA-256 content fingerprints, with separate path records; identical
@@ -215,15 +217,49 @@ When a selected folder includes other selected descendants, transfer actions pro
 
 **Batch rename** previews each new name before applying it. Combine literal find/replace, prefix, suffix, and sequential numbering; file extensions are preserved. Invalid, duplicate, or existing destination names prevent applying the preview.
 
+### context menus and associated links
+
+The upper library menu separates **Collect**, **Browse** (folders), and **Details**.
+It offers copying into the workspace and adding shelf references, without tagging,
+links or workspace editing actions. The Shelf menu separates sending items to the
+workspace from removing references. The viewer separates zoom/view actions from
+adding items to the Shelf; note editing separates Edit from Delete.
+
+The bottom workspace menu separates **Tags**, **Image Link**, **Files**, **Groups**,
+and **Details**, showing only applicable sections. Move destinations live in the
+**Move** submenu. Group actions on a selected group member live in **Current Group**;
+right-clicking a group's colored background opens those group actions directly.
+Delete is isolated at the bottom. Empty workspace space offers Paste and New folders.
+Both workspace panes use the same menus.
+
+For one image, choose **Image Link → Associate Link** (the Image Link label is a
+section heading). For a group, use **Associate Link** in its group menu. Enter an
+`https://` or `http://` URL, then Save or Cancel. Existing links are prefilled for
+editing; save an empty field to remove one. **Copy Link** appears only when that
+image or group has a link. It copies the URL without opening a browser.
+
+Image and group links are independent. A group's link is not implicitly assigned
+to its individual images. An image does not need generated tags before it can have
+a link, and the WD14 backend is not needed for links. Image links are stored in
+`.local/tags.json`, use content fingerprints, and follow the same health-check and
+replacement rules as tags. Identical copies share the image link. Group links are
+stored with their groups in `.local/settings.json`; they follow group moves and
+renames, remain on group fragments, and disappear when the group is dissolved.
+
+Windows folder metadata files `desktop.ini` and `Thumbs.db` are hidden from both
+explorers, searches, cached results, and recursive thumbnail loading. This is a
+view filter: the files are not deleted, and ordinary folder copies still preserve
+their contents. Other files are not hidden merely because Windows marks them hidden.
+
 ### groups & group notes
 
 Select two or more files in one workspace folder, then right-click → **Group selected entries**. Groups are visual collections: no folder is created and no file is changed. Folders stay first, followed by groups, then ordinary files. Each group stays together and sorts its members alphabetically. The gaps and padding above and below grouped cards share a subtle, randomly chosen rainbow color; colors are distinct within a folder and chosen to remain visually distinguishable. Each occupied row has a rounded colored band. A wrapped group continues on the next row with the same color and alphabetical sequence; it remains one group. Search can hide nonmatching members without changing the group.
 
-Right-click the colored padding or gaps for the essential group-only menu. Right-click an image for its normal file actions plus a separate section containing all group actions and assigned notes. **Dissolve Group** returns its members to ordinary sorting without deleting anything. Selecting entries from different groups or ordinary files lets you group that selection anew. Groups persist between launches. Renames and moves made through Sorter update memberships; moving part of a group separates it by destination folder, and undoing that move reunites the fragments. Copies are ordinary entries. External file moves cannot be tracked automatically.
+Right-click the colored padding or gaps for the essential group-only menu. Right-click a grouped image for its image/file actions and a separate **Current Group** submenu containing group actions and notes. **Dissolve Group** returns its members to ordinary sorting without deleting anything. Selecting entries from different groups or ordinary files lets you group that selection anew. Groups persist between launches. Renames and moves made through Sorter update memberships; moving part of a group separates it by destination folder, and undoing that move reunites the fragments. Copies are ordinary entries. External file moves cannot be tracked automatically.
 
 Open **workspace ⋯ → Group Notes**, a standard menu entry, to manage the reusable text library. **New Note** opens a small dialog with **Header** and **Body** fields. Right-click an existing entry to **Edit** or **Delete** it. Drag entries or use **Move Up / Move Down** to set their order in the assignment and group menus. Headers must be unique and non-empty. Save each entry dialog, then **Save** the main window to apply changes; **Cancel** discards pending library edits.
 
-When notes exist, a group’s context menu offers **Assign Notes**. Tick any number of titles; the menu stays open while you choose. Assigned titles appear at the top of the group menu, above a separator and the group controls. Click a title to copy its entire body to the system clipboard. Editing a note updates it for all assigned groups; deleting it removes those assignments. Groups and notes are local metadata in `.local/settings.json`, separate from source content and shared naming profiles.
+When notes exist, a group’s context menu offers **Assign Notes**. Tick any number of titles; the menu stays open while you choose. Assigned titles appear in the **Copy Note** submenu. Click a title to copy its entire body to the system clipboard. Editing a note updates it for all assigned groups; deleting it removes those assignments. Groups and notes are local metadata in `.local/settings.json`, separate from source content and shared naming profiles.
 
 ### the editing boundary
 
