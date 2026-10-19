@@ -551,7 +551,9 @@ class FileService:
         self.check_source(source)
         from PySide6.QtCore import QFile
         result = QFile.moveToTrash(str(source))
-        if not result[0]:
+        # PySide versions expose either a bool or (success, trash_path).
+        success = result[0] if isinstance(result, tuple) else result
+        if not success:
             raise OSError(f"Could not move to the system trash: {source}")
 
     def undo(self):
