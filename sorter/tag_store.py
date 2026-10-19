@@ -88,16 +88,19 @@ class TagStore:
     def __init__(self, filename):
         self.filename = Path(filename)
         self.lock = threading.RLock()
-        self.data = {'version': 1, 'images': {}, 'paths': {}, 'folders': {}}
+        self.data = {'version': 1, 'images': {}, 'paths': {}, 'folders': {}, 'links': {}}
         if self.filename.exists():
             data = json.loads(self.filename.read_text(encoding='utf-8'))
+            data.setdefault('links', {})
+            if not isinstance(data['links'], dict) or not all(isinstance(v, str) for v in data['links'].values()):
+                raise ValueError('Invalid image links in tags.json.')
             if data.get('version') != 1 or any(not isinstance(data.get(k), dict) for k in ('images', 'paths', 'folders')):
                 raise ValueError('Unsupported or damaged tags.json. Restore it from a backup before tagging.')
             for key, row in data['images'].items():
                 if not isinstance(row, dict) or not isinstance(row.get('tags'), list) or not all(isinstance(t, str) for t in row['tags']):
                     raise ValueError(f'Invalid image tag record: {key}')
             for row in data['paths'].values():
-                if not isinstance(row, dict) or row.get('hash') not in data['images'] or not isinstance(row.get('stamp'), list):
+                if not isinstance(row, dict) or row.get('hash') not in (data['images'].keys() | data['links'].keys()) or not isinstance(row.get('stamp'), list):
                     raise ValueError('Invalid image location record in tags.json.')
             for row in data['folders'].values():
                 if not isinstance(row, dict) or not isinstance(row.get('text'), str) or not isinstance(row.get('identity'), str):
@@ -119,8 +122,38 @@ class TagStore:
 
     @staticmethod
     def _prune(data):
+        data['paths'] = {p: row for p, row in data['paths'].items()
+                         if row['hash'] in data['images'] or row['hash'] in data['links']}
         used = {row['hash'] for row in data['paths'].values()}
         data['images'] = {key: row for key, row in data['images'].items() if key in used}
+        data['links'] = {key: value for key, value in data['links'].items() if key in used}
+
+    def has_link(self, path):
+        with self.lock:
+            row = self.data['paths'].get(canonical(path))
+            try:
+                return bool(row and row['hash'] in self.data['links'] and row['stamp'] == stamp(path))
+            except OSError:
+                return False
+
+    def image_link(self, path, cancel=None):
+        digest, _ = fingerprint(path, cancel)
+        with self.lock:
+            return self.data['links'].get(digest, '')
+
+    def associate_link(self, path, url, expected_hash, cancel=None):
+        digest, file_stamp = fingerprint(path, cancel)
+        if digest != expected_hash:
+            raise ValueError('Image changed while the link editor was open. Reopen Associate Link.')
+        with self.lock:
+            data = copy.deepcopy(self.data)
+            if url:
+                data['links'][digest] = url
+                data['paths'][canonical(path)] = {'hash': digest, 'stamp': file_stamp}
+            else:
+                data['links'].pop(digest, None)
+            self._prune(data)
+            self._write(data)
 
     def record(self, path, digest, file_stamp, tags, model, general, character):
         with self.lock:
@@ -198,7 +231,7 @@ class TagStore:
         """Scan all roots before pruning; preserve data for failed/inaccessible roots."""
         with self.lock:
             original = copy.deepcopy(self.data)
-        if not original['images'] and not original['folders']:
+        if not original['images'] and not original['folders'] and not original['links']:
             return []
         paths, folders, failed, errors = {}, {}, [], []
         for root in dict.fromkeys(canonical(p) for p in roots if p):
@@ -206,10 +239,10 @@ class TagStore:
                 images, directory_ids = discover([root], cancel, progress)
                 staged = {}
                 for i, path in enumerate(images):
-                    if original['images']:
+                    if original['images'] or original['links']:
                         progress(f'Checking image {i + 1}/{len(images)}: {path.name}')
                         digest, file_stamp = fingerprint(path, cancel)
-                        if digest in original['images']:
+                        if digest in original['images'] or digest in original['links']:
                             staged[canonical(path)] = {'hash': digest, 'stamp': file_stamp}
                 paths.update(staged)
                 folders.update(directory_ids)

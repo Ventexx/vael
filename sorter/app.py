@@ -3772,6 +3772,7 @@ class CoverBrowser(ImageBrowser):
         if self.editable:
             self.window.tagging.add_image_actions(menu, paths)
             self.window.tagging.add_folder_action(menu, paths)
+            self.window.tagging.add_link_actions(menu, paths)
             menu.addSection('Files')
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
             menu.addAction('Cut', lambda: self.window.copy_selection(self, True))
@@ -6124,6 +6125,10 @@ class Window(QMainWindow):
         return menu
 
     def populate_group_menu(self, menu, group):
+        menu.addSection('Group Link')
+        menu.addAction('Associate Link', lambda: self.edit_group_link(group))
+        if group.get('link'):
+            menu.addAction('Copy Link', lambda: QApplication.clipboard().setText(group['link']))
         notes = self.config['notes']
         if notes:
             menu.addSection('Notes')
@@ -6142,6 +6147,26 @@ class Window(QMainWindow):
         menu.addSection('Manage Group')
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
         return menu
+
+    def edit_group_link(self, group):
+        def save(url):
+            if not any(g is group for g in self.config['groups']):
+                raise ValueError('This group changed. Reopen its context menu.')
+            previous = group.get('link')
+            if url:
+                group['link'] = url
+            else:
+                group.pop('link', None)
+            try:
+                save_settings(self.config)
+            except Exception:
+                if previous is None:
+                    group.pop('link', None)
+                else:
+                    group['link'] = previous
+                raise
+            return True
+        self.tagging.link_dialog(group.get('link', ''), save, 'Associate Group Link')
 
     def reconcile_references(self, results):
         # Moves and renames update pins, shelf entries and browser paths.

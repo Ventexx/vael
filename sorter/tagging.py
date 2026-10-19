@@ -318,6 +318,93 @@ class Tagging(QObject):
             action = menu.addAction('Associate Tags', lambda: self.associate(paths[0]))
             action.setEnabled(not self.busy and not self.window.operation_task)
 
+    def link_dialog(self, initial, save, title='Associate Link'):
+        from urllib.parse import urlsplit
+        editor = QDialog(self.window)
+        editor.setWindowTitle(title)
+        editor.resize(480, 150)
+        layout = QVBoxLayout(editor)
+        layout.addWidget(QLabel('Enter a web link. Save an empty field to remove it.'))
+        field = QLineEdit(initial)
+        field.setPlaceholderText('https://…')
+        layout.addWidget(field)
+        error_label = QLabel()
+        error_label.setWordWrap(True)
+        layout.addWidget(error_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.rejected.connect(editor.reject)
+        def accept():
+            url = field.text().strip()
+            try:
+                parsed = urlsplit(url)
+                if url and (parsed.scheme.lower() not in ('https', 'http') or not parsed.hostname
+                            or any(c.isspace() for c in url)):
+                    raise ValueError('Enter a complete http:// or https:// link without spaces.')
+                if save(url):
+                    editor.accept()
+            except Exception as error:
+                error_label.setText(str(error))
+        buttons.accepted.connect(accept)
+        layout.addWidget(buttons)
+        self.window.exec_dialog(editor)
+        editor.deleteLater()
+
+    def add_link_actions(self, menu, paths):
+        if (len(paths) != 1 or not paths[0].is_file() or paths[0].suffix.lower() not in IMAGE_EXTENSIONS
+                or not self.window.service.inside(paths[0])):
+            return
+        path = paths[0]
+        menu.addSection('Image Link')
+        action = menu.addAction('Associate Link', lambda: self.edit_image_link(path))
+        action.setEnabled(not self.busy and not self.window.operation_task)
+        if self.store and self.store.has_link(path):
+            action = menu.addAction('Copy Link', lambda: self.copy_image_link(path))
+            action.setEnabled(not self.busy and not self.window.operation_task)
+
+    def edit_image_link(self, path):
+        if not self.available() or not self.window.service.inside(path):
+            return
+        self._begin('Checking image link')
+        def prepare(task):
+            digest, _ = fingerprint(path, task.cancel)
+            with self.store.lock:
+                return digest, self.store.data['links'].get(digest, '')
+        def ready(result):
+            self._finish(dict(phase='Ready', current=str(path)))
+            if self.closing:
+                return
+            digest, initial = result
+            def save(url):
+                if not self.available():
+                    return False
+                self._begin('Saving image link')
+                self.task = self.window.jobs.start(
+                    lambda task: self.store.associate_link(path, url, digest, task.cancel),
+                    lambda _: self._finish(dict(phase='Link saved', current=str(path))),
+                    lambda error: self._finish(dict(phase='Link save failed', errors=[f'{path}\n{error}\nLink: {url}'])))
+                self.render()
+                return True
+            self.link_dialog(initial, save, 'Associate Image Link')
+        self.task = self.window.jobs.start(prepare, ready,
+            lambda error: self._finish(dict(phase='Link failed', errors=[str(error)])))
+        self.render()
+
+    def copy_image_link(self, path):
+        if not self.available() or not self.window.service.inside(path):
+            return
+        self._begin('Verifying image link')
+        def copied(url):
+            if self.closing:
+                return
+            if not url:
+                self._finish(dict(phase='Copy failed', errors=['This image has no link or was replaced.']))
+                return
+            QApplication.clipboard().setText(url)
+            self._finish(dict(phase='Link copied', current=str(path)))
+        self.task = self.window.jobs.start(lambda task: self.store.image_link(path, task.cancel), copied,
+            lambda error: self._finish(dict(phase='Copy failed', errors=[str(error)])))
+        self.render()
+
     def associate(self, path):
         if not self.window.service.inside(path, allow_root=True):
             self.error('Folder tag associations are only available in the bottom workspace.')
