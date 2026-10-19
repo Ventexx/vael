@@ -280,7 +280,7 @@ def is_link(path):
 
 
 def catalog_key(roots, config, recursive):
-    value = [list(map(str, roots)), recursive, config['fields'], config['rules'], config['inherit'], config['ignored'], config['sources'], config['sort_root']]
+    value = ['hide-shell-metadata-v1', list(map(str, roots)), recursive, config['fields'], config['rules'], config['inherit'], config['ignored'], config['sources'], config['sort_root']]
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -291,7 +291,7 @@ def cached_scan(database, roots, config, recursive):
         with closing(sqlite3.connect(database, timeout=20)) as db:
             row = db.execute('SELECT payload FROM snapshots WHERE scope = ?', (catalog_key(roots, config, recursive),)).fetchone()
             if row:
-                return [Entry(Path(p), directory, size, mtime, fields) for p, directory, size, mtime, fields in json.loads(row[0])]
+                return [Entry(Path(p), directory, size, mtime, fields) for p, directory, size, mtime, fields in json.loads(row[0]) if not _folder_is_ignored(Path(p).name, [])]
     except (sqlite3.Error, ValueError, TypeError):
         pass
     return []
@@ -316,8 +316,7 @@ def scan(roots, config, recursive, cancel, database=None):
                         if cancel.is_set():
                             return [], []
                         path = Path(item.path)
-                        if any(fnmatch.fnmatch(item.name.casefold(), p.casefold())
-                               for p in ['.sorter-*', *config.get("ignored", [])]):
+                        if _folder_is_ignored(item.name, config.get('ignored', [])):
                             continue
                         try:
                             if is_link(path):
@@ -1340,7 +1339,8 @@ class _ScanSignals(QObject):
 
 
 def _folder_is_ignored(name, ignore_patterns):
-    return name.startswith('.sorter-') or any(fnmatch.fnmatch(name.casefold(), rule.casefold()) for rule in ignore_patterns)
+    return (name.casefold() in {'desktop.ini', 'thumbs.db'} or name.startswith('.sorter-')
+            or any(fnmatch.fnmatch(name.casefold(), rule.casefold()) for rule in ignore_patterns))
 
 
 class _RoughScanWorker(QRunnable):
