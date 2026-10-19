@@ -2694,11 +2694,15 @@ class MediaViewerOverlay(ImgViewerOverlay):
         path = Path(self._current_card.filepath)
         menu = QMenu(self)
         owner = self.parent().window()
-        menu.addAction('Add to Shelf', lambda: owner.shelf.add_paths([path]))
+        menu.addSection('View')
         menu.addAction('Fit image', lambda: self.set_zoom(0))
         menu.addAction('Actual size', lambda: self.set_zoom(1))
+        menu.addSeparator()
         menu.addAction('Open externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+        menu.addSection('Collect')
+        menu.addAction('Add to Shelf', lambda: owner.shelf.add_paths([path]))
         menu.exec(event.globalPos())
+        menu.deleteLater()
 
 
 class _BulkLoadOverlay(QWidget):
@@ -3538,6 +3542,7 @@ class CoverBrowser(ImageBrowser):
             menu.addSeparator()
         menu.addAction('Select all visible items', self.select_all)
         menu.addAction('Invert visible selection', self.invert_selection)
+        menu.addSeparator()
         zoom = menu.addMenu('Entry zoom')
         for percent in (50, 75, 100, 125, 150, 200):
             action = zoom.addAction(f'{percent}%')
@@ -3753,47 +3758,63 @@ class CoverBrowser(ImageBrowser):
     def build_action_menu(self):
         paths = self.selected_paths()
         menu = QMenu(self)
-        self.window.tagging.add_image_actions(menu, paths)
-        self.window.tagging.add_folder_action(menu, paths)
-        folders = list(self.selected_folder_paths())
-        if folders and not self.editable:
-            menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))
-        if self.editable and len(paths) >= 2 and all(p.is_file() for p in paths):
-            menu.addAction('Group selected entries', lambda: self.window.group_selection(self))
-            menu.addSeparator()
-        if paths:
-            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
-            menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
-            if not self.editable:
-                menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
-        if self.editable:
-            menu.addSeparator()
-            if paths:
-                menu.addAction('Cut', lambda: self.window.copy_selection(self, True))
-                menu.addAction('Move to folder…', lambda: self.window.transfer_dialog(self, True))
-                menu.addAction('Move into new folder…', lambda: self.window.move_to_new(self))
-                menu.addAction('Duplicate', lambda: self.window.duplicate(self))
-                if len(paths) == 1:
-                    menu.addAction('Rename…', lambda: self.window.rename_selection(self))
-                else:
-                    rename = menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
-                    rename.setToolTip('Rename selected items together using find/replace, prefixes, suffixes or numbering. Preview all names before applying.')
-                    menu.setToolTipsVisible(True)
-                menu.addAction('Delete', lambda: self.window.trash_selection(self))
-            else:
+        if not paths:
+            if self.editable:
+                menu.addSection('Workspace')
                 clipboard = QApplication.clipboard().mimeData()
                 if clipboard and clipboard.hasUrls():
                     menu.addAction('Paste', lambda: self.window.paste(self))
                 menu.addAction('New folders…', lambda: self.window.new_folders(self))
-        if paths:
-            menu.addSeparator()
-            menu.addAction('Information…', lambda: self.window.information(paths))
-            menu.addAction('Copy as Path', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
+            else:
+                menu.addAction('Refresh', self.refresh)
+            return menu
+
+        if self.editable:
+            self.window.tagging.add_image_actions(menu, paths)
+            self.window.tagging.add_folder_action(menu, paths)
+            menu.addSection('Files')
+            menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
+            menu.addAction('Cut', lambda: self.window.copy_selection(self, True))
+            move = menu.addMenu('Move')
+            move.addAction('To folder…', lambda: self.window.transfer_dialog(self, True))
+            move.addAction('Into new folder…', lambda: self.window.move_to_new(self))
+            menu.addAction('Duplicate', lambda: self.window.duplicate(self))
             if len(paths) == 1:
-                folder = paths[0] if paths[0].is_dir() else paths[0].parent
-                menu.addAction('Open Folder in Explorer', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
-        if paths:
-            menu.addAction('Clear selection', self.clear_selection)
+                menu.addAction('Rename…', lambda: self.window.rename_selection(self))
+            else:
+                menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
+            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
+            groups = [group_for(self.window.config, path) for path in paths]
+            group = groups[0] if groups and groups[0] and all(g is groups[0] for g in groups) else None
+            can_group = (len(paths) >= 2 and all(p.is_file() for p in paths)
+                         and len({p.parent for p in paths}) == 1)
+            if group or can_group:
+                menu.addSection('Groups')
+                if can_group:
+                    menu.addAction('Group selected entries', lambda: self.window.group_selection(self))
+                if group:
+                    self.window.populate_group_menu(menu.addMenu('Current Group'), group)
+        else:
+            menu.addSection('Collect')
+            menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
+            menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
+            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
+            folders = list(self.selected_folder_paths())
+            if folders:
+                menu.addSection('Browse')
+                menu.addAction('Load Selected Folders (Full, Recursively)', lambda: self.start_bulk_load(folders))
+
+        menu.addSection('Details')
+        menu.addAction('Information…', lambda: self.window.information(paths))
+        menu.addAction('Copy as Path', lambda: QApplication.clipboard().setText('\n'.join(map(str, paths))))
+        if len(paths) == 1:
+            folder = paths[0] if paths[0].is_dir() else paths[0].parent
+            menu.addAction('Open Folder in Explorer', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
+        menu.addSeparator()
+        menu.addAction('Clear selection', self.clear_selection)
+        if self.editable:
+            menu.addSection('Remove')
+            menu.addAction('Delete', lambda: self.window.trash_selection(self))
         return menu
 
     def choose_folder(self):
@@ -3982,11 +4003,6 @@ class WorkspaceBrowser(CoverBrowser):
                 from PySide6.QtCore import QItemSelectionModel
                 view.selectionModel().setCurrentIndex(index, QItemSelectionModel.ClearAndSelect)
             menu = self.build_action_menu()
-            entry = index.data(Qt.UserRole) if index.isValid() else None
-            group = group_for(self.window.config, entry.path) if entry else None
-            if group:
-                menu.addSeparator()
-                self.window.populate_group_menu(menu, group)
         menu.exec(view.viewport().mapToGlobal(point))
         menu.deleteLater()
 
@@ -4242,13 +4258,16 @@ class Shelf(QWidget):
             self.list.clearSelection()
             item.setSelected(True)
         menu = QMenu(self)
-        paths = [Path(entry.data(Qt.UserRole)) for entry in self.list.selectedItems()]
-        self.window.tagging.add_image_actions(menu, paths)
-        self.window.tagging.add_folder_action(menu, paths)
-        menu.addAction('Copy to Active Workspace Folder', self.copy_to_target)
-        menu.addAction('Remove selected references', self.remove_selected)
-        menu.addAction('Clear shelf', self.clear)
+        menu.addSection('Send to Workspace')
+        action = menu.addAction('Copy to Active Workspace Folder', self.copy_to_target)
+        action.setEnabled(self.list.count() > 0)
+        menu.addSection('Manage Shelf')
+        if self.list.selectedItems():
+            menu.addAction('Remove selected references', self.remove_selected)
+        action = menu.addAction('Clear shelf', self.clear)
+        action.setEnabled(self.list.count() > 0)
         menu.exec(self.list.viewport().mapToGlobal(point))
+        menu.deleteLater()
 
 
 
@@ -4379,6 +4398,7 @@ class NotesDialog(QDialog):
         key = item.data(Qt.UserRole)
         menu = QMenu(self)
         menu.addAction('Edit', lambda: self.edit_note(key))
+        menu.addSeparator()
         menu.addAction('Delete', lambda: self.delete_note(key))
         menu.exec(self.list.viewport().mapToGlobal(point))
         menu.deleteLater()
@@ -6104,16 +6124,14 @@ class Window(QMainWindow):
         return menu
 
     def populate_group_menu(self, menu, group):
-        initial_count = len(menu.actions())
         notes = self.config['notes']
-        for note in notes:
-            if note['id'] in group['notes']:
-                action = menu.addAction(note['title'])
-                action.setToolTip('Copy this note’s text')
-                action.triggered.connect(lambda checked=False, text=note['body']: QApplication.clipboard().setText(text))
-        if len(menu.actions()) > initial_count:
-            menu.addSeparator()
         if notes:
+            menu.addSection('Notes')
+            assigned = [note for note in notes if note['id'] in group['notes']]
+            if assigned:
+                copies = menu.addMenu('Copy Note')
+                for note in assigned:
+                    copies.addAction(note['title'], lambda checked=False, text=note['body']: QApplication.clipboard().setText(text))
             assignments = CheckMenu('Assign Notes', menu)
             menu.addMenu(assignments)
             for note in notes:
@@ -6121,6 +6139,7 @@ class Window(QMainWindow):
                 action.setCheckable(True)
                 action.setChecked(note['id'] in group['notes'])
                 action.toggled.connect(lambda checked, key=note['id']: self.assign_note(group, key, checked))
+        menu.addSection('Manage Group')
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
         return menu
 

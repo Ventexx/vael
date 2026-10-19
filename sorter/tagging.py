@@ -226,9 +226,9 @@ class Tagging(QObject):
     def start(self, paths):
         if not self.available():
             return
-        roots = self.roots()
+        roots = [self.window.service.root] if self.window.service.root else []
         if any(not any(within(path, root) for root in roots) or linked(path) for path in paths):
-            self.error('Select ordinary images or folders inside the configured sources or workspace.')
+            self.error('Auto-tagging is only available inside the bottom sorting workspace.')
             return
         general, character = self.general.value(), self.character.value()
         model_dir = self.model_dir.text().strip() or None
@@ -287,9 +287,9 @@ class Tagging(QObject):
         if not paths or any(linked(p) or not (p.is_dir() or
                 (p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)) for p in paths):
             return
-        if any(not any(within(p, root) for root in self.roots()) for p in paths):
+        if any(not self.window.service.inside(p, allow_root=True) for p in paths):
             return
-        menu.addSeparator()
+        menu.addSection('Tags')
         action = menu.addAction('Auto-Tag Image/s', lambda: self.start(list(paths)))
         action.setEnabled(not self.busy and not self.window.operation_task)
         if len(paths) == 1 and paths[0].is_file() and self.store and self.store.has_tags(paths[0]):
@@ -314,11 +314,14 @@ class Tagging(QObject):
 
     def add_folder_action(self, menu, paths):
         if (len(paths) == 1 and paths[0].is_dir() and not linked(paths[0])
-                and any(within(paths[0], root) for root in self.roots())):
+                and self.window.service.inside(paths[0], allow_root=True)):
             action = menu.addAction('Associate Tags', lambda: self.associate(paths[0]))
             action.setEnabled(not self.busy and not self.window.operation_task)
 
     def associate(self, path):
+        if not self.window.service.inside(path, allow_root=True):
+            self.error('Folder tag associations are only available in the bottom workspace.')
+            return
         if not self.available():
             return
         try:
