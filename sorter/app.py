@@ -5959,7 +5959,9 @@ class Window(QMainWindow):
         self._shell.update()
 
     def _update_window_mask(self) -> None:
-        if self.objectName() != "mainWindowFrameless":
+        # Keep the native Windows frame styles for snapping and resizing,
+        # but clip its opaque client surface to the same shape as the shell.
+        if not self._is_windows and self.objectName() != "mainWindowFrameless":
             return
         if self.isMaximized() or self.isFullScreen() or self.width() <= 0 or self.height() <= 0:
             self.clearMask()
