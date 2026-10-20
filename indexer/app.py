@@ -6225,7 +6225,9 @@ class MainWindow(QMainWindow):
         shape* at the OS level, so the corners are genuinely cut away
         regardless of whether translucency compositing is working.
         """
-        if self.objectName() != "mainWindowFrameless":
+        # Keep the native Windows frame styles for snapping and resizing,
+        # but clip its opaque client surface to the same shape as the shell.
+        if not self._is_windows and self.objectName() != "mainWindowFrameless":
             return
         if self.isMaximized() or self.isFullScreen() or self.width() <= 0 or self.height() <= 0:
             self.clearMask()
