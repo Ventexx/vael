@@ -943,28 +943,33 @@ class WorkspaceGrid(DragViewMixin, QListView):
 
     def group_at(self, point):
         for group, rect, tiles in self.group_bands():
-            if rect.adjusted(-1, 0, 1, 0).contains(point) and not any(tile.contains(point) for tile in tiles):
+            if rect.adjusted(-1, 0, 1, 0).contains(point) and not any(self.tile_path(tile).contains(QPointF(point)) for tile in tiles):
                 return group
         return None
 
+    @staticmethod
+    def tile_path(tile):
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(tile).adjusted(1, 1, -1, -1), 6, 6)
+        return path
+
     def paintEvent(self, event):
         super().paintEvent(event)
-        from PySide6.QtGui import QRegion
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing)
         for group, rect, tiles in self.group_bands():
             if not rect.intersects(event.rect()):
                 continue
             band = rect.adjusted(-1, 0, 1, 0)
-            region = QRegion(band)
+            # Exclude the painted rounded tile, not its rectangular bounds.
+            # The group colour can then reach the exposed corner pixels.
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(band).adjusted(0, 1, 0, -1), 7, 7)
             for tile in tiles:
-                region -= QRegion(tile)
-            painter.setClipRegion(region)
+                path = path.subtracted(self.tile_path(tile))
             color = QColor(group['color'])
             color.setAlpha(85)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(QRectF(band).adjusted(0, 1, 0, -1), 7, 7)
+            painter.fillPath(path, color)
         painter.end()
 
 
