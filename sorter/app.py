@@ -458,7 +458,7 @@ class FileService:
         stem, suffix = (target.name, "") if target.is_dir() else (target.stem, target.suffix)
         i = 1
         while True:
-            candidate = target.with_name(f"{stem}{i}{suffix}")
+            candidate = target.with_name(f"{stem}_{i}{suffix}")
             if not candidate.exists() and not candidate.is_symlink():
                 return candidate
             i += 1
@@ -6314,7 +6314,7 @@ class Window(QMainWindow):
             box = QMessageBox(self)
             box.setWindowTitle('Files with matching names')
             box.setText(f'{len(conflicts)} selected item(s) have names already used in this destination.')
-            box.setInformativeText('Overwrite replaces matching files. Auto Rename adds an available number before the extension. Cancel leaves everything unchanged.')
+            box.setInformativeText('Overwrite replaces matching files. Auto Rename adds an underscore and an available number before the extension (image10_1.png). Cancel leaves everything unchanged.')
             box.setDetailedText('\n'.join(conflicts))
             cancel = box.addButton('Cancel', QMessageBox.RejectRole)
             overwrite = box.addButton('Overwrite', QMessageBox.DestructiveRole)
