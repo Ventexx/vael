@@ -17,7 +17,7 @@ DEFAULTS = {
     "sources": [], "source_names": {}, "sort_root": "", "pins": [],
     "fields": {}, "rules": [],
     "inherit": False, "ignored": [],
-    "layout": {}, "collision": "rename", "groups": [], "notes": [],
+    "layout": {}, "collision": "rename", "groups": [], "notes": [], "move_keep_groups": True,
 }
 
 
@@ -25,7 +25,6 @@ def entry_name_key(name):
     """Case-insensitive alphabetical order with numbered filenames in sequence."""
     return ([(0, int(part)) if part.isdigit() else (1, part.casefold())
              for part in re.split(r'(\d+)', name)], name)
-
 
 
 def group_for(config, path):
@@ -389,6 +388,15 @@ class UndoRecord:
     target: Path
     stamp: tuple
     backup: Path | None = None
+
+
+@dataclass
+class GroupTransferResult:
+    source: Path
+    target: Path
+    moved: bool
+    keep_groups: bool
+    groups: list
 
 
 class FileService:
@@ -6197,7 +6205,13 @@ class Window(QMainWindow):
 
     def reconcile_references(self, results):
         # Moves and renames update pins, shelf entries and browser paths.
+        transferred = []
         for old_text, value in results:
+            if isinstance(value, GroupTransferResult):
+                transferred.append(value)
+                if not value.moved:
+                    continue
+                old_text, value = str(value.source), value.target
             if isinstance(value, UndoRecord):
                 if value.action == 'rmdir':
                     continue
@@ -6242,7 +6256,20 @@ class Window(QMainWindow):
                     text = mapped(str(browser.current))
                     browser.current = Path(text) if text else (self.service.root if browser.editable else None)
                     browser.path.setText(str(browser.current) if browser.current else '')
+        for result in transferred:
+            # Destination entries get only their original group's metadata,
+            # never an unrelated group previously occupying the same filename.
+            for group in self.config['groups']:
+                group['members'] = [p for p in group['members'] if not Path(p).is_relative_to(result.target)]
+            if result.keep_groups:
+                for original in result.groups:
+                    members = [str(result.target / Path(p).relative_to(result.source))
+                               for p in original['members'] if Path(p).is_relative_to(result.source)]
+                    if members:
+                        self.config['groups'].append(dict(original, members=members,
+                            family=original.get('family', original['id']), notes=list(original['notes'])))
         organize_groups(self.config)
+        self.persist()
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
         self.shelf.update_count()
 
@@ -6257,13 +6284,21 @@ class Window(QMainWindow):
             return
         paths = top_level_selection(paths)
         destination = Path(destination)
-        names = set()
+        policy = self.transfer_policy(paths, [destination])
+        if policy is None:
+            return
+        self.run_operations('Move' if move else 'Copy',
+            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths])
+
+    def transfer_policy(self, paths, destinations, skip_same_folder=False):
         conflicts = []
-        for path in paths:
-            key = path.name.casefold()
-            if (destination / path.name).exists() or key in names:
-                conflicts.append(path.name)
-            names.add(key)
+        for destination in destinations:
+            names = set()
+            for path in paths:
+                key = path.name.casefold()
+                if not (skip_same_folder and path.parent == destination) and ((destination / path.name).exists() or key in names):
+                    conflicts.append(str(destination / path.name))
+                names.add(key)
         policy = 'error'
         if conflicts:
             box = QMessageBox(self)
@@ -6277,10 +6312,56 @@ class Window(QMainWindow):
             box.setDefaultButton(cancel)
             self.exec_dialog(box)
             if box.clickedButton() is cancel or box.clickedButton() is None:
-                return
+                return None
             policy = 'overwrite' if box.clickedButton() is overwrite else 'rename'
-        self.run_operations('Move' if move else 'Copy',
-            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths])
+        return policy
+
+    def move_to_folders(self, paths, destinations, keep_groups):
+        paths = top_level_selection(paths)
+        destinations = list(dict.fromkeys(normalized(p) for p in destinations))
+        if not paths or not destinations:
+            return
+        try:
+            for destination in destinations:
+                self.service.require(destination, True)
+                if not destination.is_dir():
+                    raise ValueError('A destination folder is unavailable.')
+            for path in paths:
+                self.service.require(path)
+                if path.is_dir() and any(d.is_relative_to(path) for d in destinations):
+                    raise ValueError('A selected folder cannot be moved or copied inside itself.')
+        except ValueError as exc:
+            self.notice(exc)
+            return
+        policy = self.transfer_policy(paths, destinations, skip_same_folder=True)
+        if policy is None:
+            return
+        snapshots = copy.deepcopy(self.config['groups'])
+        self.run_operations('Move to folders', self.folder_move_work(paths, destinations, keep_groups, policy, snapshots))
+
+    def folder_move_work(self, paths, destinations, keep_groups, policy, snapshots):
+        work = []
+        primary, *copies = destinations
+        for path in paths:
+            state = {'failed': False}
+            def action(destination, move, source=path, state=state):
+                if move and state['failed']:
+                    raise ValueError('Original kept in place because a destination copy failed.')
+                if source.parent == destination:
+                    return None  # Already here; never duplicate the original into its own folder.
+                try:
+                    target = self.service.transfer(source, destination, move, policy)
+                    if target is None:
+                        raise ValueError('The destination did not receive the item.')
+                except Exception:
+                    state['failed'] = True
+                    raise
+                return GroupTransferResult(source, target, move, keep_groups, snapshots)
+            for destination in copies:
+                work.append((f'{path} → {destination}', lambda d=destination, fn=action: fn(d, False)))
+            move_original = path.parent not in destinations
+            work.append((f'{path} → {primary}', lambda d=primary, fn=action, move=move_original: fn(d, move)))
+        return work
 
     def transfer_dialog(self, browser, move):
         if not move:
@@ -6294,15 +6375,24 @@ class Window(QMainWindow):
         dialog.setWindowTitle('Move to Folder')
         dialog.resize(520, 500)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Select a destination inside the workspace.'))
+        hint = QLabel('Ctrl-click to select multiple folders. The first folder in the list receives the move; the others receive copies.')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
         tree = QTreeWidget()
         tree.setHeaderHidden(True)
+        tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         layout.addWidget(tree)
+        keep = QCheckBox('Images in groups keep their group')
+        keep.setChecked(self.config.get('move_keep_groups', True))
+        keep.toggled.connect(lambda checked: (self.config.__setitem__('move_keep_groups', checked), self.persist()))
+        layout.addWidget(keep)
         root_item = QTreeWidgetItem(tree, ['Root'])
         root_item.setData(0, Qt.UserRole, str(root))
         root_item.setToolTip(0, str(root))
         items = {root: root_item}
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setEnabled(False)
+        tree.itemSelectionChanged.connect(lambda: buttons.button(QDialogButtonBox.Save).setEnabled(bool(tree.selectedItems())))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
@@ -6330,8 +6420,11 @@ class Window(QMainWindow):
         task = self.jobs.start(folders, populated, lambda error: status.setText(error) if isValid(status) else None)
         accepted = self.exec_dialog(dialog) == QDialog.Accepted
         task.cancel.set()
-        if accepted and tree.currentItem():
-            self.transfer(browser.selected_paths(), Path(tree.currentItem().data(0, Qt.UserRole)), True)
+        if accepted and tree.selectedItems():
+            selected = {item.data(0, Qt.UserRole) for item in tree.selectedItems()}
+            destinations = sorted((path for path in items if str(path) in selected),
+                                  key=lambda p: tuple(part.casefold() for part in p.relative_to(root).parts))
+            self.move_to_folders(browser.selected_paths(), destinations, keep.isChecked())
         dialog.deleteLater()
 
     def duplicate(self, browser):
