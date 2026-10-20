@@ -211,7 +211,7 @@ Use **⋯ → Entry zoom** to choose 50–200% sizes independently in each explo
 
 The **⋯** menu contains Select All, Invert Selection, and Entry Zoom. In the workspace it also contains **Group Notes**. Refresh and Search remain dedicated buttons beside it. The right-click menu shows file actions only when items are selected: Copy, Cut, Copy to Active Workspace Folder, Move to Folder, Duplicate, Rename, Batch Rename, Delete, Information, Copy as Path, Open Folder in Explorer, and Add to Shelf. Paste (when the clipboard contains files) and New Folders appear when right-clicking empty workspace space, not selected files. Batch Rename appears only for multiple selected items; a single item gets Rename. Copy to Active Workspace Folder appears only in the source explorer. Open Folder in Explorer opens the selected folder itself, or the parent of a selected file. **Delete** uses the system trash. Undo remains a separate button.
 
-**Move to Folder** opens the workspace hierarchy. Hold **Ctrl** while clicking to select several destinations, then choose **Save**. The first selected folder in tree order receives the move; the others receive copies. Extra copies are completed before moving each original. If one of those copies fails, that original stays in place; successful copies remain available, and errors are reported. Stopping a batch keeps any copies already completed. If the source folder is itself selected, its originals stay there and the other destinations receive copies. Conflict choices apply across every selected destination.
+**Move to Folder** opens the workspace hierarchy with all folders expanded by default. Hold **Ctrl** while clicking to select several destinations, then choose **Save**. The first selected folder in tree order receives the move; the others receive copies. Extra copies are completed before moving each original. If one of those copies fails, that original stays in place; successful copies remain available, and errors are reported. Stopping a batch keeps any copies already completed. If the source folder is itself selected, its originals stay there and the other destinations receive copies. Conflict choices apply across every selected destination.
 
 The dialog’s **Images in groups keep their group** checkbox remembers its state, including between launches (enabled by default). When enabled, each destination retains the selected members’ original groups and assigned notes. Partial groups and selections spanning several groups remain separate; unselected source members stay in their groups. Colors remain distinct within each destination, so a color may change to avoid a clash. When disabled, transferred entries are ungrouped at their destinations. The option applies to this Move to Folder dialog; ordinary copies and shelf transfers keep their existing behavior.
 
@@ -260,6 +260,8 @@ Select two or more files in one workspace folder, then right-click → **Group s
 Right-click the colored padding or gaps for the essential group-only menu. Right-click a grouped image for its image/file actions and a separate **Current Group** submenu containing group actions and notes. **Dissolve Group** returns its members to ordinary sorting without deleting anything. Selecting entries from different groups or ordinary files lets you group that selection anew. Groups persist between launches. Renames and moves made through Sorter update memberships; moving part of a group separates it by destination folder, and undoing that move reunites the fragments. Ordinary copies are ungrouped; copies made by Move to Folder can preserve groups with its checkbox. External file moves cannot be tracked automatically.
 
 Open **workspace ⋯ → Group Notes**, a standard menu entry, to manage the reusable text library. **New Note** opens a small dialog with **Header** and **Body** fields. Right-click an existing entry to **Edit** or **Delete** it. Drag entries or use **Move Up / Move Down** to set their order in the assignment and group menus. Headers must be unique and non-empty. Save each entry dialog, then **Save** the main window to apply changes; **Cancel** discards pending library edits.
+
+The first Group Note is automatically assigned to **every** group, including existing groups, and cannot be unchecked in Assign Notes. Reordering or deleting the first note makes the new first note apply to every group; earlier assigned notes remain unless removed or deleted. This rule is shown in the Group Notes window.
 
 When notes exist, a group’s context menu offers **Assign Notes**. Tick any number of titles; the menu stays open while you choose. Assigned titles appear in the **Copy Note** submenu. Click a title to copy its entire body to the system clipboard. Editing a note updates it for all assigned groups; deleting it removes those assignments. Groups and notes are local metadata in `.local/settings.json`, separate from source content and shared naming profiles.
 
@@ -327,15 +329,16 @@ Recognized image extensions: PNG, JPG/JPEG, WebP, BMP, TIFF, and AVIF. Video ext
 
 ## keyboard shortcuts
 
-Shortcuts act on the focused explorer and do not run file actions while typing into its text fields.
+Shortcuts act on the focused explorer and do not run file actions while typing into its text fields. The fixed, read-only reference is the final **Hotkeys** section at the bottom of Settings. Ctrl+C still copies text while editing; copy files through their context menu. M in the source explorer copies protected originals to the chosen workspace destinations.
 
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl+C` | Copy selected file references |
+| `Ctrl+C` | Close current folder; in the workspace, return to its parent |
 | `Ctrl+X` / `Ctrl+V` | Cut / paste in the sorting workspace |
 | `Ctrl+A` | Select all |
 | `Ctrl+F` | Open search and filters |
-| `Ctrl+Up` / `Ctrl+Down` | Navigate sibling folders |
+| `Ctrl+Up` / `Ctrl+Down` | Close current folder and open the previous / next sibling (wraps at either end) |
+| `M` | Open Move to Folder when one or more images are selected |
 | `F5` / `Alt+Up` | Refresh / parent folder |
 | `F2` | Rename; multiple items open batch rename |
 | `Delete` | Move selection to trash after confirmation |
