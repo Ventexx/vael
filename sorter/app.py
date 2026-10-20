@@ -943,7 +943,7 @@ class WorkspaceGrid(DragViewMixin, QListView):
 
     def group_at(self, point):
         for group, rect, tiles in self.group_bands():
-            if rect.adjusted(-3, 0, 3, 0).contains(point) and not any(tile.contains(point) for tile in tiles):
+            if rect.adjusted(-1, 0, 1, 0).contains(point) and not any(tile.contains(point) for tile in tiles):
                 return group
         return None
 
@@ -955,7 +955,7 @@ class WorkspaceGrid(DragViewMixin, QListView):
         for group, rect, tiles in self.group_bands():
             if not rect.intersects(event.rect()):
                 continue
-            band = rect.adjusted(-3, 0, 3, 0)
+            band = rect.adjusted(-1, 0, 1, 0)
             region = QRegion(band)
             for tile in tiles:
                 region -= QRegion(tile)
