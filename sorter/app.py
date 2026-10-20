@@ -27,6 +27,15 @@ def entry_name_key(name):
              for part in re.split(r'(\d+)', name)], name)
 
 
+def assign_first_note(config):
+    notes = config.get('notes', [])
+    if notes:
+        first = notes[0]['id']
+        for group in config.get('groups', []):
+            if first not in group['notes']:
+                group['notes'].append(first)
+
+
 def group_for(config, path):
     text = str(path)
     return next((group for group in config.get('groups', []) if text in group['members']), None)
@@ -79,6 +88,7 @@ def organize_groups(config):
         ids.add(group['id'])
         result.append(group)
     config['groups'] = result
+    assign_first_note(config)
 
 
 def create_group(config, paths):
@@ -95,6 +105,7 @@ def create_group(config, paths):
     used = {g['color'] for g in config['groups'] if Path(g['members'][0]).parent == folder}
     group = dict(id=uuid.uuid4().hex, members=paths, color=new_group_color(used), notes=[])
     config['groups'].append(group)
+    assign_first_note(config)
     return group
 
 
@@ -4370,10 +4381,10 @@ class NotesDialog(QDialog):
     def __init__(self, window, editable=True):
         super().__init__(window)
         self.setWindowTitle('Group Notes')
-        self.resize(420, 380)
+        self.resize(460, 380)
         self.notes = copy.deepcopy(window.config['notes'])
         layout = QVBoxLayout(self)
-        hint = QLabel('Drag to reorder. Right-click a note to edit or delete it.')
+        hint = QLabel('The first note is automatically assigned to every group.\nDrag to reorder. Right-click a note to edit or delete it.')
         hint.setObjectName('hint')
         layout.addWidget(hint)
         self.list = QListWidget()
@@ -5750,6 +5761,7 @@ class Window(QMainWindow):
         self.config.pop('flags', None)
         self.config.setdefault('groups', [])
         self.config.setdefault('notes', [])
+        assign_first_note(self.config)
         validate_config(self.config)
         self.service = FileService(self.config['sort_root'])
         self.jobs = Jobs(self)
@@ -6207,6 +6219,7 @@ class Window(QMainWindow):
             existing = {note['id'] for note in dialog.notes}
             for group in self.config['groups']:
                 group['notes'] = [key for key in group['notes'] if key in existing]
+            assign_first_note(self.config)
             self.persist()
         dialog.deleteLater()
 
@@ -6214,6 +6227,7 @@ class Window(QMainWindow):
         ids = set(group['notes'])
         ids.add(note_id) if checked else ids.discard(note_id)
         group['notes'] = sorted(ids)
+        assign_first_note(self.config)
         self.persist()
 
     def group_menu(self, group, parent):
@@ -6240,6 +6254,9 @@ class Window(QMainWindow):
                 action = assignments.addAction(note['title'])
                 action.setCheckable(True)
                 action.setChecked(note['id'] in group['notes'])
+                if note is notes[0]:
+                    action.setEnabled(False)
+                    action.setToolTip('The first note is automatically assigned to every group.')
                 action.toggled.connect(lambda checked, key=note['id']: self.assign_note(group, key, checked))
         menu.addSection('Manage Group')
         menu.addAction('Dissolve Group', lambda: self.dissolve_group(group))
