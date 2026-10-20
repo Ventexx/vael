@@ -4823,9 +4823,9 @@ QMainWindow {
     border: 1px solid #5c5c5c;
     border-radius: 10px;
 }
-#appShell[maximized="true"] {
+#appShell[windowExpanded="true"] {
     border-radius: 0px;
-    border: 1px solid rgba(255,255,255,0.14);
+    border: none;
 }
 #appTitleBar {
     background: #0a0a0a;
@@ -4834,7 +4834,7 @@ QMainWindow {
     border-top-left-radius: 9px;
     border-top-right-radius: 9px;
 }
-#appShell[maximized="true"] #appTitleBar {
+#appShell[windowExpanded="true"] #appTitleBar {
     border-top-left-radius: 0px;
     border-top-right-radius: 0px;
 }
@@ -4874,7 +4874,7 @@ QMainWindow {
     border-bottom-left-radius: 9px;
     border-bottom-right-radius: 9px;
 }
-#appShell[maximized="true"] #appRoot {
+#appShell[windowExpanded="true"] #appRoot {
     border-bottom-left-radius: 0px;
     border-bottom-right-radius: 0px;
 }
@@ -5707,7 +5707,7 @@ class Window(QMainWindow):
             self.setWindowIcon(QIcon(str(app_icon())))
         shell = QWidget()
         shell.setObjectName('appShell')
-        shell.setProperty('maximized', 'false')
+        shell.setProperty('windowExpanded', 'false')
         self._shell = shell
         self.setCentralWidget(shell)
         shell_lay = QVBoxLayout(shell)
@@ -5854,19 +5854,27 @@ class Window(QMainWindow):
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == _WM_NCCALCSIZE:
                 if msg.wParam:
-                    if self.isMaximized():
+                    # Qt's state can lag the native maximize/restore message.
+                    # Use the HWND state and physical-pixel metrics for this DPI.
+                    user32 = ctypes.windll.user32
+                    hwnd = wintypes.HWND(msg.hWnd)
+                    if user32.IsZoomed(hwnd) and not self.isFullScreen():
                         params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
-                        cx = ctypes.windll.user32.GetSystemMetrics(
-                            _SM_CXSIZEFRAME
-                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
-                        cy = ctypes.windll.user32.GetSystemMetrics(
-                            _SM_CYSIZEFRAME
-                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
+                        if hasattr(user32, 'GetSystemMetricsForDpi') and hasattr(user32, 'GetDpiForWindow'):
+                            dpi = user32.GetDpiForWindow(hwnd) or 96
+                            metric = lambda key: user32.GetSystemMetricsForDpi(key, dpi)
+                        else:
+                            metric = user32.GetSystemMetrics
+                        cx = metric(_SM_CXSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
+                        cy = metric(_SM_CYSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
                         params.rgrc[0].left += cx
                         params.rgrc[0].top += cy
                         params.rgrc[0].right -= cx
                         params.rgrc[0].bottom -= cy
-                    return True, 0
+                    # WVR_REDRAW: never preserve old shell/title-bar pixels when
+                    # Windows changes the client origin during a frame transition.
+                    return True, 0x0300
+                return True, 0
             elif msg.message == _WM_NCHITTEST:
                 return self._win_hit_test(msg)
         return super().nativeEvent(eventType, message)
@@ -5913,13 +5921,22 @@ class Window(QMainWindow):
         self._sync_shell_rounding()
 
     def _sync_shell_rounding(self) -> None:
+        if not hasattr(self, '_shell'):
+            return
         is_max = self.isMaximized() or self.isFullScreen()
         prop = "true" if is_max else "false"
-        if self._shell.property("maximized") != prop:
-            self._shell.setProperty("maximized", prop)
-            self._shell.style().unpolish(self._shell)
-            self._shell.style().polish(self._shell)
+        if self._shell.property("windowExpanded") != prop:
+            self._shell.setProperty("windowExpanded", prop)
+            # Descendant selectors also change their corner radii. Repolishing
+            # only the shell leaves the title bar/content with stale styling.
+            for widget in (self._shell, self._title_bar, self._content_root):
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()
+        inset = 0 if is_max else 1
+        self._shell.layout().setContentsMargins(inset, inset, inset, inset)
         self._update_window_mask()
+        self._shell.update()
 
     def _update_window_mask(self) -> None:
         if self.objectName() != "mainWindowFrameless":
@@ -5934,8 +5951,9 @@ class Window(QMainWindow):
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.WindowStateChange:
+        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, '_max_btn'):
             self._sync_shell_rounding()
+            QTimer.singleShot(0, self._sync_shell_rounding)
             self._max_btn.setIcon(_make_win_icon("restore" if self.isMaximized() else "max"))
         super().changeEvent(event)
 
@@ -5947,7 +5965,7 @@ class Window(QMainWindow):
         for browser in getattr(self, 'browsers', []):
             if browser.bulk_overlay.isVisible():
                 browser.bulk_overlay.resize(self._content_root.size())
-        self._update_window_mask()
+        self._sync_shell_rounding()
 
     def update_target_label(self):
         root = self.config['sort_root']
