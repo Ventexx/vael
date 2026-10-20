@@ -6065,7 +6065,7 @@ class Window(QMainWindow):
         if move:
             self.clip_cut = False
 
-    def run_operations(self, title, work):
+    def run_operations(self, title, work, select_transferred=False):
         if self.tagging.busy:
             self.tagging.error('Finish or stop the tagging job / health check before changing files. Browsing is still available.')
             return
@@ -6102,11 +6102,20 @@ class Window(QMainWindow):
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
             self.tagging.health()
+            transferred = set()
+            if select_transferred:
+                transferred = {value.target if isinstance(value, GroupTransferResult) else value
+                               for _, value in results if isinstance(value, (Path, GroupTransferResult))}
             for browser in (self.sorter, self.second):
                 if browser.current and not browser.current.is_dir():
                     browser.current = self.service.root if browser.editable else browser.current.parent
                     browser.path.setText(str(browser.current) if browser.current else '')
                 active_workspace = getattr(self, 'active_workspace', self.sorter)
+                received = {str(path) for path in transferred if path.parent == browser.current}
+                if received:
+                    # Restore selection after the asynchronous folder scan, using
+                    # actual output paths (including auto-renamed destinations).
+                    browser._selected_file_paths = received
                 browser.navigate(browser.current)
                 self.active_workspace = active_workspace
             if errors:
@@ -6288,7 +6297,8 @@ class Window(QMainWindow):
         if policy is None:
             return
         self.run_operations('Move' if move else 'Copy',
-            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths])
+            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths],
+            select_transferred=True)
 
     def transfer_policy(self, paths, destinations, skip_same_folder=False):
         conflicts = []
@@ -6337,7 +6347,8 @@ class Window(QMainWindow):
         if policy is None:
             return
         snapshots = copy.deepcopy(self.config['groups'])
-        self.run_operations('Move to folders', self.folder_move_work(paths, destinations, keep_groups, policy, snapshots))
+        self.run_operations('Move to folders', self.folder_move_work(paths, destinations, keep_groups, policy, snapshots),
+                            select_transferred=True)
 
     def folder_move_work(self, paths, destinations, keep_groups, policy, snapshots):
         work = []
