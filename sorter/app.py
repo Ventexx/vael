@@ -21,6 +21,13 @@ DEFAULTS = {
 }
 
 
+def entry_name_key(name):
+    """Case-insensitive alphabetical order with numbered filenames in sequence."""
+    return ([(0, int(part)) if part.isdigit() else (1, part.casefold())
+             for part in re.split(r'(\d+)', name)], name)
+
+
+
 def group_for(config, path):
     text = str(path)
     return next((group for group in config.get('groups', []) if text in group['members']), None)
@@ -797,7 +804,7 @@ class MediaFilter(QSortFilterProxyModel):
             if ga and gb:
                 if ga['id'] != gb['id']:
                     return ga['id'] < gb['id']
-                return (a.name.casefold(), a.name) < (b.name.casefold(), b.name)
+                return entry_name_key(a.name) < entry_name_key(b.name)
         column = left.column()
         if column == 2:
             return a.size < b.size
