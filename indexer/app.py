@@ -6013,33 +6013,64 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._configure_native_frame()
         size = self._pending_window_size
         self._pending_window_size = None
         if size is not None:
             # Restore after native frame creation has settled client margins.
             QTimer.singleShot(0, lambda: self.resize(size) if not self.isMaximized() else None)
 
+    def _configure_native_frame(self):
+        """Let DWM own Windows 11 rounding; retain the mask fallback elsewhere."""
+        if not self._is_windows:
+            return
+        hwnd = wintypes.HWND(int(self.winId()))
+        dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        dwm.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        dwm.restype = ctypes.c_long
+        # Dark native transitions, matching outline, and native rounded corners.
+        for attribute, value in ((20, 1), (34, 0x005c5c5c)):
+            setting = ctypes.c_int(value)
+            dwm(hwnd, attribute, ctypes.byref(setting), ctypes.sizeof(setting))
+        preference = ctypes.c_int(2)  # DWMWCP_ROUND
+        self._native_corners = dwm(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference)) == 0
+        self._sync_shell_rounding()
+
     def nativeEvent(self, eventType, message):
         if self._is_windows and eventType in ("windows_generic_MSG", b"windows_generic_MSG"):
             msg = wintypes.MSG.from_address(int(message))
+            # Legacy themed caption painting must not overwrite our Qt controls.
+            if msg.message in (0x00AE, 0x00AF):  # WM_NCUAHDRAWCAPTION / FRAME
+                return True, 0
+            if msg.message == 0x0086 and not self.isMinimized():  # WM_NCACTIVATE
+                default_proc = ctypes.windll.user32.DefWindowProcW
+                default_proc.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+                default_proc.restype = ctypes.c_ssize_t
+                result = default_proc(msg.hWnd, msg.message, msg.wParam, -1)
+                return True, result  # Update activation without painting a native caption.
             if msg.message == _WM_NCCALCSIZE:
                 if msg.wParam:
-                    if self.isMaximized():
-                        # Inset the maximized client rect by the standard
-                        # frame size so the window doesn't hang off the
-                        # edges of the monitor / over the taskbar.
+                    # Qt's state can lag the native maximize/restore message.
+                    # Use the HWND state and physical-pixel metrics for this DPI.
+                    user32 = ctypes.windll.user32
+                    hwnd = wintypes.HWND(msg.hWnd)
+                    if user32.IsZoomed(hwnd) and not self.isFullScreen():
                         params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
-                        cx = ctypes.windll.user32.GetSystemMetrics(
-                            _SM_CXSIZEFRAME
-                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
-                        cy = ctypes.windll.user32.GetSystemMetrics(
-                            _SM_CYSIZEFRAME
-                        ) + ctypes.windll.user32.GetSystemMetrics(_SM_CXPADDEDBORDER)
+                        if hasattr(user32, 'GetSystemMetricsForDpi') and hasattr(user32, 'GetDpiForWindow'):
+                            dpi = user32.GetDpiForWindow(hwnd) or 96
+                            metric = lambda key: user32.GetSystemMetricsForDpi(key, dpi)
+                        else:
+                            metric = user32.GetSystemMetrics
+                        cx = metric(_SM_CXSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
+                        cy = metric(_SM_CYSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
                         params.rgrc[0].left += cx
                         params.rgrc[0].top += cy
                         params.rgrc[0].right -= cx
                         params.rgrc[0].bottom -= cy
-                    return True, 0
+                    # WVR_REDRAW: never preserve old shell/title-bar pixels when
+                    # Windows changes the client origin during a frame transition.
+                    return True, 0x0300
+                return True, 0
             elif msg.message == _WM_NCHITTEST:
                 return self._win_hit_test(msg)
         return super().nativeEvent(eventType, message)
@@ -6170,31 +6201,32 @@ class MainWindow(QMainWindow):
         self._sync_shell_rounding()
 
     def _sync_shell_rounding(self) -> None:
-        """Square off the shell's corners while maximized/fullscreen (there's
-        no desktop showing behind it to round away from), and restore the
-        rounded look the rest of the time."""
-        is_max = self.isMaximized() or self.isFullScreen()
-        prop = "true" if is_max else "false"
-        if self._shell.property("maximized") != prop:
-            self._shell.setProperty("maximized", prop)
-            self._shell.style().unpolish(self._shell)
-            self._shell.style().polish(self._shell)
+        if not hasattr(self, '_shell'):
+            return
+        expanded = self.isMaximized() or self.isFullScreen()
+        native = getattr(self, '_native_corners', False)
+        properties = {'maximized': "true" if expanded else "false",
+                      "nativeCorners": "true" if native else "false"}
+        changed = any(self._shell.property(key) != value for key, value in properties.items())
+        for key, value in properties.items():
+            self._shell.setProperty(key, value)
+        if changed:
+            # Descendant selectors must refresh too after maximize/restore.
+            for widget in (self._shell, self._title_bar, self._content_root):
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()
+        inset = 0 if expanded or native else 1
+        self._shell.layout().setContentsMargins(inset, inset, inset, inset)
         self._update_window_mask()
+        self._shell.update()
 
     def _update_window_mask(self) -> None:
-        """Physically clip the top-level window to a rounded-rect region.
-        WA_TranslucentBackground + a "background: transparent" stylesheet
-        rule is supposed to make the four corners outside #appShell's
-        rounded border see-through, but that depends on desktop compositing
-        actually producing a real per-pixel-alpha surface -- and on some
-        machines/setups that silently fails, leaving the square corners
-        filled with the app's background color instead of transparent.
-        setMask() sidesteps that entirely: it clips the *actual window
-        shape* at the OS level, so the corners are genuinely cut away
-        regardless of whether translucency compositing is working.
-        """
-        # Keep the native Windows frame styles for snapping and resizing,
-        # but clip its opaque client surface to the same shape as the shell.
+        # Explicit regions disable DWM rounding. Only use one on older Windows
+        # or on the non-Windows frameless implementation.
+        if getattr(self, '_native_corners', False):
+            self.clearMask()
+            return
         if not self._is_windows and self.objectName() != "mainWindowFrameless":
             return
         if self.isMaximized() or self.isFullScreen() or self.width() <= 0 or self.height() <= 0:
@@ -6209,6 +6241,7 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_shell_rounding()
+            QTimer.singleShot(0, self._sync_shell_rounding)
             self._max_btn.setIcon(_make_win_icon("restore" if self.isMaximized() else "max"))
         super().changeEvent(event)
 
@@ -7458,7 +7491,21 @@ def apply_style(app: QApplication) -> None:
         }}
 
         /* ── app shell / custom title bar ────────────────────────────── */
-        #appShell {{
+        /* DWM clips the whole native window; do not draw a second rounded shell. */
+#appShell[nativeCorners="true"] {{
+    border: none;
+    border-radius: 0px;
+}}
+#appShell[nativeCorners="true"] #appTitleBar {{
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
+}}
+#appShell[nativeCorners="true"] #appRoot {{
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
+}}
+
+#appShell {{
             background: {BG_BASE};
             border: 1px solid {OUTER_OUTLINE};
             border-radius: 10px;
