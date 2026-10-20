@@ -3541,7 +3541,7 @@ class CoverBrowser(ImageBrowser):
         self.table.hide()
         self.reload_folder_btn.show()
         self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
-        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
+        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', self.close_current_folder), ('M', self.move_selected_images), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
@@ -3582,6 +3582,16 @@ class CoverBrowser(ImageBrowser):
                 card.set_entry_zoom(self.entry_zoom)
             section._current_cols = 0
             section._relayout_cards()
+
+    def close_current_folder(self):
+        section = self._sections_by_path.get(self._focused_path) or self._active_tab_root_section()
+        if section:
+            section.set_expanded(False)
+
+    def move_selected_images(self):
+        paths = self.selected_paths()
+        if paths and all(p.is_file() and p.suffix.lower() in IMAGES | {'.gif'} for p in paths):
+            self.window.transfer_dialog(self, True)
 
     def toggle_search(self, visible):
         self.filter_panel.setVisible(visible)
@@ -4001,6 +4011,20 @@ class WorkspaceBrowser(CoverBrowser):
         self.grid.setGridSize(QSize(round(96 * scale) + 6, round(96 * scale) + 38))
         self.grid.doItemsLayout()
         self.grid.viewport().update()
+
+    def close_current_folder(self):
+        self.up()
+
+    def navigate_sibling_folder(self, direction):
+        if not self.current or self.current == self.window.service.root:
+            return
+        try:
+            siblings = sorted((p for p in self.current.parent.iterdir()
+                               if p.is_dir() and self.window.service.inside(p)), key=lambda p: entry_name_key(p.name))
+            if self.current in siblings and len(siblings) > 1:
+                self.navigate(siblings[(siblings.index(self.current) + direction) % len(siblings)])
+        except OSError as exc:
+            self.window.notice(exc)
 
     def _position_status_bar(self):
         if not hasattr(self, 'navigation'):
@@ -4543,6 +4567,24 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         a.addWidget(note)
         self._section(layout, 'Profiles & exclusions', 'Share naming rules and exclude filenames or folders with wildcard patterns.').addWidget(advanced)
+        shortcuts = self._section(layout, 'Hotkeys', 'Fixed shortcuts for the focused explorer; disabled while typing in text fields.')
+        for key, description in [
+            ('Ctrl+C', 'Close current folder (workspace: go to parent)'),
+            ('Ctrl+Up / Ctrl+Down', 'Close current folder and open previous / next sibling'),
+            ('M', 'Open Move to Folder for selected images'),
+            ('Ctrl+A', 'Select all visible entries'), ('Ctrl+F', 'Search and filters'),
+            ('F5', 'Refresh'), ('Alt+Up', 'Workspace: parent folder'),
+            ('Ctrl+X / Ctrl+V', 'Workspace: cut / paste'), ('F2', 'Rename selection'),
+            ('Delete', 'Move selected workspace entries to trash'),
+            ('Ctrl+Shift+N', 'Create workspace folders'), ('Ctrl+Z', 'Undo last file operation')]:
+            row = QHBoxLayout()
+            label = QLabel(key)
+            label.setMinimumWidth(155)
+            row.addWidget(label)
+            detail = QLabel(description)
+            detail.setWordWrap(True)
+            row.addWidget(detail, 1)
+            shortcuts.addLayout(row)
         layout.addStretch(1)
         self.populate_tables(config)
         footer = QWidget()
@@ -5995,6 +6037,10 @@ class Window(QMainWindow):
         self.target_label.setToolTip(root)
 
     def focus_changed(self, old, new):
+        typing = isinstance(new, (QLineEdit, QPlainTextEdit, QSpinBox))
+        for browser in getattr(self, 'browsers', []):
+            for shortcut in browser.findChildren(QShortcut):
+                shortcut.setEnabled(not typing)
         if new:
             for browser in getattr(self, 'browsers', []):
                 if browser == new or browser.isAncestorOf(new):
@@ -6333,7 +6379,7 @@ class Window(QMainWindow):
             policy = 'overwrite' if box.clickedButton() is overwrite else 'rename'
         return policy
 
-    def move_to_folders(self, paths, destinations, keep_groups):
+    def move_to_folders(self, paths, destinations, keep_groups, move_originals=True):
         paths = top_level_selection(paths)
         destinations = list(dict.fromkeys(normalized(p) for p in destinations))
         if not paths or not destinations:
@@ -6344,7 +6390,8 @@ class Window(QMainWindow):
                 if not destination.is_dir():
                     raise ValueError('A destination folder is unavailable.')
             for path in paths:
-                self.service.require(path)
+                if move_originals:
+                    self.service.require(path)
                 if path.is_dir() and any(d.is_relative_to(path) for d in destinations):
                     raise ValueError('A selected folder cannot be moved or copied inside itself.')
         except ValueError as exc:
@@ -6354,10 +6401,10 @@ class Window(QMainWindow):
         if policy is None:
             return
         snapshots = copy.deepcopy(self.config['groups'])
-        self.run_operations('Move to folders', self.folder_move_work(paths, destinations, keep_groups, policy, snapshots),
+        self.run_operations('Move to folders', self.folder_move_work(paths, destinations, keep_groups, policy, snapshots, move_originals),
                             select_transferred=True)
 
-    def folder_move_work(self, paths, destinations, keep_groups, policy, snapshots):
+    def folder_move_work(self, paths, destinations, keep_groups, policy, snapshots, move_originals=True):
         work = []
         primary, *copies = destinations
         for path in paths:
@@ -6377,7 +6424,7 @@ class Window(QMainWindow):
                 return GroupTransferResult(source, target, move, keep_groups, snapshots)
             for destination in copies:
                 work.append((f'{path} → {destination}', lambda d=destination, fn=action: fn(d, False)))
-            move_original = path.parent not in destinations
+            move_original = move_originals and path.parent not in destinations
             work.append((f'{path} → {primary}', lambda d=primary, fn=action, move=move_original: fn(d, move)))
         return work
 
@@ -6394,6 +6441,8 @@ class Window(QMainWindow):
         dialog.resize(520, 500)
         layout = QVBoxLayout(dialog)
         hint = QLabel('Ctrl-click to select multiple folders. The first folder in the list receives the move; the others receive copies.')
+        if not browser.editable:
+            hint.setText('Ctrl-click to select destination folders. Source images are copied to every selection; originals stay unchanged.')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         tree = QTreeWidget()
@@ -6432,7 +6481,7 @@ class Window(QMainWindow):
                 item.setData(0, Qt.UserRole, str(path))
                 item.setIcon(0, self.sorter.folder_icon)
                 items[path] = item
-            root_item.setExpanded(True)
+            tree.expandAll()
             status.setText('\n'.join(result[1]) or f'{len(items)} folders')
         tree.setCurrentItem(root_item)
         task = self.jobs.start(folders, populated, lambda error: status.setText(error) if isValid(status) else None)
@@ -6442,7 +6491,7 @@ class Window(QMainWindow):
             selected = {item.data(0, Qt.UserRole) for item in tree.selectedItems()}
             destinations = sorted((path for path in items if str(path) in selected),
                                   key=lambda p: tuple(part.casefold() for part in p.relative_to(root).parts))
-            self.move_to_folders(browser.selected_paths(), destinations, keep.isChecked())
+            self.move_to_folders(browser.selected_paths(), destinations, keep.isChecked(), browser.editable)
         dialog.deleteLater()
 
     def duplicate(self, browser):
