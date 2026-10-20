@@ -723,7 +723,10 @@ class MediaModel(QAbstractTableModel):
         self.endResetModel()
 
     def thumbnail(self, entry):
-        key = (str(entry.path), entry.mtime, entry.size)
+        side = round(96 * self.owner.entry_zoom / 100)
+        density = max(2.0, self.owner.devicePixelRatioF() * 2)
+        width, height = round(side * density), round((side + 20) * density)
+        key = (str(entry.path), entry.mtime, entry.size, width, height)
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
@@ -733,13 +736,7 @@ class MediaModel(QAbstractTableModel):
         generation = self.generation
 
         def decode(task):
-            reader = QImageReader(str(entry.path))
-            reader.setAutoTransform(True)
-            size = reader.size()
-            if size.isValid():
-                size.scale(360, 260, Qt.KeepAspectRatio)
-                reader.setScaledSize(size)
-            return reader.read()
+            return decode_thumbnail(entry.path, width, height)
 
         def ready(image):
             if generation != self.generation:
@@ -760,6 +757,8 @@ class MediaModel(QAbstractTableModel):
         entry = self.entries[index.row()]
         if role == Qt.UserRole:
             return entry
+        if role == Qt.UserRole + 2 and entry.kind in ('Image', 'GIF'):
+            return self.thumbnail(entry)
         if role == Qt.ToolTipRole:
             values = ' · '.join(f'{k}: {v}' for k, v in entry.fields.items())
             return f'{entry.path}\n{entry.path.suffix.upper() or "Folder"}  {readable_size(entry.size)}\n{values}'
@@ -901,23 +900,26 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor('#00d4a0'), 2) if selected else Qt.NoPen)
         painter.setBrush(QColor('#174b42') if selected else QColor('#181818'))
         painter.drawRoundedRect(QRectF(tile).adjusted(1, 1, -1, -1), 6, 6)
-        icon = index.data(Qt.DecorationRole)
-        if isinstance(icon, QIcon):
-            icon_size = round(size * .67) if entry.is_dir else size
-            pixmap = icon.pixmap(QSize(icon_size, icon_size))
-            if not pixmap.isNull():
-                if entry.kind in ('Image', 'GIF'):
-                    pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                    pixmap = pixmap.copy((pixmap.width() - size) // 2, (pixmap.height() - size) // 2, size, size)
-                painter.save()
-                clip = QPainterPath()
-                clip.addRoundedRect(QRectF(thumbnail).adjusted(3, 3, -3, -3), 4, 4)
-                painter.setClipPath(clip)
+        raw = index.data(Qt.UserRole + 2) if entry.kind in ('Image', 'GIF') else None
+        if isinstance(raw, QPixmap) and not raw.isNull():
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(QRectF(tile).adjusted(3, 3, -3, -3), 4, 4)
+            painter.setClipPath(clip)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.drawPixmap(QRectF(tile), raw, QRectF(raw.rect()))
+            painter.restore()
+        else:
+            icon = index.data(Qt.DecorationRole)
+            if isinstance(icon, QIcon):
+                icon_size = round(size * .67) if entry.is_dir else size
+                pixmap = icon.pixmap(QSize(icon_size, icon_size))
                 painter.drawPixmap(thumbnail.center().x() - pixmap.width() // 2,
                                    thumbnail.center().y() - pixmap.height() // 2, pixmap)
-                painter.restore()
-        painter.setPen(QColor('#eeeeee'))
-        caption = QRect(tile.x() + 4, tile.y() + size, size - 8, 20)
+        caption = QRect(tile.x() + 4, tile.bottom() - 20, size - 8, 20)
+        if not entry.is_dir:
+            painter.fillRect(caption, QColor(10, 10, 10, 100))
+        painter.setPen(QColor(238, 238, 238, 205) if not entry.is_dir else QColor('#eeeeee'))
         painter.drawText(caption, Qt.AlignCenter, option.fontMetrics.elidedText(entry.name, Qt.ElideRight, caption.width()))
         painter.restore()
 
@@ -1008,29 +1010,29 @@ THUMB_H = 159
 _PIXMAP_CACHE: dict[str, QImage] = {}
 
 
+def decode_thumbnail(path, width, height):
+    """Shared upper/lower explorer decoder: orient, oversample, then crop to fill."""
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if size.isValid():
+        size.scale(width, height, Qt.KeepAspectRatioByExpanding)
+        reader.setScaledSize(size)
+    image = reader.read()
+    if image.isNull():
+        return image
+    image = image.scaled(width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    return image.copy((image.width() - width) // 2, (image.height() - height) // 2, width, height)
+
+
 def _load_pixmap(path: str) -> QImage:
     """Return a cached thumbnail image, safe to decode on a worker thread."""
     if Path(path).suffix.lower() not in IMAGES:
         return QImage()
     cached = _PIXMAP_CACHE.get(path)
     if cached is None:
-        reader = QImageReader(path)
-        reader.setAutoTransform(True)
-        size = reader.size()
-        if size.isValid():
-            size.scale((THUMB_W * 2), (THUMB_H * 2), Qt.KeepAspectRatioByExpanding)
-            reader.setScaledSize(size)
-        pix = reader.read()
-        if not pix.isNull():
-            scaled = pix.scaled(
-                (THUMB_W * 2), (THUMB_H * 2),
-                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
-            )
-            x = (scaled.width() - (THUMB_W * 2)) // 2
-            y = (scaled.height() - (THUMB_H * 2)) // 2
-            pix = scaled.copy(x, y, (THUMB_W * 2), (THUMB_H * 2))
-        _PIXMAP_CACHE[path] = pix
-        return pix
+        cached = decode_thumbnail(path, THUMB_W * 2, THUMB_H * 2)
+        _PIXMAP_CACHE[path] = cached
     return cached
 
 
@@ -4226,26 +4228,24 @@ class Shelf(QWidget):
     def refresh_item(self, item):
         from types import SimpleNamespace
         path = Path(item.data(Qt.UserRole))
+        item.setData(Qt.UserRole + 2, None)
         kind = 'Folder' if path.is_dir() else 'GIF' if path.suffix.lower() == '.gif' else 'Image' if path.suffix.lower() in IMAGES else 'Video' if path.suffix.lower() in VIDEOS else 'Other'
         item.setData(Qt.UserRole + 1, SimpleNamespace(path=path, name=path.name, is_dir=path.is_dir(), kind=kind))
         item.setText(path.name)
         item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon if path.is_dir() else QStyle.SP_FileIcon))
         if kind in ('Image', 'GIF'):
+            density = max(2.0, self.devicePixelRatioF() * 2)
             def decode(task):
-                reader = QImageReader(str(path))
-                reader.setAutoTransform(True)
-                size = reader.size()
-                if size.isValid():
-                    size.scale(192, 192, Qt.KeepAspectRatioByExpanding)
-                    reader.setScaledSize(size)
-                return reader.read()
+                return decode_thumbnail(path, round(96 * density), round(116 * density))
             def ready(image):
                 if image.isNull():
                     return
                 for i in range(self.list.count()):
                     target = self.list.item(i)
                     if target.data(Qt.UserRole) == str(path):
-                        target.setIcon(QIcon(QPixmap.fromImage(image)))
+                        pixmap = QPixmap.fromImage(image)
+                        target.setData(Qt.UserRole + 2, pixmap)
+                        target.setIcon(QIcon(pixmap))
             self.window.jobs.start(decode, ready)
 
     def update_count(self):
