@@ -1579,6 +1579,7 @@ class _DraggableDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("customDialog")
         self._drag_pos: Optional[QPoint] = None
 
     def _center_on_parent(self) -> None:
@@ -1653,14 +1654,9 @@ class EditJsonDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        # Shadow container - transparent, just for the drop-shadow effect
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1857,13 +1853,9 @@ class AddTagDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3412,13 +3404,9 @@ class ConfirmRemoveDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3519,13 +3507,9 @@ class OpenDatabaseDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3759,13 +3743,9 @@ class AddScriptDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -3901,13 +3881,9 @@ class StartupScriptsDialog(_DraggableDialog):
 
         self._scripts: list[dict] = _load_scripts()
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -4133,13 +4109,9 @@ class AddIdentifierDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -4396,13 +4368,9 @@ class ManageIdentifiersDialog(_DraggableDialog):
         self._identifiers: list[str] = self._db.get_identifiers() if self._db else []
         self._expanded: set[str] = set()
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -7167,13 +7135,9 @@ class CreateNoteDialog(_DraggableDialog):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        shadow_frame = QFrame(self)
-        shadow_frame.setObjectName("dialogShadow")
-        shadow_frame.setGeometry(4, 4, self.W - 4, self.H - 4)
-
         frame = QFrame(self)
         frame.setObjectName("editDialogFrame")
-        frame.setGeometry(0, 0, self.W - 4, self.H - 4)
+        frame.setGeometry(0, 0, self.W, self.H)
 
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -7852,11 +7816,8 @@ def apply_style(app: QApplication) -> None:
         QMenu::item:selected {{ background: {ACCENT_DIM}; color: {ACCENT}; }}
         QMenu::separator     {{ height: 1px; background: rgba(255,255,255,0.07); margin: 3px 4px; }}
 
-        /* ── shadow layer behind dialog frame ───────────────────────── */
-        #dialogShadow {{
-            background: rgba(0,0,0,0.55);
-            border-radius: 10px;
-        }}
+        /* The rounded frame is the only painted dialog surface. */
+        #customDialog {{ background: transparent; }}
 
         /* ── shared dialog frame ─────────────────────────────────────── */
         #editDialogFrame {{
