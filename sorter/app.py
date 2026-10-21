@@ -837,6 +837,24 @@ class MediaFilter(QSortFilterProxyModel):
 
 
 
+def file_drag_mime(paths, editable=None):
+    """Offer original files, never rendered thumbnails or re-encoded image data.
+
+    Qt maps local URLs to Windows CF_HDROP, the file-list format browsers and
+    Explorer accept. Keep the private origin marker for Sorter's internal moves.
+    """
+    mime = QMimeData()
+    originals = list(dict.fromkeys(os.path.abspath(os.fspath(path)) for path in paths))
+    mime.setUrls([QUrl.fromLocalFile(path) for path in originals])
+    if editable is not None:
+        mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if editable else b'source'))
+    if sys.platform == 'win32':
+        # DROPEFFECT_COPY: dragging out must leave the originals in place.
+        mime.setData('application/x-qt-windows-mime;value="Preferred DropEffect"',
+                     QByteArray((1).to_bytes(4, 'little')))
+    return mime
+
+
 class DragViewMixin:
     def setup_drag(self, browser):
         self.browser = browser
@@ -852,11 +870,7 @@ class DragViewMixin:
         paths = self.browser.selected_paths()
         if not paths:
             return
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
-        # Always advertise copy to external apps, so an external drop cannot
-        # request deletion of a protected original. Internal drops are explicit.
-        mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.browser.editable else b'source'))
+        mime = file_drag_mime(paths, self.browser.editable)
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.CopyAction, Qt.CopyAction)
@@ -1662,16 +1676,15 @@ class ThumbnailCard(QWidget):
             super().mouseDoubleClickEvent(event)
 
     def _start_drag(self):
-        mime = QMimeData()
         paths = self.browser.drag_paths(self) if self.browser else [self.filepath]
-        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
-        mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.browser.editable else b'source'))
+        mime = file_drag_mime(paths, self.browser.editable if self.browser else False)
         drag = QDrag(self)
         drag.setMimeData(mime)
-        pix = QPixmap.fromImage(_load_pixmap(self.filepath))
-        if not pix.isNull():
+        # The drag cursor is only a preview; it is never part of the file payload.
+        pix = self._img_lbl.pixmap()
+        if pix is not None and not pix.isNull():
             drag.setPixmap(pix.scaled(THUMB_W // 2, THUMB_H // 2, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        drag.exec(Qt.CopyAction)
+        drag.exec(Qt.CopyAction, Qt.CopyAction)
 
     def enterEvent(self, event):
         self._hovered = True
@@ -1867,9 +1880,7 @@ class FolderHeader(QToolButton):
                 if self.section.path not in browser.selected_folder_paths():
                     browser.clear_selection()
                     browser.toggle_folder_selection(self.section.path)
-                mime = QMimeData()
-                mime.setUrls([QUrl.fromLocalFile(str(p)) for p in browser.selected_paths()])
-                mime.setData('application/x-vael-sorter', QByteArray(b'workspace' if self.section.browser.editable else b'source'))
+                mime = file_drag_mime(browser.selected_paths(), browser.editable)
                 drag = QDrag(self)
                 drag.setMimeData(mime)
                 drag.exec(Qt.CopyAction)
@@ -3755,7 +3766,7 @@ class CoverBrowser(ImageBrowser):
 
     def selected_paths(self):
         if self._details:
-            return [i.data(Qt.UserRole).path for i in self.table.selectionModel().selectedIndexes() if i.column() == 0]
+            return [i.data(Qt.UserRole).path for i in sorted(self.table.selectionModel().selectedIndexes(), key=lambda i: i.row()) if i.column() == 0]
         return [Path(p) for p in sorted(self._selected_file_paths | set(self.selected_folder_paths()))]
 
     def select_card(self, card, modifiers=Qt.ControlModifier):
@@ -3780,7 +3791,14 @@ class CoverBrowser(ImageBrowser):
             self._selected_file_paths = {card.filepath}
             self.clear_folder_selection()
             self.repaint_content()
-        return self.selected_paths()
+        paths = self.selected_paths()
+        # Selection is a set; export visible cards in their on-screen order.
+        cards = [c for section in self._sections_by_path.values() if section.isVisible()
+                 for c in section._cards if c.isVisible() and c.filepath in self._selected_file_paths]
+        cards.sort(key=lambda c: (c.mapToGlobal(QPoint(0, 0)).y(), c.mapToGlobal(QPoint(0, 0)).x()))
+        ordered = [Path(c.filepath) for c in cards]
+        seen = set(ordered)
+        return ordered + [path for path in paths if path not in seen]
 
     def open_card(self, card, cards):
         self.window.active_browser = self
@@ -4046,7 +4064,7 @@ class WorkspaceBrowser(CoverBrowser):
             self._selected_file_paths = {str(p) for p in self.selected_paths()}
 
     def selected_paths(self):
-        return [i.data(Qt.UserRole).path for i in self.grid.selectionModel().selectedIndexes() if i.column() == 0]
+        return [i.data(Qt.UserRole).path for i in sorted(self.grid.selectionModel().selectedIndexes(), key=lambda i: i.row()) if i.column() == 0]
 
     def selected_folder_paths(self):
         return [str(p) for p in self.selected_paths() if p.is_dir()]
@@ -4218,8 +4236,7 @@ class ShelfList(QListWidget):
         event.accept()
 
     def startDrag(self, actions):
-        mime = QMimeData()
-        mime.setUrls([QUrl.fromLocalFile(item.data(Qt.UserRole)) for item in self.selectedItems()])
+        mime = file_drag_mime(item.data(Qt.UserRole) for item in sorted(self.selectedItems(), key=self.row))
         # Shelf drops always copy, even if references happen to be in sorting.
         drag = QDrag(self)
         drag.setMimeData(mime)

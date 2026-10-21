@@ -195,6 +195,10 @@ The upper explorer has one view: expandable folders with media cards. The **⋯*
 
 Folder scans and thumbnail decoding run in the background. Search changes cancel outdated scans. Use Refresh / F5 to reload the active folder after external changes; the active directory is also checked periodically. Large recursive searches can take time.
 
+### dragging files to other apps
+
+You can drag one or more selected images directly from either explorer into a browser's image-upload drop area (for example, a Reddit image-post composer). Sorter supplies the original files with their existing names and bytes; the small drag preview is not the uploaded image. Multi-image drags follow the displayed order, although the receiving website may reorder or process uploads. Dragging out leaves the originals in place. Ctrl-click or Shift-click to select several images, then drag one of the selected images. The destination must support file drops and the selected file types.
+
 ### session shelf
 
 Switch between **Workspace** and **Shelf** in the lower controls; only one is displayed at a time. Shelf is temporary storage for references. Use **Add to Shelf** in the context menu, or drag files onto the shelf. Its compact square thumbnails and filenames match the workspace grid, wrap across rows, and fill the available pane. Ctrl-click and Shift-click select references for copying or removal; double-click opens a preview. The active Workspace or Shelf button has a visible selected border. Repeated references are not added twice. The shelf holds references, not temporary copies, and disappears when the app closes.
