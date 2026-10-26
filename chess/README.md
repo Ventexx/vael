@@ -76,7 +76,7 @@ The summary shows separate White and Black accuracy estimates, a move-quality br
 
 Before each move, a green arrow shows the preferred move and a dashed amber arrow shows the played move. **Try …** previews the preferred position; the continuation buttons step through the engine's replies. **Played move** compares the original choice and its engine continuation. These previews never change your saved game or variations, and closing Review restores your original position. Review arrows remain visible independently of the normal engine-arrow setting.
 
-Explanations use verified board facts and engine lines. The system assigns Great, Best, Excellent, Good, Inaccuracy, Mistake, Blunder, and Forced; it does not invent Brilliant labels or human skill ratings. See `docs/review-roadmap.md` for the scoring method and remaining work.
+Explanations use verified board facts and engine lines. The system assigns Great, Best, Excellent, Good, Inaccuracy, Mistake, Blunder, and Forced; it does not invent Brilliant labels or human skill ratings.
 
 ## file structure
 
@@ -93,7 +93,6 @@ backend/              — Python application code
   capture.py          — experimental screen-board recognition
 frontend/             — interface HTML, CSS, JavaScript, and piece artwork
 browser-extension/    — Chrome/Edge companion and generated Firefox package
-docs/review-roadmap.md — scoring method and unfinished review refinements
 requirements.txt      — Python dependencies
 start.bat             — Windows setup and windowless launch
 start_silent.bat      — compatibility shortcut to start.bat
