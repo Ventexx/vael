@@ -323,7 +323,7 @@ Search is case-insensitive and uses partial matches. Multiple terms are combined
 
 ## images, GIFs, videos & documents
 
-Images receive background thumbnails cached for the session. GIFs and videos use static media tiles with a subtle colored outline; their exact extension appears in the tooltip and on hover. They never autoplay in the explorer.
+Images receive background thumbnails cached for the session. GIFs and videos use static media tiles with a subtle colored outline; their exact extension appears on hover. File entries do not show path tooltips; use **Information** or **Copy as Path** when needed. They never autoplay in the explorer.
 
 Double-click a file to open the in-window viewer. Images support Fit, Actual size, mouse-wheel zoom, and dragging to pan; right-click for viewer actions. Escape or clicking outside closes the viewer. GIFs animate there and can be paused. Videos provide play/pause, seeking, time, and volume. Left/Right moves between media items in the current filtered view, and Space toggles playback. Add to shelf works from the viewer too.
 

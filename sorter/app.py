@@ -770,9 +770,6 @@ class MediaModel(QAbstractTableModel):
             return entry
         if role == Qt.UserRole + 2 and entry.kind in ('Image', 'GIF'):
             return self.thumbnail(entry)
-        if role == Qt.ToolTipRole:
-            values = ' · '.join(f'{k}: {v}' for k, v in entry.fields.items())
-            return f'{entry.path}\n{entry.path.suffix.upper() or "Folder"}  {readable_size(entry.size)}\n{values}'
         if role == Qt.DisplayRole:
             return [entry.name, entry.kind, '' if entry.is_dir else readable_size(entry.size),
                     datetime.fromtimestamp(entry.mtime).strftime('%Y-%m-%d %H:%M'),
@@ -1566,7 +1563,6 @@ class ThumbnailCard(QWidget):
         lay.addWidget(self._img_lbl)
 
         self.browser = None
-        self.setToolTip(str(filepath))
         PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
 
     def request_image(self):
@@ -2588,7 +2584,7 @@ class MediaViewerOverlay(ImgViewerOverlay):
         self._volume.setVisible(video)
         self._time.setVisible(video)
         self._name_lbl.setText(path.name)
-        self._name_lbl.setToolTip(str(path))
+        self._name_lbl.setToolTip('')
         if video:
             self._player.setSource(QUrl.fromLocalFile(str(path)))
             self._player.play()
@@ -4276,7 +4272,6 @@ class Shelf(QWidget):
                 continue
             item = QListWidgetItem('')
             item.setData(Qt.UserRole, str(path))
-            item.setToolTip(str(path))
             self.list.addItem(item)
             self.refresh_item(item)
             existing.add(str(path))
@@ -6386,12 +6381,10 @@ class Window(QMainWindow):
                 text = mapped(item.data(Qt.UserRole))
                 if text:
                     item.setData(Qt.UserRole, text)
-                    item.setToolTip(text)
                     self.shelf.refresh_item(item)
                     card = self.shelf.list.itemWidget(item)
                     if card:
                         card.filepath = text
-                        card.setToolTip(text)
                         card._image_loaded = False
                         card.request_image()
                 else:
