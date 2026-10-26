@@ -858,6 +858,9 @@ class DragViewMixin:
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(browser.editable)
+        # QAbstractScrollArea delivers item drops through its viewport. Without
+        # this, the parent explorer accepts the drag and uses its current folder.
+        self.viewport().setAcceptDrops(browser.editable)
         self.setDropIndicatorShown(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda point: browser.context_menu(self, point))
@@ -6419,7 +6422,12 @@ class Window(QMainWindow):
             self.notice(exc)
             return
         paths = top_level_selection(paths)
-        destination = Path(destination)
+        destination = normalized(destination)
+        if move:
+            paths = [path for path in paths if normalized(path).parent != destination]
+            if not paths:
+                self.operation_status.setText('Selected items are already in this folder.')
+                return
         policy = self.transfer_policy(paths, [destination])
         if policy is None:
             return
