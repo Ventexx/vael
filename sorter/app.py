@@ -6167,7 +6167,6 @@ class Window(QMainWindow):
                 else:
                     browser.refresh()
             self.update_target_label()
-            self.tagging.health()
 
     def copy_selection(self, browser, cut):
         paths = browser.selected_paths()
@@ -6227,7 +6226,6 @@ class Window(QMainWindow):
             self.undo_button.setEnabled(True)
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
-            self.tagging.health()
             transferred = set()
             if select_transferred:
                 transferred = {value.target if isinstance(value, GroupTransferResult) else value
@@ -6774,7 +6772,6 @@ class Window(QMainWindow):
     def poll_folders(self):
         if self.operation_task or QApplication.activeModalWidget():
             return
-        changed = False
         for browser in self.browsers:
             if not browser.isVisible() or not browser.current:
                 continue
@@ -6784,14 +6781,10 @@ class Window(QMainWindow):
                 self.folder_stamps[str(browser.current)] = stamp
                 if previous is not None and previous != stamp:
                     browser.refresh()
-                    changed = True
             except FileNotFoundError:
-                if self.folder_stamps.pop(str(browser.current), None) is not None:
-                    changed = True
+                self.folder_stamps.pop(str(browser.current), None)
             except OSError:
                 pass
-        if changed and not self.tagging.busy:
-            self.tagging.health()
 
     def restore_layout(self):
         state = self.config.get('layout', {})

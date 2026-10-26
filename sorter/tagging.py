@@ -5,7 +5,7 @@ import time
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QProgressBar, QPushButton, QTabWidget, QVBoxLayout, QWidget)
+    QProgressBar, QPushButton, QTabWidget, QVBoxLayout, QWidget, QMessageBox)
 
 from tag_process import TagProcess
 from tag_store import TagStore, IMAGE_EXTENSIONS, canonical, discover, fingerprint, linked, within
@@ -55,7 +55,8 @@ class Tagging(QObject):
         self.stop = QPushButton('Stop after current image')
         self.stop.clicked.connect(self.cancel)
         controls.addWidget(self.stop)
-        self.check = QPushButton('Check tag health')
+        self.check = QPushButton('Check saved tags…')
+        self.check.setToolTip('Manual full-library scan to reconcile saved tags and links. Requires confirmation.')
         self.check.clicked.connect(self.health)
         controls.addWidget(self.check)
         body.addLayout(controls)
@@ -114,8 +115,6 @@ class Tagging(QObject):
         if self.load_error:
             self.state['phase'] = 'Storage unavailable'
             self.error(self.load_error)
-        else:
-            self.health()
 
     def choose_model(self):
         path = QFileDialog.getExistingDirectory(self.dialog, 'Existing model folder', self.model_dir.text())
@@ -197,8 +196,21 @@ class Tagging(QObject):
     def health(self):
         if self.closing or not self.available():
             return
-        self._begin('Checking tag health')
         roots = self.roots()
+        confirm = QMessageBox(self.dialog)
+        confirm.setWindowTitle('Check saved tags across all folders?')
+        confirm.setIcon(QMessageBox.Question)
+        confirm.setText('This scans every image in all configured source folders and the workspace.')
+        confirm.setInformativeText('It reads image contents to reconcile saved tags and links after external moves, replacements or deletions. It does not generate tags. Large libraries can take a long time. File changes are blocked during this scan; you can stop it in the Tagger window.')
+        confirm.setDetailedText('Folders to scan:\n' + '\n'.join(roots))
+        confirm.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        confirm.setDefaultButton(QMessageBox.Cancel)
+        if confirm.exec() != QMessageBox.Yes:
+            return
+        # A modeless Tagger window may have changed state during confirmation.
+        if self.closing or not self.available():
+            return
+        self._begin('Checking saved tags (manual full-library scan)')
 
         def execute(task):
             try:
