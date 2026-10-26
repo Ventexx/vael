@@ -13,6 +13,7 @@ A dark desktop image editor built for one job: pixelating or blurring parts of a
 
 - pixelate and bokeh blur with adjustable strength and saved presets
 - rectangle, ellipse, and lasso selections, with add/remove selection controls
+- Modes button above Auto Next switches between State M and State K. Each stores its own default tool and Template + Save template; the combo hotkey is shared. State M starts with Lasso and keeps the existing template binding. State K prompts for defaults on first use. Edit the current state's defaults from Template + Save in the hotkey guide. The editor launches in State M.
 - import individual images or folders and organize them into categories
 - reload folder categories with their ↻ button or “Reload from folder” menu item; pick up disk changes while keeping unsaved edits
 - background folder previews, with priority given to the visible category

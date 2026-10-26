@@ -274,6 +274,9 @@
      pick as "the" template, plus the same key-capture control used for
      regular preset hotkeys (reuses .preset-key below). */
   #template-save-list { max-height: 180px; overflow-y: auto; margin-bottom: 4px; }
+  #mode-default-tool { width: 100%; padding: 6px; margin-bottom: 8px; background: var(--bg3); color: var(--text); border: 1px solid var(--border2); border-radius: 4px; }
+  #panel-template-save { max-height: calc(100% - 20px); overflow-y: auto; }
+  #tool-mode-label { color: var(--accent); font-family: var(--font); font-size: 14px; }
   .tpl-row {
     display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin-bottom: 4px;
     border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: 11px; color: var(--text);
@@ -603,6 +606,10 @@
 
       <!-- Pinned to the bottom: auto-advance toggle + read-only hotkey guide -->
       <div class="toolbar-bottom">
+        <button class="tool-btn" id="tool-mode" onclick="switchMode()" aria-label="Modes: State M. Switch to State K">
+          <span id="tool-mode-label">M</span>
+          <span class="tool-tooltip" id="tool-mode-tooltip">Modes: State M → State K</span>
+        </button>
         <button class="tool-btn active" id="tool-autoadvance" onclick="toggleAutoAdvance()">
           <svg viewBox="0 0 24 24"><path d="M5 4l8 8-8 8V4z"/><path d="M15 4l8 8-8 8V4z"/></svg>
           <span class="tool-tooltip" id="tool-autoadvance-tooltip">Auto-next after save: ON</span>
@@ -666,7 +673,19 @@
            preset, then save" hotkey. Not opened from the toolbar like
            Pixelate/Blur; opened by clicking its entry in the Hotkeys guide. -->
       <div class="filter-panel" id="panel-template-save">
-        <div class="fp-head">Template + Save Combo <button class="fp-close" onclick="toggleTemplateSavePanel()">×</button></div>
+        <div class="fp-head"><span id="mode-settings-title">State M defaults</span> <button class="fp-close" onclick="toggleTemplateSavePanel()">×</button></div>
+        <div class="fp-label" id="mode-setup-hint"></div>
+        <label class="fp-label" for="mode-default-tool">Default tool</label>
+        <select id="mode-default-tool" onchange="setModeDefaultTool(this.value)">
+          <option value="" disabled>Choose a default tool…</option>
+          <option value="move">Move</option>
+          <option value="rect">Rectangle Select</option>
+          <option value="ellipse">Ellipse Select</option>
+          <option value="lasso">Lasso Select</option>
+          <option value="pixelate">Pixelate</option>
+          <option value="blur">Bokeh Blur</option>
+        </select>
+        <div class="fp-presets-label">Template + Save Combo</div>
         <div class="fp-label">template</div>
         <div id="template-save-list"></div>
         <div id="template-save-hotkey-section">
@@ -827,10 +846,9 @@ const state = {
   activeIdx: -1,
   zoom: 1, panX: 0, panY: 0,
   isDragging: false, lastMx: 0, lastMy: 0,
-  // Workflow always starts with a lasso selection, so that's the default
-  // tool/shape rather than move+rect — matches "lasso select -> pixelate ->
-  // save -> next image" out of the box, no setup needed each launch.
+  // State M starts with Lasso unless its saved default has been changed.
   currentTool: 'select',   // 'move' | 'select'
+  mode: 'M',              // launches in State M; each mode keeps its own defaults
   selectShape: 'lasso',    // 'rect' | 'ellipse' | 'lasso'
   sel: null, lassoPoints: [], isDrawing: false, drawStartX: 0, drawStartY: 0,
   galleryState: 'side',    // 'hidden' | 'side' | 'expanded'
@@ -861,12 +879,8 @@ const SHAPE_ICONS = {
 const GALLERY_STATES = ['hidden', 'side'];
 const RESERVED_COMBOS = new Set(['s','r','escape','h','f','0','1','+','=','-','ctrl+s','ctrl+a','ctrl+z','ctrl+y','ctrl+shift+z','arrowleft','arrowright']);
 
-// templateSaveKey lives on the same persisted blob as the pixelate/blur
-// presets themselves (see loadPresets/savePresets) since it's really just
-// another saved setting: "which preset + which key" for the Template + Save
-// combo. The chosen preset is marked on the preset object itself
-// (`.templateSave = true`) rather than referenced by index, so it survives
-// reordering/deletion of unrelated presets cleanly.
+// Modes share one hotkey, but store independent tool defaults and template
+// membership on each preset so deleting/reordering presets cannot shift a binding.
 let presets = { pixelate: [], blur: [], templateSaveKey: null };
 
 // ════════════════════════════════════════════════════════════════════
@@ -981,6 +995,38 @@ function pressS() {
     updateSelectIcon();
   }
   setStatus(`Tool: select (${state.selectShape})`, true);
+}
+
+function applyModeDefaultTool() {
+  const tool = presets.modes[state.mode].defaultTool;
+  state.selectShape = SHAPES.includes(tool) ? tool : 'lasso';
+  setTool(tool === 'move' ? 'move' : 'select');
+  updateSelectIcon();
+  if (tool === 'pixelate' || tool === 'blur') toggleFilterPanel(tool);
+}
+function setModeDefaultTool(tool) {
+  if (!['move', ...SHAPES, 'pixelate', 'blur'].includes(tool)) return;
+  presets.modes[state.mode].defaultTool = tool;
+  savePresets();
+  applyModeDefaultTool();
+  // Keep setup visible when choosing a filter as the default.
+  if (!$('panel-template-save').classList.contains('open')) toggleTemplateSavePanel();
+  renderTemplateSavePanel();
+}
+function switchMode() {
+  state.armingPreset = null;
+  state.armingTemplateSave = false;
+  document.querySelectorAll('.filter-panel.open').forEach(p => p.classList.remove('open'));
+  $('tool-pixelate').classList.remove('active');
+  $('tool-blur').classList.remove('active');
+  state.mode = state.mode === 'M' ? 'K' : 'M';
+  const next = state.mode === 'M' ? 'K' : 'M';
+  $('tool-mode-label').textContent = state.mode;
+  $('tool-mode-tooltip').textContent = `Modes: State ${state.mode} → State ${next}`;
+  $('tool-mode').setAttribute('aria-label', `Modes: State ${state.mode}. Switch to State ${next}`);
+  applyModeDefaultTool();
+  if (!presets.modes[state.mode].defaultTool || !getTemplateSaveTarget()) toggleTemplateSavePanel();
+  setStatus(`State ${state.mode}`, true);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1872,6 +1918,16 @@ function loadPresets() {
   presets.pixelate = presets.pixelate || [];
   presets.blur = presets.blur || [];
   presets.templateSaveKey = presets.templateSaveKey || null; // older saves won't have this field
+  if (!presets.modes) {
+    presets.modes = { M: { defaultTool: 'lasso' }, K: { defaultTool: null } };
+    for (const type of ['pixelate', 'blur']) {
+      for (const preset of presets[type]) {
+        preset.templateSaveModes = preset.templateSave ? ['M'] : [];
+        delete preset.templateSave;
+      }
+    }
+    savePresets();
+  }
   // First-ever launch: seed one ready-to-go pixelate preset on P so the
   // "select -> hotkey -> save -> next" loop works immediately, no setup.
   if (isFirstRun && presets.pixelate.length === 0) {
@@ -1964,20 +2020,19 @@ function findPresetByCombo(combo) {
 
 // ── Template + Save combo ──────────────────────────────────────────
 // A single special hotkey: applies one chosen preset ("template"), then
-// saves. The chosen preset is flagged with `.templateSave = true` on the
-// preset object itself (only one across pixelate+blur at a time), and the
-// combo's own key lives at presets.templateSaveKey.
+// saves. Each mode chooses its own preset; the hotkey remains shared.
 function getTemplateSaveTarget() {
   for (const type of ['pixelate', 'blur']) {
-    const idx = presets[type].findIndex(p => p.templateSave);
+    const idx = presets[type].findIndex(p => p.templateSaveModes?.includes(state.mode));
     if (idx !== -1) return { type, idx, value: presets[type][idx].value };
   }
   return null;
 }
 function selectTemplateSaveTarget(type, idx) {
-  presets.pixelate.forEach(p => delete p.templateSave);
-  presets.blur.forEach(p => delete p.templateSave);
-  presets[type][idx].templateSave = true;
+  for (const kind of ['pixelate', 'blur']) {
+    presets[kind].forEach(p => p.templateSaveModes = (p.templateSaveModes || []).filter(mode => mode !== state.mode));
+  }
+  presets[type][idx].templateSaveModes.push(state.mode);
   savePresets();
   renderTemplateSavePanel();
   setStatus(`Template set: ${type === 'pixelate' ? 'Pixelate' : 'Bokeh Blur'} ${presets[type][idx].value}px`, true);
@@ -1999,6 +2054,12 @@ function toggleTemplateSavePanel() {
   }
 }
 function renderTemplateSavePanel() {
+  const defaultTool = presets.modes[state.mode].defaultTool;
+  $('mode-settings-title').textContent = `State ${state.mode} defaults`;
+  $('mode-default-tool').value = defaultTool || '';
+  $('mode-setup-hint').textContent = !defaultTool || !getTemplateSaveTarget()
+    ? `Set a default for State ${state.mode}: choose a tool and template. The hotkey is shared.`
+    : 'Defaults saved for this state. The hotkey is shared.';
   const list = $('template-save-list');
   const hotkeySection = $('template-save-hotkey-section');
   const keyRow = $('template-save-key-row');
@@ -4194,7 +4255,7 @@ document.addEventListener('keydown', e => {
     return;
   }
 
-  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+  if (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
     if (e.key === 'Escape') document.activeElement.blur();
     return;
   }
@@ -4208,7 +4269,11 @@ document.addEventListener('keydown', e => {
   if (presets.templateSaveKey && combo === presets.templateSaveKey) {
     e.preventDefault();
     const target = getTemplateSaveTarget();
-    if (!target) { setStatus('Template + Save: no template selected', false); return; }
+    if (!target) {
+      if (!$('panel-template-save').classList.contains('open')) toggleTemplateSavePanel();
+      setStatus(`State ${state.mode}: choose a Template + Save template`, false);
+      return;
+    }
     const editedImage = state.images[state.activeIdx];
     Promise.resolve(runFilter(target.type, target.value)).then(applied => { if (applied) return saveImage(editedImage); });
     return;
@@ -4298,8 +4363,7 @@ document.querySelectorAll('.tool-btn, .qa-btn, .history-toggle-btn').forEach(el 
 
 loadPresets();
 setGalleryState(state.galleryState);
-setTool(state.currentTool);
-updateSelectIcon();
+applyModeDefaultTool();
 $('tool-history').classList.toggle('active', !state.historyCollapsed);
 setAutoAdvance(state.autoAdvance);
 renderGallery();
