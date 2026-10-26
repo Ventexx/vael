@@ -127,7 +127,7 @@ explicitly tagging an already-tagged image refreshes its generated tags.
 The clickable status at the bottom right is separate from the file-operation
 status on the left. Its window contains **Progress**, **Errors**, and **Settings**.
 Progress shows the current phase/image, completed and remaining counts, elapsed
-time, **Stop after current image**, and **Check tag health**. Loading/downloading
+time, **Stop after current image**, and **Check saved tags…**. Loading/downloading
 uses an indeterminate progress indicator when no exact progress is available.
 Errors automatically open this same window with the Errors tab selected. All
 error entries are kept for the current session; **Clear errors** clears
@@ -168,15 +168,11 @@ moves and undo retain associations. Ordinary external folder renames can be
 reconciled on filesystems providing stable identities; external cross-drive moves
 cannot reliably retain folder identity and require reassociation.
 
-Every startup checks tag health in the background. It scans the configured source
-folders and sorting workspace before removing unreferenced tags, finds moved or
-copied images by content, and removes associations for missing folders. Full
-content verification can take time with large libraries. Application file
-operations also trigger reconciliation; changes detected in visible folders
-trigger another check. Use **Check tag health** for changes elsewhere while the
-app is open. Unavailable or inaccessible roots retain their records and report
-an error rather than being treated as deleted. Removing a root from Settings
-removes records no longer represented in any remaining root at the next check.
+Tagging and full-library checks run only on explicit request. **Auto-Tag Image/s** processes only the selected images or the images inside the selected folders (including their subfolders), then stops. Startup, settings changes, completed file operations, and visible-folder changes never start a tag-health scan.
+
+**Check saved tags…** is an optional manual maintenance action. Its confirmation explains that it reads every image in all configured source folders and the workspace, potentially taking a long time and blocking file changes until finished or stopped. Cancel is the default. It compares content fingerprints to saved tags and links, finds externally moved/copied images, and removes stale references; it does **not** generate new tags or run the tagging model. Known moves and deletions made through Sorter update only affected saved references directly, without scanning the library. Copy Tags and image-link actions verify the explicitly requested image only.
+
+Unavailable or inaccessible roots retain their records and report an error rather than being treated as deleted. Removing a root from Settings removes records no longer represented in any remaining root only at the next explicitly confirmed check.
 
 Writes use a temporary file and atomic replacement. A damaged or unsupported
 `tags.json` is reported and preserved, not silently reset. Back up this file if
