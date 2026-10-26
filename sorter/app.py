@@ -631,7 +631,7 @@ from datetime import datetime
 
 from PySide6.QtCore import (
     Qt, QObject, Signal, QRunnable, QThreadPool, QTimer, QUrl, QSize, QRect,
-    QAbstractTableModel, QModelIndex, QSortFilterProxyModel, QMimeData, QByteArray,
+    QAbstractTableModel, QModelIndex, QPersistentModelIndex, QSortFilterProxyModel, QMimeData, QByteArray,
     QThread, QFile, QIODevice, QPoint, QPointF, QRectF, QEvent,
 )
 from PySide6.QtGui import (
@@ -852,6 +852,55 @@ def file_drag_mime(paths, editable=None):
     return mime
 
 
+class DropFeedback(QWidget):
+    """Mouse-transparent destination outline and action label over a file view."""
+
+    def __init__(self, view):
+        super().__init__(view.viewport())
+        self.view = view
+        self.index = QPersistentModelIndex()
+        self.text = ''
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setFocusPolicy(Qt.NoFocus)
+        view.viewport().installEventFilter(self)
+        view.verticalScrollBar().valueChanged.connect(lambda *_: self.update())
+        view.horizontalScrollBar().valueChanged.connect(lambda *_: self.update())
+        self.hide()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Resize:
+            self.setGeometry(self.view.viewport().rect())
+        return False
+
+    def show_target(self, text, index=QModelIndex()):
+        self.text = text
+        self.index = QPersistentModelIndex(index)
+        self.setGeometry(self.view.viewport().rect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = (self.view.visualRect(QModelIndex(self.index)).adjusted(0, 6, 0, -6)
+                if self.index.isValid() else self.rect())
+        painter.setPen(QPen(QColor('#00d4a0'), 2))
+        painter.setBrush(QColor(0, 212, 160, 35 if self.index.isValid() else 16))
+        painter.drawRoundedRect(QRectF(rect).adjusted(2, 2, -2, -2), 6, 6)
+        available = max(1, self.width() - 32)
+        label = self.fontMetrics().elidedText(self.text, Qt.ElideMiddle, available)
+        width = min(self.width() - 12, self.fontMetrics().horizontalAdvance(label) + 20)
+        badge = QRect(self.width() - width - 6, self.height() - 34, width, 28)
+        painter.setBrush(QColor(14, 30, 26, 245))
+        painter.setPen(QPen(QColor('#00d4a0'), 1))
+        painter.drawRoundedRect(badge, 5, 5)
+        painter.setPen(QColor('#e8fff7'))
+        painter.drawText(badge.adjusted(10, 0, -10, 0), Qt.AlignCenter, label)
+        painter.end()
+
+
 class DragViewMixin:
     def setup_drag(self, browser):
         self.browser = browser
@@ -861,7 +910,8 @@ class DragViewMixin:
         # QAbstractScrollArea delivers item drops through its viewport. Without
         # this, the parent explorer accepts the drag and uses its current folder.
         self.viewport().setAcceptDrops(browser.editable)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)
+        self.drop_feedback = DropFeedback(self)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda point: browser.context_menu(self, point))
         self.doubleClicked.connect(browser.open_index)
@@ -873,30 +923,54 @@ class DragViewMixin:
         mime = file_drag_mime(paths, self.browser.editable)
         drag = QDrag(self)
         drag.setMimeData(mime)
-        drag.exec(Qt.CopyAction, Qt.CopyAction)
+        try:
+            drag.exec(Qt.CopyAction, Qt.CopyAction)
+        finally:
+            self.drop_feedback.hide()
 
-    def dragEnterEvent(self, event):
-        if self.browser.editable and event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if self.browser.editable and event.mimeData().hasUrls():
-            internal = bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace'
-            paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
-            move = internal and paths and all(self.browser.window.service.inside(p) for p in paths) and not (event.modifiers() & Qt.ControlModifier)
-            self.browser.window.statusBar().showMessage('Move into sorting folder · hold Ctrl to copy' if move else 'Copy into sorting folder')
-            event.setDropAction(Qt.CopyAction)
-            event.accept()
-
-    def dropEvent(self, event):
-        if not self.browser.editable:
-            return
+    def drop_details(self, event):
         paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
         index = self.indexAt(event.position().toPoint())
         entry = index.data(Qt.UserRole) if index.isValid() else None
-        destination = entry.path if entry and entry.is_dir else self.browser.current
+        folder_index = index if entry and entry.is_dir else QModelIndex()
+        destination = entry.path if folder_index.isValid() else self.browser.current
         internal = bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace'
         move = internal and bool(paths) and all(self.browser.window.service.inside(p) for p in paths) and not (event.modifiers() & Qt.ControlModifier)
+        return paths, destination, bool(move), folder_index
+
+    def dragEnterEvent(self, event):
+        self.dragMoveEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self.browser.editable and event.mimeData().hasUrls():
+            paths, destination, move, index = self.drop_details(event)
+            if paths and destination:
+                action = 'Move to' if move else 'Copy to'
+                root = self.browser.window.service.root
+                location = ' › '.join((root.name or str(root), *destination.relative_to(root).parts)) if root and destination.is_relative_to(root) else str(destination)
+                label = f'{action} {location} · {len(paths)} item(s)'
+                if move:
+                    label += ' · Ctrl to copy'
+                self.drop_feedback.show_target(label, index)
+                event.setDropAction(Qt.CopyAction)
+                event.accept()
+                return
+        self.drop_feedback.hide()
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_feedback.hide()
+        event.accept()
+
+    def dropEvent(self, event):
+        self.drop_feedback.hide()
+        if not self.browser.editable:
+            event.ignore()
+            return
+        paths, destination, move, _ = self.drop_details(event)
+        if not paths or not destination:
+            event.ignore()
+            return
         self.browser.window.transfer(paths, destination, move)
         event.setDropAction(Qt.CopyAction)
         event.accept()
@@ -4198,6 +4272,8 @@ class ShelfList(QListWidget):
         super().__init__()
         self.shelf = shelf
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.drop_feedback = DropFeedback(self)
         self.setDragEnabled(True)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setViewMode(QListView.IconMode)
@@ -4214,6 +4290,8 @@ class ShelfList(QListWidget):
         self.setItemDelegate(ShelfEntryDelegate(self))
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.viewport().setAcceptDrops(True)
 
     def repaint_cards(self):
         for i in range(self.count()):
@@ -4222,14 +4300,24 @@ class ShelfList(QListWidget):
                 card._img_lbl.update()
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+        self.dragMoveEvent(event)
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+        paths = [u for u in event.mimeData().urls() if u.isLocalFile()]
+        if paths:
+            self.drop_feedback.show_target(f'Add to Shelf · {len(paths)} item(s) · references only')
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            self.drop_feedback.hide()
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_feedback.hide()
+        event.accept()
 
     def dropEvent(self, event):
+        self.drop_feedback.hide()
         self.shelf.add_paths([Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()])
         event.setDropAction(Qt.CopyAction)
         event.accept()
