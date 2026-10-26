@@ -81,6 +81,7 @@ ICON_PATH = Path(__file__).parent / ("icon.ico" if sys.platform == "win32" else 
 PREFS_FILE = APP_DIR / "prefs.json"
 NOTES_FILE = APP_DIR / "notes.json"
 POSTING_INFO_FILE = APP_DIR / "posting_info.json"
+POSTING_TAG_ADDITIONS_FILE = APP_DIR / "posting_tag_additions.json"
 POSTING_INFO_SCRIPT = Path(__file__).parent / "scripts" / "posting_info.py"
 
 # ── Session-only window positions ─────────────────────────────────────────────
@@ -6738,9 +6739,16 @@ class PostingErrorMenu(QMenu):
 
 
 class GeneratedNoteCard(NoteEntryCard):
-    """Normal click-to-copy notes, with read-only error menus instead of editing."""
+    """Generated notes with error details and separately saved extra tag lines."""
 
-    def __init__(self, name, value, errors, ignore_callback=None):
+    def __init__(self, name, value, errors, ignore_callback=None, addition_key=None, additions=None):
+        self._base_value = value
+        self._addition_key = addition_key
+        extra = (additions or {}).get(addition_key, "")
+        if not isinstance(extra, str):
+            raise ValueError("Invalid saved posting tag additions")
+        if extra:
+            value = value + "\n" + extra if value else extra
         super().__init__(name, value, POSTING_INFO_FILE, None)
         self._errors = errors
         self._ignore_callback = ignore_callback
@@ -6808,11 +6816,35 @@ class GeneratedNoteCard(NoteEntryCard):
         return menu
 
     def contextMenuEvent(self, event):
-        if self._errors:
-            menu = self._error_menu()
-            menu.exec(event.globalPos())
-            menu.deleteLater()
+        menu = self._error_menu()
+        if self._addition_key is not None:
+            if menu.actions():
+                menu.addSeparator()
+            menu.addAction("Add newline Tag", self._add_newline_tag)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
         event.accept()
+
+    def _add_newline_tag(self):
+        dlg = AddTagDialog(self)
+        if not dlg.exec() or not dlg.tag_text.strip():
+            return
+        additions = _load_state(POSTING_TAG_ADDITIONS_FILE)
+        if additions._load_error:
+            return
+        existing = additions.get(self._addition_key, "")
+        if not isinstance(existing, str):
+            QMessageBox.critical(self, APP_NAME, "Invalid saved posting tag additions; existing file preserved.")
+            return
+        tag = dlg.tag_text.strip()
+        extra = existing + "\n" + tag if existing else tag
+        additions[self._addition_key] = extra
+        if not _save_state(POSTING_TAG_ADDITIONS_FILE, additions):
+            return
+        self._value = self._base_value + "\n" + extra if self._base_value else extra
+        self.setToolTip(f"{self._name}\n\n{self._value}"
+                        + ("\n\nRight-click to see warnings or errors." if self._errors else ""))
+        self._refresh_preview()
 
 
 def _posting_reload_icon():
@@ -6885,8 +6917,8 @@ class GeneratedNoteSection(NoteSection):
         indicator.clicked.connect(lambda: QApplication.clipboard().setText(message))
         self.layout().itemAt(0).widget().layout().insertWidget(1, indicator)
 
-    def add_generated_card(self, name, value, errors, ignore_callback):
-        card = GeneratedNoteCard(name, value, errors, ignore_callback)
+    def add_generated_card(self, name, value, errors, ignore_callback, addition_key=None, additions=None):
+        card = GeneratedNoteCard(name, value, errors, ignore_callback, addition_key, additions)
         index = len(self._cards)
         self._cards.append(card)
         self._card_grid.addWidget(card, index // 3, index % 3)
@@ -6906,6 +6938,7 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
         data = _json_object(POSTING_INFO_FILE.read_text(encoding="utf-8"))
         if data.get("version") != 1 or not isinstance(data.get("modes"), dict):
             raise ValueError("Unsupported posting-info format")
+        additions = _load_state(POSTING_TAG_ADDITIONS_FILE)
         location_errors = [error for error in data.get("errors", []) if error.get("code") == "location"]
         matched_errors = set()
         for mode, destinations in data["modes"].items():
@@ -6923,8 +6956,10 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
                 if warnings:
                     destination_section.add_location_warning(warnings)
                 for key, entry in destinations.get(destination, {}).items():
+                    entry_additions = [value for identity, value in additions.items()
+                                       if identity.startswith(json.dumps([mode, destination, key], ensure_ascii=False)[:-1] + ",")]
                     if query and query.casefold() not in json.dumps(
-                            [mode, destination, key, entry], ensure_ascii=False).casefold():
+                            [mode, destination, key, entry, entry_additions], ensure_ascii=False).casefold():
                         continue
                     errors = entry.get("errors", [])
                     if entry.get("status") != "complete" and not errors:
@@ -6934,13 +6969,15 @@ def _posting_section(reload_callback, query="", ignore_callback=None):
                     # script rerun is not needed just to adopt the new display.
                     if mode == "Mira" and destination == "Promote" and len(texts) == 2:
                         texts = [{"label": "Tags", "value": "\n".join(item["value"] for item in texts)}]
-                    for item in texts:
+                    for text_index, item in enumerate(texts):
                         title = entry["name"]
                         if destination == "Download" and title.lower().endswith(".zip"):
                             title = title[:-4]
                         if len(texts) > 1:
                             title += "\n" + item["label"]
-                        destination_section.add_generated_card(title, item["value"], errors, ignore_callback)
+                        addition_key = json.dumps([mode, destination, key, text_index], ensure_ascii=False)
+                        destination_section.add_generated_card(title, item["value"], errors, ignore_callback,
+                                                               addition_key, additions)
                 mode_section.add_child_section(destination_section)
             section.add_child_section(mode_section)
         unmatched = [error["message"] for index, error in enumerate(location_errors) if index not in matched_errors]
