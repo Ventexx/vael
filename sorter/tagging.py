@@ -17,6 +17,7 @@ class Tagging(QObject):
         self.window = window
         self.app_dir = Path(app_dir)
         self.task = None
+        self.job_kind = None
         self.closing = False
         self.process = TagProcess(app_dir)
         self.process_config = None
@@ -182,11 +183,13 @@ class Tagging(QObject):
             self.state['phase'] = 'Stopping after current image'
             self.render()
 
-    def _begin(self, phase):
+    def _begin(self, phase, kind='image'):
+        self.job_kind = kind
         self.state = dict(phase=phase, done=0, total=0, current='', started=time.monotonic(), ended=None)
 
     def _finish(self, result):
         self.task = None
+        self.job_kind = None
         self.state.update(result)
         self.state['ended'] = time.monotonic()
         self.render()
@@ -210,7 +213,7 @@ class Tagging(QObject):
         # A modeless Tagger window may have changed state during confirmation.
         if self.closing or not self.available():
             return
-        self._begin('Checking saved tags (manual full-library scan)')
+        self._begin('Checking saved tags (manual full-library scan)', kind='health')
 
         def execute(task):
             try:
@@ -324,11 +327,26 @@ class Tagging(QObject):
             lambda error: self._finish(dict(phase='Copy failed', errors=[f'{path}\n{error}'])))
         self.render()
 
+    def folder_association_error(self):
+        # Folder text is independent of inference. TagStore serializes writes,
+        # so an image job and a folder association can safely share the store.
+        if self.load_error or self.store is None:
+            return self.load_error or 'Tag storage is unavailable.'
+        if self.window.operation_task:
+            return 'Wait for the current file operation before editing folder tags.'
+        if self.busy and self.job_kind == 'health':
+            return 'Finish or stop the manual saved-tag check before editing folder tags.'
+        return None
+
     def add_folder_action(self, menu, paths):
         if (len(paths) == 1 and paths[0].is_dir() and not linked(paths[0])
                 and self.window.service.inside(paths[0], allow_root=True)):
             action = menu.addAction('Associate Tags', lambda: self.associate(paths[0]))
-            action.setEnabled(not self.busy and not self.window.operation_task)
+            reason = self.folder_association_error()
+            action.setEnabled(reason is None)
+            if reason:
+                menu.setToolTipsVisible(True)
+                action.setToolTip(reason)
 
     def link_dialog(self, initial, save, title='Associate Link'):
         from urllib.parse import urlsplit
@@ -421,7 +439,9 @@ class Tagging(QObject):
         if not self.window.service.inside(path, allow_root=True):
             self.error('Folder tag associations are only available in the bottom workspace.')
             return
-        if not self.available():
+        reason = self.folder_association_error()
+        if reason:
+            self.error(reason)
             return
         try:
             initial = self.folder_drafts.get(canonical(path), self.store.folder_text(path))
@@ -442,6 +462,9 @@ class Tagging(QObject):
         buttons.rejected.connect(editor.reject)
         def save():
             try:
+                reason = self.folder_association_error()
+                if reason:
+                    raise ValueError(reason)
                 self.store.associate(path, text.toPlainText())
                 self.folder_drafts.pop(canonical(path), None)
                 editor.accept()

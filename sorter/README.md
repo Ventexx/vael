@@ -147,7 +147,7 @@ can still be copied.
 
 ### Folder tag associations and storage
 
-Select one folder in the bottom workspace and choose **Associate Tags**. Enter tags in the text field,
+Select one folder in the bottom workspace and choose **Associate Tags**. Empty folders are supported: the association belongs to the folder and applies to images added later. Association editing does not require the tagging model and remains available during image tagging. It waits only for file operations, a manually requested saved-tag check, or unavailable tag storage; a disabled action explains the reason in its tooltip. Enter tags in the text field,
 then **Save** or **Cancel**. Opening it again loads the saved text for editing.
 Saving an empty field removes the association. Separate tags with spaces, commas
 or newlines; use underscores within a tag name.
