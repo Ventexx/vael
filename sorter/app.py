@@ -4078,6 +4078,7 @@ class WorkspaceBrowser(CoverBrowser):
     """A single-folder grid with independent selection and breadcrumb navigation."""
 
     def __init__(self, window, editable=True, title='Workspace'):
+        self._reveal_received_paths = set()
         super().__init__(window, True, title)
         self.tabs.hide()
         self.table.hide()
@@ -4176,6 +4177,7 @@ class WorkspaceBrowser(CoverBrowser):
             return
         if target != self.current:
             self._selected_file_paths.clear()
+            self._reveal_received_paths.clear()
         self.current = self._location = target
         self.path.setText(str(target or ''))
         self.window.active_workspace = self
@@ -4229,10 +4231,19 @@ class WorkspaceBrowser(CoverBrowser):
             self.model.set_entries(result[0])
             self.proxy.invalidate()
             self.proxy.sort(0)
+            reveal_index = QModelIndex()
             for row in range(self.proxy.rowCount()):
                 index = self.proxy.index(row, 0)
-                if str(index.data(Qt.UserRole).path) in selected:
+                path = str(index.data(Qt.UserRole).path)
+                if path in selected:
                     self.grid.selectionModel().select(index, QItemSelectionModel.Select)
+                if not reveal_index.isValid() and path in self._reveal_received_paths:
+                    reveal_index = index
+            self._reveal_received_paths.clear()
+            if reveal_index.isValid():
+                self.grid.selectionModel().setCurrentIndex(reveal_index, QItemSelectionModel.NoUpdate)
+                self.grid.doItemsLayout()
+                self.grid.scrollTo(reveal_index, QAbstractItemView.PositionAtTop)
             self._restoring_selection = False
             self._selected_file_paths = {str(p) for p in self.selected_paths()}
             self.search.setToolTip('\n'.join(result[1]))
@@ -6335,6 +6346,7 @@ class Window(QMainWindow):
                     # Restore selection after the asynchronous folder scan, using
                     # actual output paths (including auto-renamed destinations).
                     browser._selected_file_paths = received
+                    browser._reveal_received_paths = received
                 browser.navigate(browser.current)
                 self.active_workspace = active_workspace
             if errors:
