@@ -6487,7 +6487,10 @@ class Window(QMainWindow):
             # Destination entries get only their original group's metadata,
             # never an unrelated group previously occupying the same filename.
             for group in self.config['groups']:
-                group['members'] = [p for p in group['members'] if not Path(p).is_relative_to(result.target)]
+                group['members'] = [p for p in group['members']
+                    if not (Path(p).is_relative_to(result.target)
+                        and (result.moved or not result.target.is_dir()
+                             or (result.source / Path(p).relative_to(result.target)).exists()))]
             if result.keep_groups:
                 for original in result.groups:
                     members = [str(result.target / Path(p).relative_to(result.source))
@@ -6519,8 +6522,14 @@ class Window(QMainWindow):
         policy = self.transfer_policy(paths, [destination])
         if policy is None:
             return
+        snapshots = copy.deepcopy(self.config['groups'])
+        def action(source):
+            target = self.service.transfer(source, destination, move, policy)
+            if target is None or move:
+                return target  # Moves already remap existing memberships.
+            return GroupTransferResult(source, target, False, True, snapshots)
         self.run_operations('Move' if move else 'Copy',
-            [(str(path), lambda p=path: self.service.transfer(p, destination, move, policy)) for path in paths],
+            [(str(path), lambda p=path: action(p)) for path in paths],
             select_transferred=True)
 
     def transfer_policy(self, paths, destinations, skip_same_folder=False):
