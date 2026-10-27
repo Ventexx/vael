@@ -3613,8 +3613,10 @@ class CoverBrowser(ImageBrowser):
         self.path = QLineEdit(self)
         self.path.hide()
         self.filter_panel = QWidget()
-        filter_layout = QHBoxLayout(self.filter_panel)
-        filter_layout.setContentsMargins(4, 2, 4, 6)
+        filter_outer = QVBoxLayout(self.filter_panel)
+        filter_outer.setContentsMargins(4, 2, 4, 6)
+        filter_layout = QHBoxLayout()
+        filter_outer.addLayout(filter_layout)
         filter_layout.setSpacing(6)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search folders and files…')
@@ -3630,6 +3632,18 @@ class CoverBrowser(ImageBrowser):
         self.recursive = QCheckBox('Subfolders')
         self.recursive.setChecked(True)
         filter_layout.addWidget(self.recursive)
+        feedback = QHBoxLayout()
+        self.search_progress = QProgressBar()
+        self.search_progress.setRange(0, 0)
+        self.search_progress.setTextVisible(False)
+        self.search_progress.setFixedSize(70, 6)
+        self.search_progress.hide()
+        feedback.addWidget(self.search_progress)
+        self.search_feedback = QLabel()
+        self.search_feedback.setWordWrap(True)
+        self.search_feedback.hide()
+        feedback.addWidget(self.search_feedback, 1)
+        filter_outer.addLayout(feedback)
         self.layout().insertWidget(0, self.filter_panel)
         self.filter_panel.hide()
         self.search_button = QToolButton()
@@ -3644,7 +3658,7 @@ class CoverBrowser(ImageBrowser):
         self.filter_timer.setInterval(180)
         self.filter_timer.timeout.connect(self.filter_rows)
         for signal in (self.search.textChanged, self.extension.textChanged, self.kind.currentIndexChanged, self.recursive.toggled):
-            signal.connect(lambda *_: self.filter_timer.start())
+            signal.connect(self.queue_filter)
         shortcut = QShortcut(QKeySequence('Ctrl+F'), self)
         shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         shortcut.activated.connect(lambda: (self.search_button.setChecked(True), self.search.setFocus()))
@@ -4032,16 +4046,39 @@ class CoverBrowser(ImageBrowser):
         if hasattr(self, 'table'):
             self.table.viewport().update()
 
-    def filter_rows(self):
-        try:
-            terms = parse_query(self.search.text(), self.window.config['fields'])
-        except ValueError as exc:
-            self.search.setToolTip(str(exc))
+    def queue_filter(self, *_):
+        # Invalidate old results as soon as typing starts, not after debounce.
+        self._filter_serial += 1
+        if self._filter_task:
+            self._filter_task.cancel.set()
+        self.set_search_feedback('Searching…', busy=True)
+        self.filter_timer.start()
+
+    def set_search_feedback(self, text, busy=False, error=False):
+        self.search_feedback.setText(text)
+        self.search_feedback.setVisible(bool(text))
+        self.search_feedback.setStyleSheet('color: #e88c86;' if error else 'color: #aaa;')
+        self.search_progress.setVisible(busy)
+        self.search_button.setToolTip(text or 'Search and filters · Ctrl+F')
+        self._position_status_bar()
+
+    def search_failed(self, serial, error):
+        if serial != self._filter_serial or self._closing:
             return
+        self.search.setToolTip(str(error))
+        self.search_feedback.setToolTip(str(error))
+        self.set_search_feedback('Search failed — ' + (str(error).splitlines() or ['Unknown error'])[0][:120], error=True)
+
+    def filter_rows(self):
         self._filter_serial += 1
         serial = self._filter_serial
         if self._filter_task:
             self._filter_task.cancel.set()
+        try:
+            terms = parse_query(self.search.text(), self.window.config['fields'])
+        except ValueError as exc:
+            self.search_failed(serial, exc)
+            return
         self.proxy.terms = terms
         self.proxy.invalidate()
         if not self.active_filter() and not self._details:
@@ -4049,14 +4086,14 @@ class CoverBrowser(ImageBrowser):
                 self._filter_map = None
                 self.reload_folders()
             self.repaint_content()
-            self.search_button.setToolTip('Search and filters · Ctrl+F')
+            self.set_search_feedback('All content')
             return
         roots = [str(self.current)] if self._details and self.current else [f['path'] for f in self.configured_folders()]
         config = copy.deepcopy(self.window.config)
         recursive = self.recursive.isChecked()
         kind = self.kind.currentText()
         extensions = {part.strip().lstrip('.').lower() for part in self.extension.text().split(',') if part.strip()}
-        self.search_button.setToolTip('Searching…')
+        self.set_search_feedback('Searching…', busy=True)
 
         def found(result):
             if serial != self._filter_serial or self._closing:
@@ -4090,9 +4127,12 @@ class CoverBrowser(ImageBrowser):
             completer = QCompleter(values[:3000], self.search)
             completer.setCaseSensitivity(Qt.CaseInsensitive)
             self.search.setCompleter(completer)
+            self.search_feedback.setToolTip('\n'.join(warnings[:5]))
+            self.set_search_feedback(f'{len(filtered):,} ' + ('match' if len(filtered) == 1 else 'matches')
+                                     + (f' · {len(warnings)} folder warning(s)' if warnings else ''))
 
         self._filter_task = self.window.jobs.start(lambda task: scan(roots, config, recursive, task.cancel, DATA_DIR / 'catalog.sqlite'), found,
-            lambda error: self.search_button.setToolTip(error))
+            lambda error: self.search_failed(serial, error))
 
     def state(self):
         return {'path': str(self._location or self.current or ''), 'zoom': self.entry_zoom, 'details': self._details,
@@ -4267,10 +4307,11 @@ class WorkspaceBrowser(CoverBrowser):
         try:
             self.proxy.terms = parse_query(self.search.text(), self.window.config['fields'])
         except ValueError as exc:
-            self.search.setToolTip(str(exc))
+            self.search_failed(serial, exc)
             return
         config = copy.deepcopy(self.window.config)
         roots = [str(self.current)] if self.current else []
+        self.set_search_feedback('Searching…' if self.active_filter() else 'Loading…', busy=True)
         def found(result):
             if serial != self._filter_serial or self._closing:
                 return
@@ -4302,8 +4343,12 @@ class WorkspaceBrowser(CoverBrowser):
             self._restoring_selection = False
             self._selected_file_paths = {str(p) for p in self.selected_paths()}
             self.search.setToolTip('\n'.join(result[1]))
+            self.search_feedback.setToolTip('\n'.join(result[1][:5]))
+            count = self.proxy.rowCount()
+            noun = ('match' if count == 1 else 'matches') if self.active_filter() else ('entry' if count == 1 else 'entries')
+            self.set_search_feedback(f'{count:,} {noun}')
         self._filter_task = self.window.jobs.start(lambda task: scan(roots, config, False, task.cancel), found,
-            lambda error: self.search.setToolTip(error))
+            lambda error: self.search_failed(serial, error))
 
     def clear_selection(self):
         self.grid.clearSelection()

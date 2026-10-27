@@ -317,6 +317,8 @@ When inheritance is enabled, recognized fields pass down from the configured sou
 
 Search is case-insensitive and uses partial matches. Multiple terms are combined with AND. Quotes keep multiword values together. The search field’s tooltip shows interpreted search terms, and autocomplete offers field values from the loaded entries. Each explorer's query and filters are independent.
 
+Typing or changing a filter immediately shows **Searching…** with an animated indicator beneath the search controls. It changes to the match count when finished, including **0 matches** when nothing matches. Invalid queries and failed searches show a visible error. These indicators work independently in the library, both workspace panes, and Focus Folder; older searches cannot replace the latest query’s status.
+
 **Profiles & exclusions** configures ignored folder/file names using wildcard patterns, one per line. Export/import shares fields, rules, and relevant preferences as JSON; source paths, sorting root, pins, and rule scope paths are not exported. Importing changes the dialog first; Save applies it.
 
 ---
