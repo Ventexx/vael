@@ -626,7 +626,7 @@ import sys
 import math
 import queue
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime
 
 from PySide6.QtCore import (
@@ -714,6 +714,8 @@ class MediaModel(QAbstractTableModel):
         self.cache = OrderedDict()
         self.pending = set()
         self.generation = 0
+        self.full_loading = False
+        self.preload_queue = deque()
         self.headers = ['Name', 'Type', 'Size', 'Modified', 'Folder', 'Fields']
 
     def rowCount(self, parent=QModelIndex()):
@@ -732,12 +734,40 @@ class MediaModel(QAbstractTableModel):
         self.generation += 1
         self.pending.clear()
         self.endResetModel()
+        if self.full_loading:
+            self.preload_all()
 
-    def thumbnail(self, entry):
+    def set_full_loading(self, enabled):
+        self.full_loading = enabled
+        self.generation += 1
+        self.pending.clear()
+        self.preload_queue.clear()
+        self.cache.clear()
+
+    def thumbnail_key(self, entry):
         side = round(96 * self.owner.entry_zoom / 100)
         density = max(2.0, self.owner.devicePixelRatioF() * 2)
-        width, height = round(side * density), round((side + 20) * density)
-        key = (str(entry.path), entry.mtime, entry.size, width, height)
+        return (str(entry.path), entry.mtime, entry.size,
+                round(side * density), round((side + 20) * density))
+
+    def preload_all(self):
+        # Retain every current-folder thumbnail, but release previous folders,
+        # changed files and obsolete zoom sizes. Decode in bounded batches.
+        self.generation += 1
+        self.pending.clear()
+        entries = [entry for entry in self.entries if entry.kind in ('Image', 'GIF')]
+        keys = {self.thumbnail_key(entry) for entry in entries}
+        self.cache = OrderedDict((key, value) for key, value in self.cache.items() if key in keys)
+        self.preload_queue = deque(entries)
+        self.preload_next()
+
+    def preload_next(self):
+        while self.full_loading and self.preload_queue and len(self.pending) < 12:
+            self.thumbnail(self.preload_queue.popleft())
+
+    def thumbnail(self, entry):
+        key = self.thumbnail_key(entry)
+        width, height = key[-2:]
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key]
@@ -747,6 +777,8 @@ class MediaModel(QAbstractTableModel):
         generation = self.generation
 
         def decode(task):
+            if generation != self.generation:
+                return QImage()
             return decode_thumbnail(entry.path, width, height)
 
         def ready(image):
@@ -754,12 +786,13 @@ class MediaModel(QAbstractTableModel):
                 return
             self.pending.discard(key)
             self.cache[key] = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
-            while len(self.cache) > 160:
+            while not self.full_loading and len(self.cache) > 160:
                 self.cache.popitem(last=False)
             self.owner.grid.viewport().update()
             self.owner.table.viewport().update()
+            self.preload_next()
 
-        self.owner.window.jobs.start(decode, ready, lambda _: self.pending.discard(key))
+        self.owner.window.jobs.start(decode, ready, lambda _: ready(QImage()))
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -4121,6 +4154,8 @@ class WorkspaceBrowser(CoverBrowser):
         self.grid.setGridSize(QSize(round(96 * scale) + 6, round(96 * scale) + 38))
         self.grid.doItemsLayout()
         self.grid.viewport().update()
+        if self.model.full_loading:
+            self.model.preload_all()
 
     def close_current_folder(self):
         self.up()
@@ -6296,11 +6331,13 @@ class Window(QMainWindow):
             layout.addWidget(self.focus_browser, 1)
             self._content_root.layout().addWidget(self.focus_surface, 1)
         browser = self.focus_browser
+        browser.model.set_full_loading(False)
         browser.focus_root = path
         browser.search.clear()
         browser.extension.clear()
         browser.kind.setCurrentIndex(0)
         browser.set_entry_zoom(origin.entry_zoom)
+        browser.model.set_full_loading(True)
         browser._selected_file_paths.clear()
         browser._reveal_received_paths.clear()
         self.focus_title.setText('Focus Folder · ' + (path.name or str(path)))
@@ -6315,6 +6352,7 @@ class Window(QMainWindow):
             return
         self._img_viewer.close_viewer()
         self._folder_focus = None
+        self.focus_browser.model.set_full_loading(False)
         self.focus_surface.hide()
         self.vertical.show()
         for browser, selection, scroll in saved['panes']:
