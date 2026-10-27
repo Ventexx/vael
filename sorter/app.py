@@ -1057,6 +1057,24 @@ class WorkspaceEntryDelegate(QStyledItemDelegate):
 
 
 class WorkspaceGrid(DragViewMixin, QListView):
+    def mousePressEvent(self, event):
+        group = self.group_at(event.position().toPoint())
+        if group and event.button() == Qt.LeftButton:
+            from PySide6.QtCore import QItemSelectionModel
+            selection = self.selectionModel()
+            indexes = [self.model().index(row, 0) for row in range(self.model().rowCount())
+                       if str(self.model().index(row, 0).data(Qt.UserRole).path) in group['members']]
+            toggle = bool(event.modifiers() & Qt.ControlModifier)
+            remove = toggle and all(selection.isSelected(index) for index in indexes)
+            if not toggle:
+                selection.clearSelection()
+            for index in indexes:
+                selection.select(index, QItemSelectionModel.Deselect if remove else QItemSelectionModel.Select)
+            self.setFocus()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def group_bands(self):
         bands = []
         for row in range(self.model().rowCount()):
@@ -3986,6 +4004,9 @@ class CoverBrowser(ImageBrowser):
                     menu.addAction('Group selected entries', lambda: self.window.group_selection(self))
                 if group:
                     self.window.populate_group_menu(menu.addMenu('Current Group'), group)
+                elif len({g['id'] for g in groups if g}) > 1:
+                    self.window.populate_groups_menu(menu.addMenu('Selected Groups'),
+                        list({g['id']: g for g in groups if g}.values()))
         else:
             menu.addSection('Collect')
             menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
@@ -6622,8 +6643,75 @@ class Window(QMainWindow):
 
     def group_menu(self, group, parent):
         menu = QMenu(parent)
-        self.populate_group_menu(menu, group)
+        selected = list({g['id']: g for p in parent.selected_paths()
+                         if (g := group_for(self.config, p))}.values())
+        if len(selected) > 1 and any(g is group for g in selected):
+            self.populate_groups_menu(menu, selected)
+        else:
+            self.populate_group_menu(menu, group)
         return menu
+
+    def populate_groups_menu(self, menu, groups):
+        from PySide6.QtWidgets import QWidgetAction
+        menu.addSection(f'{len(groups)} selected groups')
+        menu.addAction('Associate Link', lambda: self.edit_groups_link(groups))
+        if self.config['notes']:
+            assignments = QMenu('Assign Notes', menu)
+            menu.addMenu(assignments)
+            for note in self.config['notes']:
+                checkbox = QCheckBox(note['title'])
+                checkbox.setContentsMargins(8, 4, 8, 4)
+                count = sum(note['id'] in group['notes'] for group in groups)
+                checkbox.setTristate(0 < count < len(groups))
+                checkbox.setCheckState(Qt.Checked if count == len(groups) else Qt.PartiallyChecked if count else Qt.Unchecked)
+                checkbox.setToolTip('Partially checked means assigned to some selected groups. Changes apply to all selected groups.')
+                checkbox.setEnabled(note is not self.config['notes'][0])
+                action = QWidgetAction(assignments)
+                action.setDefaultWidget(checkbox)
+                assignments.addAction(action)
+                checkbox.stateChanged.connect(lambda state, key=note['id']: self.assign_groups_note(groups, key, state == Qt.Checked.value)
+                                              if state != Qt.PartiallyChecked.value else None)
+        menu.addSeparator()
+        menu.addAction('Dissolve Selected Groups', lambda: self.dissolve_groups(groups))
+
+    def assign_groups_note(self, groups, note_id, checked):
+        for group in groups:
+            if group not in self.config['groups']:
+                continue
+            ids = set(group['notes'])
+            ids.add(note_id) if checked else ids.discard(note_id)
+            group['notes'] = sorted(ids)
+        assign_first_note(self.config)
+        self.persist()
+
+    def dissolve_groups(self, groups):
+        ids = {group['id'] for group in groups}
+        self.config['groups'] = [group for group in self.config['groups'] if group['id'] not in ids]
+        self.groups_changed()
+
+    def edit_groups_link(self, groups):
+        def save(url):
+            if not all(any(g is group for g in self.config['groups']) for group in groups):
+                raise ValueError('The selected groups changed. Reopen their context menu.')
+            previous = [group.get('link') for group in groups]
+            try:
+                for group in groups:
+                    if url:
+                        group['link'] = url
+                    else:
+                        group.pop('link', None)
+                save_settings(self.config)
+            except Exception:
+                for group, link in zip(groups, previous):
+                    if link is None:
+                        group.pop('link', None)
+                    else:
+                        group['link'] = link
+                raise
+            return True
+        links = {group.get('link', '') for group in groups}
+        self.tagging.link_dialog(next(iter(links)) if len(links) == 1 else '', save,
+                                 f'Associate Link · {len(groups)} groups')
 
     def populate_group_menu(self, menu, group):
         menu.addSection('Group Link')
