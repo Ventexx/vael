@@ -3215,6 +3215,7 @@ class ImageBrowser(QWidget):
         section = self._sections_by_path.get(path)
         if section is None:
             return
+        self.setFocus(Qt.MouseFocusReason)
         if path in self._selected_folder_paths:
             self._selected_folder_paths.discard(path)
             section.set_selected(False)
@@ -3572,6 +3573,7 @@ class CoverBrowser(ImageBrowser):
         self._details = False
         self.entry_zoom = 100
         super().__init__(window)
+        self.setFocusPolicy(Qt.StrongFocus)
         if not PIXMAP_WORKER.isRunning():
             PIXMAP_WORKER._stop = False
             PIXMAP_WORKER.start()
@@ -3636,7 +3638,7 @@ class CoverBrowser(ImageBrowser):
         self.table.hide()
         self.reload_folder_btn.show()
         self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
-        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', self.close_current_folder), ('M', self.move_selected_images), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
+        for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('Alt+C', self.close_current_folder), ('M', self.move_selected_images), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda cb=callback: cb() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)) else None)
@@ -3843,6 +3845,7 @@ class CoverBrowser(ImageBrowser):
         return [Path(p) for p in sorted(self._selected_file_paths | set(self.selected_folder_paths()))]
 
     def select_card(self, card, modifiers=Qt.ControlModifier):
+        self.setFocus(Qt.MouseFocusReason)
         self.window.active_browser = self
         self.clear_folder_selection()
         cards = [c for section in self._sections_by_path.values() if section.isVisible() for c in section._cards if c.isVisible()]
@@ -4683,7 +4686,8 @@ class SettingsDialog(QDialog):
         self._section(layout, 'Profiles & exclusions', 'Share naming rules and exclude filenames or folders with wildcard patterns.').addWidget(advanced)
         shortcuts = self._section(layout, 'Hotkeys', 'Fixed shortcuts for the focused explorer; disabled while typing in text fields.')
         for key, description in [
-            ('Ctrl+C', 'Close current folder (workspace: go to parent)'),
+            ('Ctrl+C', 'Copy selected files or folders'),
+            ('Alt+C', 'Close current folder (workspace: go to parent)'),
             ('Ctrl+Up / Ctrl+Down', 'Close current folder and open previous / next sibling'),
             ('M', 'Open Move to Folder for selected images'),
             ('Ctrl+A', 'Select all visible entries'), ('Ctrl+F', 'Search and filters'),

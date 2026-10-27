@@ -329,11 +329,12 @@ Recognized image extensions: PNG, JPG/JPEG, WebP, BMP, TIFF, and AVIF. Video ext
 
 ## keyboard shortcuts
 
-Shortcuts act on the focused explorer and do not run file actions while typing into its text fields. The fixed, read-only reference is the final **Hotkeys** section at the bottom of Settings. Ctrl+C still copies text while editing; copy files through their context menu. M in the source explorer copies protected originals to the chosen workspace destinations.
+Shortcuts act on the focused explorer and do not run file actions while typing into its text fields. The fixed, read-only reference is the final **Hotkeys** section at the bottom of Settings. Ctrl+C copies selected files or folders in either explorer. Alt+C closes the current folder (in the workspace, it opens the parent folder). Ctrl+X and Ctrl+V cut and paste inside the sorting workspace. Text fields keep their normal copy, cut, and paste shortcuts. M in the source explorer copies protected originals to the chosen workspace destinations.
 
 | Shortcut | Action |
 | --- | --- |
-| `Ctrl+C` | Close current folder; in the workspace, return to its parent |
+| `Ctrl+C` | Copy selected files or folders in either explorer |
+| `Alt+C` | Close current folder; in the workspace, return to its parent |
 | `Ctrl+X` / `Ctrl+V` | Cut / paste in the sorting workspace |
 | `Ctrl+A` | Select all |
 | `Ctrl+F` | Open search and filters |
