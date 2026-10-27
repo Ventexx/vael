@@ -3913,6 +3913,8 @@ class CoverBrowser(ImageBrowser):
             self.window.tagging.add_folder_action(menu, paths)
             self.window.tagging.add_link_actions(menu, paths)
             menu.addSection('Files')
+            if len(paths) == 1 and paths[0].is_dir():
+                menu.addAction('Focus Folder', lambda: self.window.focus_folder(paths[0], self))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
             menu.addAction('Cut', lambda: self.window.copy_selection(self, True))
             move = menu.addMenu('Move')
@@ -4079,6 +4081,8 @@ class WorkspaceBrowser(CoverBrowser):
 
     def __init__(self, window, editable=True, title='Workspace'):
         self._reveal_received_paths = set()
+        self.focus_root = None
+        self._restore_scroll = None
         super().__init__(window, True, title)
         self.tabs.hide()
         self.table.hide()
@@ -4122,7 +4126,7 @@ class WorkspaceBrowser(CoverBrowser):
         self.up()
 
     def navigate_sibling_folder(self, direction):
-        if not self.current or self.current == self.window.service.root:
+        if not self.current or self.current == (self.focus_root or self.window.service.root):
             return
         try:
             siblings = sorted((p for p in self.current.parent.iterdir()
@@ -4172,6 +4176,8 @@ class WorkspaceBrowser(CoverBrowser):
 
     def navigate(self, path, remember=True):
         target = normalized(path) if path else None
+        if self.focus_root and target and not target.is_relative_to(self.focus_root):
+            return
         if target and (not self.window.service.inside(target, True) or not target.is_dir()):
             self.window.notice('Choose an available folder inside the workspace.')
             return
@@ -4186,7 +4192,7 @@ class WorkspaceBrowser(CoverBrowser):
             if item.widget():
                 item.widget().deleteLater()
         if target:
-            root = self.window.service.root
+            root = self.focus_root or self.window.service.root
             chain = [root]
             for part in target.relative_to(root).parts:
                 chain.append(chain[-1] / part)
@@ -4194,13 +4200,21 @@ class WorkspaceBrowser(CoverBrowser):
                 if index:
                     self.breadcrumbs.addWidget(QLabel('›'))
                 button = QToolButton()
-                button.setText('Root' if index == 0 else folder.name)
+                button.setText((folder.name if self.focus_root else 'Root') if index == 0 else folder.name)
                 button.setToolTip(str(folder))
                 button.clicked.connect(lambda checked=False, p=folder: self.navigate(p))
+                button.setContextMenuPolicy(Qt.CustomContextMenu)
+                button.customContextMenuRequested.connect(lambda point, p=folder, btn=button: self.folder_focus_menu(p, btn.mapToGlobal(point)))
                 self.breadcrumbs.addWidget(button)
         self.breadcrumbs.addStretch()
         self._update_empty_state()
         self.refresh()
+
+    def folder_focus_menu(self, path, position):
+        menu = QMenu(self)
+        menu.addAction('Focus Folder', lambda: self.window.focus_folder(path, self))
+        menu.exec(position)
+        menu.deleteLater()
 
     def reload_current_folder(self):
         self.refresh()
@@ -4244,6 +4258,12 @@ class WorkspaceBrowser(CoverBrowser):
                 self.grid.selectionModel().setCurrentIndex(reveal_index, QItemSelectionModel.NoUpdate)
                 self.grid.doItemsLayout()
                 self.grid.scrollTo(reveal_index, QAbstractItemView.PositionAtTop)
+            if self._restore_scroll is not None:
+                self.grid.doItemsLayout()
+                horizontal, vertical = self._restore_scroll
+                self.grid.horizontalScrollBar().setValue(horizontal)
+                self.grid.verticalScrollBar().setValue(vertical)
+                self._restore_scroll = None
             self._restoring_selection = False
             self._selected_file_paths = {str(p) for p in self.selected_paths()}
             self.search.setToolTip('\n'.join(result[1]))
@@ -5900,6 +5920,9 @@ class Window(QMainWindow):
         self.operation_task = None
         self.clip_paths, self.clip_cut = [], False
         self.active_browser = None
+        self._folder_focus = None
+        self.focus_surface = None
+        self.focus_browser = None
         self.previews = []
         self.setWindowTitle('sorter. — vael')
         self._is_windows = _IS_WINDOWS
@@ -6228,8 +6251,86 @@ class Window(QMainWindow):
                         self.active_workspace = browser
 
     def target_browser(self):
+        if self._folder_focus:
+            return self.focus_browser
         active = getattr(self, 'active_workspace', self.sorter)
         return active if active is self.sorter or self.split_toggle.isChecked() else self.sorter
+
+    def workspace_browsers(self):
+        return (self.focus_browser,) if self._folder_focus else (self.sorter, self.second)
+
+    def focus_folder(self, path, origin):
+        path = normalized(path)
+        if not path.is_dir() or not self.service.inside(path, True):
+            self.notice('Choose an available folder inside the workspace.')
+            return
+        if self._folder_focus is None:
+            self._folder_focus = {
+                'active': getattr(self, 'active_workspace', self.sorter),
+                'browser': self.active_browser,
+                'keyboard': QApplication.focusWidget(),
+                'panes': [(browser, set(browser._selected_file_paths),
+                           (browser.grid.horizontalScrollBar().value(), browser.grid.verticalScrollBar().value()))
+                          for browser in (self.sorter, self.second)],
+            }
+        if self.focus_surface is None:
+            self.focus_surface = QWidget(self._content_root)
+            self.focus_surface.hide()
+            layout = QVBoxLayout(self.focus_surface)
+            layout.setContentsMargins(0, 0, 0, 0)
+            bar = QHBoxLayout()
+            back = QToolButton()
+            back.setText('←')
+            back.setToolTip('Back to previous workspace layout')
+            back.setAccessibleName('Exit folder focus')
+            back.clicked.connect(lambda: self.exit_folder_focus())
+            bar.addWidget(back)
+            self.focus_title = QLabel()
+            bar.addWidget(self.focus_title, 1)
+            undo = QPushButton('Undo last operation')
+            undo.clicked.connect(self.undo)
+            bar.addWidget(undo)
+            layout.addLayout(bar)
+            self.focus_browser = WorkspaceBrowser(self)
+            self.browsers.append(self.focus_browser)
+            layout.addWidget(self.focus_browser, 1)
+            self._content_root.layout().addWidget(self.focus_surface, 1)
+        browser = self.focus_browser
+        browser.focus_root = path
+        browser.search.clear()
+        browser.extension.clear()
+        browser.kind.setCurrentIndex(0)
+        browser.set_entry_zoom(origin.entry_zoom)
+        browser._selected_file_paths.clear()
+        browser._reveal_received_paths.clear()
+        self.focus_title.setText('Focus Folder · ' + (path.name or str(path)))
+        self.vertical.hide()
+        self.focus_surface.show()
+        browser.navigate(path)
+        browser.grid.setFocus()
+
+    def exit_folder_focus(self, refresh=True):
+        saved = self._folder_focus
+        if saved is None:
+            return
+        self._img_viewer.close_viewer()
+        self._folder_focus = None
+        self.focus_surface.hide()
+        self.vertical.show()
+        for browser, selection, scroll in saved['panes']:
+            browser._selected_file_paths = {p for p in selection if Path(p).exists()}
+            browser._reveal_received_paths.clear()
+            browser._restore_scroll = scroll
+            if refresh:
+                target = browser.current
+                while target and not target.is_dir() and target != self.service.root:
+                    target = target.parent
+                browser.navigate(target)
+        self.active_workspace = saved['active']
+        self.active_browser = saved['browser']
+        keyboard = saved['keyboard']
+        if keyboard and isValid(keyboard) and keyboard.isVisible():
+            keyboard.setFocus()
 
     def notice(self, text):
         QMessageBox.information(self, 'sorter', str(text))
@@ -6336,7 +6437,7 @@ class Window(QMainWindow):
             if select_transferred:
                 transferred = {value.target if isinstance(value, GroupTransferResult) else value
                                for _, value in results if isinstance(value, (Path, GroupTransferResult))}
-            for browser in (self.sorter, self.second):
+            for browser in self.workspace_browsers():
                 if browser.current and not browser.current.is_dir():
                     browser.current = self.service.root if browser.editable else browser.current.parent
                     browser.path.setText(str(browser.current) if browser.current else '')
@@ -6360,7 +6461,7 @@ class Window(QMainWindow):
 
     def groups_changed(self):
         self.persist()
-        for browser in (self.sorter, self.second):
+        for browser in self.workspace_browsers():
             browser.proxy.invalidate()
             browser.proxy.sort(0)
             browser.grid.doItemsLayout()
@@ -6930,6 +7031,7 @@ class Window(QMainWindow):
             self.notice('A file operation is still running. Use “Stop after current item” and close once it finishes.')
             event.ignore()
             return
+        self.exit_folder_focus(refresh=False)
         self.tagging.shutdown()
         self.poll_timer.stop()
         self._img_viewer.close_viewer()
