@@ -6747,8 +6747,11 @@ class Window(QMainWindow):
                 action = QWidgetAction(assignments)
                 action.setDefaultWidget(checkbox)
                 assignments.addAction(action)
-                checkbox.stateChanged.connect(lambda state, key=note['id']: self.assign_groups_note(groups, key, state == Qt.Checked.value)
-                                              if state != Qt.PartiallyChecked.value else None)
+                def changed(state, key=note['id'], box=checkbox):
+                    if state != Qt.PartiallyChecked.value:
+                        box.setTristate(False)
+                        self.assign_groups_note(groups, key, state == Qt.Checked.value)
+                checkbox.stateChanged.connect(changed)
         menu.addSeparator()
         menu.addAction('Dissolve Selected Groups', lambda: self.dissolve_groups(groups))
 
