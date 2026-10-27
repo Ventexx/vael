@@ -388,7 +388,10 @@ def signature(path):
     if path.is_dir():
         for folder, dirs, files in os.walk(path, followlinks=False):
             items.extend(Path(folder) / name for name in dirs + files)
-    return tuple((str(p.relative_to(path)), p.lstat().st_size, p.lstat().st_mtime_ns)
+    # Directory timestamps change when our own child operations are undone.
+    # Track their existence, and the size/timestamp of every contained file.
+    return tuple((str(p.relative_to(path)), 0 if p.is_dir() else p.lstat().st_size,
+                  0 if p.is_dir() else p.lstat().st_mtime_ns)
                  for p in sorted(items) if p.exists() or p.is_symlink())
 
 
@@ -399,6 +402,15 @@ class UndoRecord:
     target: Path
     stamp: tuple
     backup: Path | None = None
+    redo_path: Path | None = None
+    restored_stamp: tuple | None = None
+
+
+@dataclass
+class HistoryChange:
+    record: UndoRecord | None
+    redo: bool
+    state: dict | None = None
 
 
 @dataclass
@@ -414,6 +426,7 @@ class FileService:
     def __init__(self, root):
         self.root = normalized(root) if root else None
         self.undo_stack = []
+        self.retained_records = []
 
     def inside(self, path, allow_root=False):
         if self.root is None:
@@ -546,12 +559,18 @@ class FileService:
                     stage.unlink()
 
     def discard_backups(self):
-        for record in self.undo_stack:
-            if record.backup and record.backup.exists():
-                backup = self.require(record.backup)
-                if backup.is_file() and not is_link(backup):
+        paths = {path for record in self.undo_stack + self.retained_records
+                 for path in (record.backup, record.redo_path) if path}
+        for path in paths:
+            if path.exists():
+                backup = self.require(path)
+                self.check_source(backup)
+                if backup.is_dir():
+                    shutil.rmtree(backup)
+                else:
                     backup.unlink()
         self.undo_stack.clear()
+        self.retained_records.clear()
 
     def mkdir(self, parent, name):
         parent = self.require(parent, allow_root=True)
@@ -586,6 +605,8 @@ class FileService:
         if not self.undo_stack:
             raise ValueError("Nothing to undo in this session.")
         record = self.undo_stack[-1]
+        if not any(item is record for item in self.retained_records):
+            self.retained_records.append(record)
         if record.action == 'rmdir':
             self.require(record.source).mkdir()
             self.undo_stack.pop()
@@ -599,13 +620,45 @@ class FileService:
             if source.exists():
                 raise FileExistsError(f"Original location is occupied: {source}")
             target.rename(source)
-        elif target.is_dir():
-            shutil.rmtree(target)
         else:
-            target.unlink()
-        if record.backup and record.backup.exists():
-            self.require(record.backup).rename(target)
+            record.redo_path = self.require(self.root / f'.sorter-{uuid.uuid4().hex}.redo')
+            target.rename(record.redo_path)
+        try:
+            if record.backup and record.backup.exists():
+                self.require(record.backup).rename(target)
+                record.restored_stamp = signature(target)
+        except Exception:
+            (record.source if record.action == 'move' else record.redo_path).rename(target)
+            raise
         self.undo_stack.pop()
+        return record
+
+    def redo(self, record):
+        if record.action == 'rmdir':
+            self.require(record.source).rmdir()  # Refuses nonempty folders.
+            self.undo_stack.append(record)
+            return record
+        source = self.require(record.source if record.action == 'move' else record.redo_path)
+        target = self.require(record.target)
+        self.check_source(source)
+        if signature(source) != record.stamp:
+            raise ValueError('This item changed after Undo. Redo stopped to preserve those changes.')
+        if record.backup:
+            self.check_source(target)
+            if signature(target) != record.restored_stamp:
+                raise ValueError('The restored destination changed. Redo stopped to preserve those changes.')
+            if record.backup.exists():
+                raise FileExistsError(str(record.backup))
+            target.rename(self.require(record.backup))
+        elif target.exists():
+            raise FileExistsError(f'Destination is occupied: {target}')
+        try:
+            source.rename(target)
+        except Exception:
+            if record.backup and record.backup.exists():
+                record.backup.rename(target)
+            raise
+        self.undo_stack.append(record)
         return record
 
 
@@ -4866,7 +4919,8 @@ class SettingsDialog(QDialog):
             ('F5', 'Refresh'), ('Alt+Up', 'Workspace: parent folder'),
             ('Ctrl+X / Ctrl+V', 'Workspace: cut / paste'), ('F2', 'Rename selection'),
             ('Delete', 'Move selected workspace entries to trash'),
-            ('Ctrl+Shift+N', 'Create workspace folders'), ('Ctrl+Z', 'Undo last file operation')]:
+            ('Ctrl+Shift+N', 'Create workspace folders'), ('Ctrl+Z', 'Undo previous action'),
+            ('Ctrl+Y / Ctrl+Shift+Z', 'Redo next action')]:
             row = QHBoxLayout()
             label = QLabel(key)
             label.setMinimumWidth(155)
@@ -6059,6 +6113,8 @@ class Window(QMainWindow):
         self.service = FileService(self.config['sort_root'])
         self.jobs = Jobs(self)
         self.operation_task = None
+        self.history = []
+        self.history_controls = []
         self.clip_paths, self.clip_cut = [], False
         self.active_browser = None
         self._folder_focus = None
@@ -6156,9 +6212,7 @@ class Window(QMainWindow):
         controls.addStretch()
         self.split_toggle = QCheckBox('Split view')
         controls.addWidget(self.split_toggle)
-        self.undo_button = QPushButton('Undo last operation')
-        self.undo_button.clicked.connect(self.undo)
-        controls.addWidget(self.undo_button)
+        controls.addWidget(self.make_history_controls())
         b.addLayout(controls)
         b.addWidget(self.shelf, 1)
         self.horizontal = QSplitter(Qt.Horizontal)
@@ -6213,6 +6267,9 @@ class Window(QMainWindow):
         self.update_target_label()
         shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
         shortcut.activated.connect(lambda: self.undo() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox)) else None)
+        for key in ('Ctrl+Y', 'Ctrl+Shift+Z'):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(lambda: self.redo() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox)) else None)
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(5000)
         self.poll_timer.timeout.connect(self.poll_folders)
@@ -6428,9 +6485,7 @@ class Window(QMainWindow):
             bar.addWidget(back)
             self.focus_title = QLabel()
             bar.addWidget(self.focus_title, 1)
-            undo = QPushButton('Undo last operation')
-            undo.clicked.connect(self.undo)
-            bar.addWidget(undo)
+            bar.addWidget(self.make_history_controls())
             layout.addLayout(bar)
             self.focus_browser = WorkspaceBrowser(self)
             self.browsers.append(self.focus_browser)
@@ -6500,6 +6555,8 @@ class Window(QMainWindow):
             if self.config['sort_root'] != old_root:
                 self.service.discard_backups()
                 self.service = FileService(self.config['sort_root'])
+                self.history.clear()
+                self.update_history_controls()
             try:
                 save_settings(self.config)
             except OSError as exc:
@@ -6541,7 +6598,7 @@ class Window(QMainWindow):
         if move:
             self.clip_cut = False
 
-    def run_operations(self, title, work, select_transferred=False):
+    def run_operations(self, title, work, select_transferred=False, replay=False):
         if self.tagging.busy:
             self.tagging.error('Finish or stop the tagging job / health check before changing files. Browsing is still available.')
             return
@@ -6550,12 +6607,14 @@ class Window(QMainWindow):
             return
         if not work:
             return
+        before = self.history_state()
+        stack_start = len(self.service.undo_stack)
         self.progress.setRange(0, len(work))
         self.progress.setValue(0)
         self.progress.show()
         self.cancel_button.show()
         self.operation_status.setText(title)
-        self.undo_button.setEnabled(False)
+        self.update_history_controls(busy=True)
 
         def execute(task):
             results, errors = [], []
@@ -6566,6 +6625,8 @@ class Window(QMainWindow):
                     results.append((label, function()))
                 except Exception as exc:
                     errors.append(f'{label}: {exc}')
+                    if replay:
+                        break  # History must remain a contiguous sequence.
                 task.signals.progress.emit(i + 1, label)
             return results, errors, task.cancel.is_set()
 
@@ -6574,9 +6635,17 @@ class Window(QMainWindow):
             self.operation_task = None
             self.progress.hide()
             self.cancel_button.hide()
-            self.undo_button.setEnabled(True)
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
+            if not replay:
+                records = self.service.undo_stack[stack_start:]
+                if records:
+                    self.add_history(title, records, before)
+                elif title == 'Trash' and results:
+                    # Windows Recycle Bin owns recovery for trashed content.
+                    self.history.clear()
+                    self.service.discard_backups()
+            self.update_history_controls()
             transferred = set()
             if select_transferred:
                 transferred = {value.target if isinstance(value, GroupTransferResult) else value
@@ -6612,18 +6681,24 @@ class Window(QMainWindow):
             browser.grid.viewport().update()
 
     def group_selection(self, browser):
+        before = self.begin_group_edit()
+        if before is None:
+            return
         try:
             create_group(self.config, browser.selected_paths())
         except ValueError as exc:
             self.notice(exc)
             return
         self.groups_changed()
+        self.add_history('Group selected entries', [], before)
 
     def dissolve_group(self, group):
-        self.config['groups'] = [g for g in self.config['groups'] if g['id'] != group['id']]
-        self.groups_changed()
+        self.dissolve_groups([group])
 
     def show_notes(self, editable=True):
+        before = self.begin_group_edit() if editable else self.history_state()
+        if before is None:
+            return
         dialog = NotesDialog(self, editable)
         if self.exec_dialog(dialog) == QDialog.Accepted and editable:
             self.config['notes'] = dialog.notes
@@ -6632,14 +6707,17 @@ class Window(QMainWindow):
                 group['notes'] = [key for key in group['notes'] if key in existing]
             assign_first_note(self.config)
             self.persist()
+            self.add_history('Edit Group Notes', [], before)
         dialog.deleteLater()
 
     def assign_note(self, group, note_id, checked):
-        ids = set(group['notes'])
-        ids.add(note_id) if checked else ids.discard(note_id)
-        group['notes'] = sorted(ids)
-        assign_first_note(self.config)
-        self.persist()
+        self.assign_groups_note([group], note_id, checked)
+
+    def begin_group_edit(self):
+        if self.operation_task:
+            self.notice('Wait for the current file operation before editing groups.')
+            return None
+        return self.history_state()
 
     def group_menu(self, group, parent):
         menu = QMenu(parent)
@@ -6675,6 +6753,9 @@ class Window(QMainWindow):
         menu.addAction('Dissolve Selected Groups', lambda: self.dissolve_groups(groups))
 
     def assign_groups_note(self, groups, note_id, checked):
+        before = self.begin_group_edit()
+        if before is None:
+            return
         for group in groups:
             if group not in self.config['groups']:
                 continue
@@ -6683,14 +6764,22 @@ class Window(QMainWindow):
             group['notes'] = sorted(ids)
         assign_first_note(self.config)
         self.persist()
+        self.add_history('Assign group notes', [], before)
 
     def dissolve_groups(self, groups):
+        before = self.begin_group_edit()
+        if before is None:
+            return
         ids = {group['id'] for group in groups}
         self.config['groups'] = [group for group in self.config['groups'] if group['id'] not in ids]
         self.groups_changed()
+        self.add_history('Dissolve groups', [], before)
 
     def edit_groups_link(self, groups):
         def save(url):
+            before = self.begin_group_edit()
+            if before is None:
+                return False
             if not all(any(g is group for g in self.config['groups']) for group in groups):
                 raise ValueError('The selected groups changed. Reopen their context menu.')
             previous = [group.get('link') for group in groups]
@@ -6708,6 +6797,7 @@ class Window(QMainWindow):
                     else:
                         group['link'] = link
                 raise
+            self.add_history('Associate group link', [], before)
             return True
         links = {group.get('link', '') for group in groups}
         self.tagging.link_dialog(next(iter(links)) if len(links) == 1 else '', save,
@@ -6741,29 +6831,19 @@ class Window(QMainWindow):
         return menu
 
     def edit_group_link(self, group):
-        def save(url):
-            if not any(g is group for g in self.config['groups']):
-                raise ValueError('This group changed. Reopen its context menu.')
-            previous = group.get('link')
-            if url:
-                group['link'] = url
-            else:
-                group.pop('link', None)
-            try:
-                save_settings(self.config)
-            except Exception:
-                if previous is None:
-                    group.pop('link', None)
-                else:
-                    group['link'] = previous
-                raise
-            return True
-        self.tagging.link_dialog(group.get('link', ''), save, 'Associate Group Link')
+        self.edit_groups_link([group])
 
-    def reconcile_references(self, results):
+    def reconcile_references(self, results, save=True):
         # Moves and renames update pins, shelf entries and browser paths.
         transferred = []
         for old_text, value in results:
+            if isinstance(value, HistoryChange):
+                record = value.record
+                if record and (not value.redo or record.action == 'move'):
+                    self.reconcile_references([(str(record.source), record.target if value.redo else record)], save=False)
+                if value.state is not None:
+                    self.config.update(copy.deepcopy(value.state))
+                continue
             if isinstance(value, GroupTransferResult):
                 transferred.append(value)
                 if not value.moved:
@@ -6826,8 +6906,9 @@ class Window(QMainWindow):
                     if members:
                         self.config['groups'].append(dict(original, members=members,
                             family=original.get('family', original['id']), notes=list(original['notes'])))
-        organize_groups(self.config)
-        self.persist()
+        if save:
+            organize_groups(self.config)
+            self.persist()
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
         self.shelf.update_count()
 
@@ -7068,8 +7149,120 @@ class Window(QMainWindow):
             return
         self.run_operations('Trash', [(str(path), lambda p=path: self.service.trash(p)) for path in paths])
 
+    def history_state(self):
+        return copy.deepcopy({key: self.config[key] for key in ('groups', 'notes')})
+
+    def add_history(self, title, records, before):
+        after = self.history_state()
+        if not records and before == after:
+            return
+        # A new edit creates a new branch after the current point.
+        retained = []
+        for batch in self.history:
+            if not batch['applied']:
+                break
+            if batch['applied'] < batch['units']:
+                batch['records'] = batch['records'][:batch['applied']]
+                batch['units'] = batch['applied']
+                batch['after'] = before
+                retained.append(batch)
+                break
+            retained.append(batch)
+        self.history = retained
+        units = max(1, len(records))
+        self.history.append(dict(title=title, records=list(records), before=before,
+                                 after=after, units=units, applied=units))
+        self.update_history_controls()
+
+    def make_history_controls(self):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        buttons = []
+        for text, tooltip, callback in [('←', 'Undo previous action · Ctrl+Z', self.undo),
+                                         ('→', 'Redo next action · Ctrl+Y', self.redo),
+                                         ('History', 'View history and return to a previous point', self.show_history)]:
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tooltip)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+            buttons.append(button)
+        self.history_controls.append(buttons)
+        self.update_history_controls()
+        return widget
+
+    def update_history_controls(self, busy=None):
+        busy = self.operation_task is not None if busy is None else busy
+        for undo, redo, history in self.history_controls:
+            undo.setEnabled(not busy and any(batch['applied'] for batch in self.history))
+            redo.setEnabled(not busy and any(batch['applied'] < batch['units'] for batch in self.history))
+            history.setEnabled(not busy)
+
     def undo(self):
-        self.run_operations('Undo', [('Last operation', self.service.undo)])
+        target = next((i for i in range(len(self.history) - 1, -1, -1) if self.history[i]['applied']), None)
+        if target is not None:
+            self.goto_history(target)
+
+    def redo(self):
+        target = next((i + 1 for i, batch in enumerate(self.history) if batch['applied'] < batch['units']), None)
+        if target is not None:
+            self.goto_history(target)
+
+    def goto_history(self, target):
+        work = []
+        def step(batch, redo):
+            record = None
+            if batch['records']:
+                index = batch['applied'] if redo else batch['applied'] - 1
+                record = batch['records'][index]
+                if redo:
+                    self.service.redo(record)
+                else:
+                    if not self.service.undo_stack or self.service.undo_stack[-1] is not record:
+                        raise ValueError('History no longer matches the file operations.')
+                    self.service.undo()
+            batch['applied'] += 1 if redo else -1
+            state = batch['after'] if batch['applied'] == batch['units'] else batch['before'] if batch['applied'] == 0 else None
+            return HistoryChange(record, redo, state)
+        for batch in reversed(self.history[target:]):
+            for _ in range(batch['applied']):
+                work.append(('Undo ' + batch['title'], lambda b=batch: step(b, False)))
+        for batch in self.history[:target]:
+            for _ in range(batch['units'] - batch['applied']):
+                work.append(('Redo ' + batch['title'], lambda b=batch: step(b, True)))
+        self.run_operations('History', work, replay=True)
+
+    def show_history(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('History')
+        dialog.resize(470, 380)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel('Choose a point to undo or redo whole actions. History lasts for this session. Trashing files starts a new history; restore those files through the Windows Recycle Bin.')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        entries = QListWidget()
+        entries.addItem('Start of history')
+        current = 0
+        for i, batch in enumerate(self.history):
+            status = 'Undone' if batch['applied'] == 0 else 'Done' if batch['applied'] == batch['units'] else f"Partial: {batch['applied']}/{batch['units']}"
+            count = f" · {len(batch['records'])} file steps" if batch['records'] else ''
+            entries.addItem(f"{i + 1}. {batch['title']}{count} · {status}")
+            entries.item(entries.count() - 1).setToolTip('\n'.join(
+                f'{record.source} → {record.target}' for record in batch['records'][:20]))
+            if batch['applied']:
+                current = i + 1
+        entries.setCurrentRow(current)
+        layout.addWidget(entries, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        go = buttons.addButton('Go to selected point', QDialogButtonBox.AcceptRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        entries.itemDoubleClicked.connect(lambda *_: dialog.accept())
+        layout.addWidget(buttons)
+        if self.exec_dialog(dialog) == QDialog.Accepted:
+            self.goto_history(entries.currentRow())
+        dialog.deleteLater()
 
     def pin(self, browser):
         if not browser.current:
