@@ -3620,7 +3620,10 @@ class CoverBrowser(ImageBrowser):
         filter_layout.setSpacing(6)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search folders and files…')
-        self.search.setClearButtonEnabled(True)
+        self.reset_search_action = self.search.addAction(_make_win_icon('close'), QLineEdit.TrailingPosition)
+        self.reset_search_action.setToolTip('Reset search and filters')
+        self.reset_search_action.setVisible(False)
+        self.reset_search_action.triggered.connect(self.reset_search)
         filter_layout.addWidget(self.search, 1)
         self.kind = QComboBox()
         self.kind.addItems(['All types', 'Image', 'GIF', 'Video', 'Folder', 'Other'])
@@ -4047,12 +4050,48 @@ class CoverBrowser(ImageBrowser):
             self.table.viewport().update()
 
     def queue_filter(self, *_):
+        self.reset_search_action.setVisible(self.active_filter() or self.recursive.isChecked() != (not self.editable))
         # Invalidate old results as soon as typing starts, not after debounce.
         self._filter_serial += 1
         if self._filter_task:
             self._filter_task.cancel.set()
         self.set_search_feedback('Searching…', busy=True)
         self.filter_timer.start()
+
+    def reset_search(self):
+        self.filter_timer.stop()
+        self._filter_serial += 1
+        if self._filter_task:
+            self._filter_task.cancel.set()
+        # Reset all controls together without starting intermediate searches.
+        for widget, reset in ((self.search, lambda: self.search.clear()),
+                              (self.extension, lambda: self.extension.clear()),
+                              (self.kind, lambda: self.kind.setCurrentIndex(0)),
+                              (self.recursive, lambda: self.recursive.setChecked(not self.editable))):
+            was_blocked = widget.blockSignals(True)
+            try:
+                reset()
+            finally:
+                widget.blockSignals(was_blocked)
+        self.reset_search_action.setVisible(False)
+        self.search.setToolTip('')
+        self.search_feedback.setToolTip('')
+        self.search.setCompleter(None)
+        self.proxy.terms = []
+        self.proxy.invalidate()
+        if isinstance(self, WorkspaceBrowser):
+            if getattr(self, '_loaded_folder', None) != self.current:
+                self.filter_rows()  # A newly opened folder still needs its initial scan.
+                return
+            self.set_search_feedback('All content')
+            self.grid.viewport().update()
+        else:
+            if self._filter_map is not None:
+                self._filter_map = None
+                self.reload_folders()
+            self.repaint_content()
+            self.set_search_feedback('All content')
+        self.search.setFocus()
 
     def set_search_feedback(self, text, busy=False, error=False):
         self.search_feedback.setText(text)
@@ -4319,6 +4358,7 @@ class WorkspaceBrowser(CoverBrowser):
             selected = set(self._selected_file_paths)
             self._restoring_selection = True
             self.model.set_entries(result[0])
+            self._loaded_folder = self.current
             self.proxy.invalidate()
             self.proxy.sort(0)
             reveal_index = QModelIndex()
