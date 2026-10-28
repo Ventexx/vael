@@ -29,9 +29,11 @@ Browse your content, choose what to use, and organize it in one workspace. Sorte
 1. Install [Python](https://www.python.org/downloads/) 3.10 or newer. On Windows, enable **Add Python to PATH**.
 2. Download Vael using **Code → Download ZIP**, then extract it.
 3. Open the `sorter` folder and run `start.bat`. It creates the local environment, installs the required packages, and opens Sorter. Setup needs internet access.
-4. Open the **gear** in the lower workspace. Under **Folders**, add your source folders and choose an existing sorting folder.
+4. Open the **gear** in the top bar. Under **Folders**, add your source folders and choose an existing sorting folder.
 
 Use `start_silent.bat` for everyday launches. It uses the installed environment without checking or updating dependencies. Run `start.bat` again for setup, maintenance, or visible error output. The supplied launchers are for Windows.
+
+The visual rework is now the main app. Existing `start-Rework_silent.bat` shortcuts also open this same version. Your experimental layout is adopted on the first launch and then saved as the normal layout.
 
 **Uninstall**
 
@@ -41,7 +43,7 @@ Close Sorter and delete its installation folder, including `venv` and `.local`. 
 
 ## usage
 
-### browse and collect
+### browse and copy
 
 The upper explorer shows your source folders. Click to select, Ctrl-click to add or remove selections, and double-click an image to inspect it. Source content can be viewed and copied; Sorter only changes files inside your configured sorting folder.
 
@@ -50,7 +52,13 @@ Drag content into the lower workspace to copy it. The destination highlights whi
 
 ### organize the workspace
 
-Double-click folders to open them. Use the **Root › Folder** breadcrumbs to go back. Enable **Split view** to show two independent folders side by side.
+Double-click folders to open them. Use the **Root › Folder** breadcrumbs to go back; the current folder is emphasized. The **split rectangle icon** in the top bar switches between one workspace pane and two independent panes. A teal marker identifies the active destination for copies from Sources.
+
+Each pane's **⋯ menu** contains folder creation, selected-item actions, sorting, and entry zoom. Sort by name, date, size, or type. Folders stay first, groups stay together, and files inside each group retain their natural filename order. The magnifying glass opens search; the circular arrow refreshes that pane.
+
+Top-bar controls are grouped by purpose: split layout, undo/redo/history, file-operation progress, auto-tagging, then Settings and Help. Hover an icon for its action and shortcuts. Active toggles have a teal background; keyboard focus has a dotted underline.
+
+While a file operation runs, **Files**, its progress indicator, and a Stop icon appear in a reserved space without moving the other controls. Stop finishes the current item before ending that file operation. Tagging has its own stop control inside the tagger dialog.
 
 Right-click files or folders to copy, cut, move, duplicate, rename, inspect, or trash them. Right-click empty space to paste or create folders. Dragging within the workspace moves files; hold **Ctrl** to copy instead.
 
@@ -76,11 +84,11 @@ Right-click a workspace folder or breadcrumb, including **Root**, and choose **F
 
 All thumbnails in the open folder load in the background and remain cached while you scroll. Changing folders releases the previous folder's thumbnails. The viewer loads full-resolution originals when opened.
 
-Use the **←** at the top left to leave focus mode. Your previous layout, locations, filters, selections of surviving files, and scroll positions return. File changes remain. Focus mode's image cache is released when you leave.
+Use the **←** at the top left to leave focus mode. Your previous layout, locations, filters, selections of surviving files, and scroll positions return. File changes remain. Focus mode's image cache is released when you leave. Split view is unavailable while a folder is focused; leave focus mode before changing the layout.
 
 ### undo, redo & history
 
-The **← / →** controls beside **History** undo and redo whole actions. Moving 220 files is one history entry, so one Undo reverses that batch. Group creation, dissolution, note assignments, shared links, and edits to the Group Notes library are also recorded.
+The **curved left/right arrows** in the top bar undo and redo whole actions. Their tooltips identify the action that will be reversed or repeated. The adjacent **clock with a backward arrow** opens Action History. Moving 220 files is one history entry, so one Undo reverses that batch. Group creation, dissolution, note assignments, shared links, and edits to the Group Notes library are also recorded.
 
 Open **History**, select a point, and choose **Go to selected point**. Sorter undoes or redoes the intervening actions. Double-clicking an entry does the same. A stopped or partially completed action shows its progress and can be continued through Undo or Redo.
 
@@ -142,6 +150,8 @@ M in the source explorer copies the protected originals rather than moving them.
 ## optional image tagging
 
 Right-click workspace images or folders → **Auto-Tag Image/s**. It tags new or changed content and skips images already tagged, so you can select the whole folder after adding images. Unchanged images need only a quick file check; identical copies reuse saved tags. The progress window shows how many were tagged and skipped. Selected folders include their subfolders, but nothing outside your selection is checked. Tagging never starts automatically.
+
+The top-bar **tag with a sparkle** opens tagging progress, settings, and errors. Its small status mark spins while working, shows a check when complete, pause bars when stopped, and an exclamation mark on errors. An idle tagger has no status mark. Hover for the current phase and item count.
 
 Use **Re-tag All Selected Images** to deliberately regenerate tags for the selection, for example after changing thresholds or the model. A previously processed image with no generated tags still counts as tagged. Click the tagger status to see progress, stop after the current image, change settings, or inspect errors.
 
