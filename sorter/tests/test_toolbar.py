@@ -8,6 +8,8 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import threading
+from types import SimpleNamespace
 import unittest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
@@ -97,6 +99,65 @@ class ToolbarTests(unittest.TestCase):
             button = self.window.findChild(sorter.QToolButton, name)
             self.assertTrue(button.accessibleName())
             self.assertTrue(button.toolTip())
+
+    def test_task_controls_do_not_move_toolbar_buttons(self):
+        w = self.window
+        w.resize(720, 520)
+        w.file_task_controls.hide()
+        settle()
+        buttons = [w.split_toggle, *w.history_controls[0], w.tagging.button]
+        positions = [button.mapTo(w, sorter.QPoint()) for button in buttons]
+        try:
+            w.file_task_controls.show()
+            w.progress.show()
+            w.cancel_button.show()
+            w.operation_status.setText('Copying a long filename into the workspace')
+            settle()
+            self.assertEqual(positions, [button.mapTo(w, sorter.QPoint()) for button in buttons])
+            self.assertEqual(w.width(), 720)
+        finally:
+            w.file_task_controls.hide()
+            w.progress.hide()
+            w.cancel_button.hide()
+            w.operation_status.setText('Ready')
+
+    def test_stop_button_only_cancels_file_operations(self):
+        w = self.window
+        files = SimpleNamespace(cancel=threading.Event())
+        tagging = SimpleNamespace(cancel=threading.Event())
+        w.operation_task, w.tagging.task = files, tagging
+        try:
+            w.stop_file_operation()
+            self.assertTrue(files.cancel.is_set())
+            self.assertFalse(tagging.cancel.is_set())
+            self.assertFalse(w.cancel_button.isEnabled())
+        finally:
+            w.operation_task = w.tagging.task = None
+            w.cancel_button.setEnabled(True)
+            w.operation_status.setText('Ready')
+
+    def test_tagger_reports_task_states_without_hover(self):
+        tagger = self.window.tagging
+        saved_state, saved_errors = tagger.state, tagger.errors
+        try:
+            cases = [('Ready', None, False, 'idle'),
+                     ('Tagging', None, True, 'running'),
+                     ('Complete', 1, False, 'complete'),
+                     ('Stopped', 1, False, 'stopped'),
+                     ('Stopped on error', 1, False, 'error')]
+            for phase, ended, busy, expected in cases:
+                tagger.state = dict(phase=phase, ended=ended, started=None, done=1, total=3, current='')
+                tagger.task = SimpleNamespace(cancel=threading.Event()) if busy else None
+                tagger.errors = []
+                tagger.render()
+                self.assertEqual(tagger.button.task_state, expected)
+                self.assertEqual(tagger.button._animation.isActive(), expected == 'running')
+                self.assertIn('Auto-tag images', tagger.button.toolTip())
+                self.assertIn(phase, tagger.button.accessibleName())
+        finally:
+            tagger.task = None
+            tagger.state, tagger.errors = saved_state, saved_errors
+            tagger.render()
 
 
 if __name__ == '__main__':

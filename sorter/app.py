@@ -6149,6 +6149,7 @@ class CompactStatusLabel(QLabel):
     def setText(self, text):
         self._message = text
         self.setToolTip(text)
+        self.setAccessibleName(text)
         super().setText(self.fontMetrics().elidedText('' if text == 'Ready' else text, Qt.ElideRight, self.width()))
 
     def resizeEvent(self, event):
@@ -6157,11 +6158,72 @@ class CompactStatusLabel(QLabel):
 
 
 class TagStatusButton(QPushButton):
-    """Accept the tagger's existing status updates while remaining an icon."""
+    """Compact auto-tagging control with visible, shape-coded task feedback."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.task_state = 'idle'
+        self._angle = 0
+        self._animation = QTimer(self)
+        self._animation.setInterval(120)
+        self._animation.timeout.connect(self._advance)
+
+    def _advance(self):
+        self._angle = (self._angle + 35) % 360
+        self.update()
+
     def setText(self, text):
-        self.setAccessibleName(text)
-        self.setToolTip(text + '\nTagging progress, settings and errors')
+        self.setAccessibleName('Auto-tag images · ' + text)
+        self.setToolTip('Auto-tag images · ' + text + '\nOpen tagging progress, settings and errors')
         super().setText('')
+
+    def set_task_status(self, state, busy=False, errors=False):
+        phase = state.get('phase', 'Ready')
+        if errors or any(word in phase.lower() for word in ('error', 'failed', 'unavailable', 'incomplete')):
+            status = 'error'
+        elif busy:
+            status = 'running'
+        elif 'stopp' in phase.lower():
+            status = 'stopped'
+        elif state.get('ended') is not None and phase != 'Ready':
+            status = 'complete'
+        else:
+            status = 'idle'
+        total = state.get('total', 0)
+        detail = f" · {state.get('done', 0):,}/{total:,}" if total else ''
+        text = f'Auto-tag images · {phase}{detail}'
+        self.setAccessibleName(text)
+        self.setToolTip(text + '\nOpen tagging progress, settings and errors')
+        if status != self.task_state:
+            self.task_state = status
+            if status == 'running':
+                self._animation.start()
+            else:
+                self._animation.stop()
+            self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.task_state == 'idle':
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.translate(self.width() - 11, self.height() - 11)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor('#0a0a0a'))
+        painter.drawEllipse(QRectF(0, 0, 11, 11))
+        painter.setPen(QPen(QColor('#e88c86' if self.task_state == 'error' else '#00d4a0'), 1.5))
+        if self.task_state == 'running':
+            painter.drawArc(QRectF(2, 2, 7, 7), self._angle * 16, 260 * 16)
+        elif self.task_state == 'complete':
+            painter.drawLine(2, 5, 4, 8)
+            painter.drawLine(4, 8, 9, 2)
+        elif self.task_state == 'error':
+            painter.drawLine(5, 2, 5, 6)
+            painter.drawPoint(5, 9)
+        else:
+            painter.drawLine(3, 2, 3, 9)
+            painter.drawLine(7, 2, 7, 9)
+        painter.end()
 
 REWORK_STYLE = """
 /* Original near-black/teal palette; compact controls leave room for content. */
@@ -6338,7 +6400,17 @@ class Window(QMainWindow):
         self.vertical.addWidget(bottom)
         self.vertical.setSizes([360, 540])
         layout.addWidget(self.vertical, 1)
-        operation_bar = self.chrome_tools
+        self.file_task_controls = QWidget()
+        self.file_task_controls.setFixedWidth(108)
+        policy = self.file_task_controls.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.file_task_controls.setSizePolicy(policy)
+        self.chrome_tools.addWidget(self.file_task_controls)
+        operation_bar = QHBoxLayout(self.file_task_controls)
+        operation_bar.setContentsMargins(0, 0, 0, 0)
+        operation_bar.setSpacing(4)
+        operation_bar.addWidget(QLabel('Files'))
+        self.file_task_controls.hide()
         self.operation_status = CompactStatusLabel('Ready')
         self.operation_status.setObjectName('rosterStatusLabel')
         title_layout.insertWidget(2, self.operation_status, 1)
@@ -6350,11 +6422,12 @@ class Window(QMainWindow):
         self.cancel_button.setIcon(_make_toolbar_icon('stop'))
         self.cancel_button.setObjectName('utilityIcon')
         self.cancel_button.setFixedSize(26, 24)
-        self.cancel_button.setToolTip('Stop after current item')
-        self.cancel_button.clicked.connect(lambda: self.operation_task.cancel.set() if self.operation_task else None)
+        self.cancel_button.setToolTip('Stop the file operation after the current item. Tagging has separate controls.')
+        self.cancel_button.setAccessibleName('Stop file operation after current item')
+        self.cancel_button.clicked.connect(self.stop_file_operation)
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
-        operation_bar.addSpacing(8)
+        self.chrome_tools.addSpacing(8)
         self.tagging = Tagging(self, APP_DIR)
         old_tag_button = self.tagging.button
         self.tagging.button = TagStatusButton()
@@ -6364,7 +6437,8 @@ class Window(QMainWindow):
         self.tagging.button.setText('Tagger: Ready')
         self.tagging.button.clicked.connect(lambda: self.tagging.show())
         old_tag_button.deleteLater()
-        operation_bar.addWidget(self.tagging.button)
+        self.chrome_tools.addWidget(self.tagging.button)
+        self.tagging.render()
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
         self._img_viewer = MediaViewerOverlay(self._content_root)
@@ -6735,6 +6809,13 @@ class Window(QMainWindow):
         if move:
             self.clip_cut = False
 
+    def stop_file_operation(self):
+        if self.operation_task:
+            self.operation_task.cancel.set()
+            self.cancel_button.setEnabled(False)
+            self.file_task_controls.setToolTip('Stopping the file operation after the current item finishes')
+            self.operation_status.setText('Files · stopping after current item…')
+
     def run_operations(self, title, work, select_transferred=False, replay=False):
         if self.tagging.busy:
             self.tagging.error('Finish or stop the tagging job / health check before changing files. Browsing is still available.')
@@ -6748,6 +6829,9 @@ class Window(QMainWindow):
         stack_start = len(self.service.undo_stack)
         self.progress.setRange(0, len(work))
         self.progress.setValue(0)
+        self.file_task_controls.setToolTip('File operation: ' + title)
+        self.file_task_controls.show()
+        self.cancel_button.setEnabled(True)
         self.progress.show()
         self.cancel_button.show()
         self.operation_status.setText(title)
@@ -6770,6 +6854,7 @@ class Window(QMainWindow):
         def finished(result):
             results, errors, cancelled = result
             self.operation_task = None
+            self.file_task_controls.hide()
             self.progress.hide()
             self.cancel_button.hide()
             self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))

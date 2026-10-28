@@ -153,6 +153,9 @@ class Tagging(QObject):
         label = f'Tagged {count}' if short_phase == 'Tagging' else f'{short_phase}{": " + count if count else ""}'
         self.button.setText('Tagger: ' + label)
         self.button.setToolTip(label + ('\n' + state['current'] if state['current'] else ''))
+        status_update = getattr(self.button, 'set_task_status', None)
+        if status_update:
+            status_update(state, busy=self.busy, errors=bool(self.errors or self.load_error))
         elapsed = max(0, int((state.get('ended') or time.monotonic()) - state['started'])) if state['started'] else 0
         counts = f"\nTagged: {state.get('tagged', 0)}    Already tagged: {state['skipped']}" if 'skipped' in state else ''
         self.summary.setText(f'{phase}\nCompleted: {done} / {total}    Remaining: {max(0, total - done)}{counts}\nElapsed: {elapsed}s')
