@@ -70,6 +70,34 @@ class ToolbarTests(unittest.TestCase):
             self.assertNotIn('Shelf', ' '.join(a.text() for a in menu.actions()))
             menu.deleteLater()
 
+    def test_renames_reconcile_groups_without_collection_state(self):
+        w = self.window
+        source, target = self.workspace / 'before.txt', self.workspace / 'after.txt'
+        saved = copy.deepcopy(w.config['groups'])
+        source.write_text('temporary test file', encoding='utf-8')
+        w.config['groups'] = [dict(id='test', members=[str(source)], notes=[], color='#568577')]
+        try:
+            source.rename(target)
+            w.reconcile_references([(str(source), target)])
+            self.assertEqual(w.config['groups'][0]['members'], [str(target)])
+            target.rename(source)
+            w.reconcile_references([(str(target), source)])
+            self.assertEqual(w.config['groups'][0]['members'], [str(source)])
+        finally:
+            w.config['groups'] = saved
+            source.unlink(missing_ok=True)
+            target.unlink(missing_ok=True)
+
+    def test_promoted_layout_restores_experimental_preferences(self):
+        w = self.window
+        w.config['layout'] = {'split': False}
+        w.config['rework_layout'] = {'split': True}
+        try:
+            w.restore_layout()
+            self.assertTrue(w.split_toggle.isChecked())
+        finally:
+            w.config.pop('rework_layout', None)
+
     def test_split_tooltip_describes_next_action(self):
         toggle = self.window.split_toggle
         toggle.setChecked(False)

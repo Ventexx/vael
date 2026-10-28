@@ -5939,12 +5939,15 @@ def _make_toolbar_icon(kind):
         painter.drawEllipse(QRectF(2, 2, 14, 14))
         painter.drawText(QRect(2, 1, 14, 15), Qt.AlignCenter, '?')
     elif kind == 'tag':
-        path = QPainterPath(QPointF(2, 3))
-        for x, y in ((10, 3), (16, 9), (9, 16), (2, 9)):
+        path = QPainterPath(QPointF(2, 6))
+        for x, y in ((7, 6), (13, 12), (8, 17), (2, 11)):
             path.lineTo(x, y)
         path.closeSubpath()
         painter.drawPath(path)
-        painter.drawEllipse(QPointF(6, 7), 1, 1)
+        painter.drawEllipse(QPointF(5, 9), 1, 1)
+        # The sparkle distinguishes automatic tagging from an ordinary tag editor.
+        painter.drawLine(13, 1, 13, 7)
+        painter.drawLine(10, 4, 16, 4)
     elif kind == 'stop':
         painter.drawRect(QRectF(4, 4, 10, 10))
     else:
