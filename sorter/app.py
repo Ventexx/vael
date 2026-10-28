@@ -2979,14 +2979,11 @@ class MediaViewerOverlay(ImgViewerOverlay):
             return
         path = Path(self._current_card.filepath)
         menu = QMenu(self)
-        owner = self.parent().window()
         menu.addSection('View')
         menu.addAction('Fit image', lambda: self.set_zoom(0))
         menu.addAction('Actual size', lambda: self.set_zoom(1))
         menu.addSeparator()
         menu.addAction('Open externally', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
-        menu.addSection('Collect')
-        menu.addAction('Add to Shelf', lambda: owner.shelf.add_paths([path]))
         menu.exec(event.globalPos())
         menu.deleteLater()
 
@@ -3723,7 +3720,7 @@ class ImageBrowser(QWidget):
 # rescaled to fill it (see RosterBar._sync_icon_size).
 # ---------------------------------------------------------------------------
 
-# SESSION SHELF AND MEDIA VIEWER
+# MEDIA VIEWER
 # ========================================================================
 class CoverBrowser(ImageBrowser):
     """Cover's original explorer, with Sorter's file-action hooks."""
@@ -4176,7 +4173,6 @@ class CoverBrowser(ImageBrowser):
                 menu.addAction('Rename…', lambda: self.window.rename_selection(self))
             else:
                 menu.addAction('Batch rename…', lambda: self.window.batch_rename(self))
-            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
             groups = [group_for(self.window.config, path) for path in paths]
             group = groups[0] if groups and groups[0] and all(g is groups[0] for g in groups) else None
             can_group = (len(paths) >= 2 and all(p.is_file() for p in paths)
@@ -4194,7 +4190,6 @@ class CoverBrowser(ImageBrowser):
             menu.addSection('Collect')
             menu.addAction('Copy to Active Workspace Folder', lambda: self.window.transfer(paths, self.window.target_browser().current, False))
             menu.addAction('Copy', lambda: self.window.copy_selection(self, False))
-            menu.addAction('Add to Shelf', lambda: self.window.shelf.add_paths(paths))
             folders = list(self.selected_folder_paths())
             if folders:
                 menu.addSection('Browse')
@@ -4669,180 +4664,6 @@ class WorkspaceBrowser(CoverBrowser):
             self.navigate(path)
 
 
-class ShelfEntryDelegate(WorkspaceEntryDelegate):
-    def paint(self, painter, option, index):
-        class ShelfIndex:
-            def data(self, role):
-                return index.data(Qt.UserRole + 1) if role == Qt.UserRole else index.data(role)
-        super().paint(painter, option, ShelfIndex())
-
-
-class ShelfList(QListWidget):
-    def __init__(self, shelf):
-        super().__init__()
-        self.shelf = shelf
-        self.setAcceptDrops(True)
-        self.viewport().setAcceptDrops(True)
-        self.drop_feedback = DropFeedback(self)
-        self.setDragEnabled(True)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setViewMode(QListView.IconMode)
-        self.setFlow(QListView.LeftToRight)
-        from types import SimpleNamespace
-        self.browser = SimpleNamespace(window=shelf.window, entry_zoom=100)
-        self.setWrapping(True)
-        self.setResizeMode(QListView.Adjust)
-        self.setMovement(QListView.Static)
-        self.setSpacing(0)
-        self.setGridSize(QSize(102, 134))
-        self.setIconSize(QSize(96, 96))
-        self.setUniformItemSizes(True)
-        self.setItemDelegate(ShelfEntryDelegate(self))
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.viewport().setAcceptDrops(True)
-
-    def repaint_cards(self):
-        for i in range(self.count()):
-            card = self.itemWidget(self.item(i))
-            if card:
-                card._img_lbl.update()
-
-    def dragEnterEvent(self, event):
-        self.dragMoveEvent(event)
-
-    def dragMoveEvent(self, event):
-        paths = [u for u in event.mimeData().urls() if u.isLocalFile()]
-        if paths:
-            self.drop_feedback.show_target(f'Add to Shelf · {len(paths)} item(s) · references only')
-            event.setDropAction(Qt.CopyAction)
-            event.accept()
-        else:
-            self.drop_feedback.hide()
-            event.ignore()
-
-    def dragLeaveEvent(self, event):
-        self.drop_feedback.hide()
-        event.accept()
-
-    def dropEvent(self, event):
-        self.drop_feedback.hide()
-        self.shelf.add_paths([Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()])
-        event.setDropAction(Qt.CopyAction)
-        event.accept()
-
-    def startDrag(self, actions):
-        mime = file_drag_mime(item.data(Qt.UserRole) for item in sorted(self.selectedItems(), key=self.row))
-        # Shelf drops always copy, even if references happen to be in sorting.
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.CopyAction)
-
-
-class Shelf(QWidget):
-    def __init__(self, window):
-        super().__init__()
-        self.window = window
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        row = QHBoxLayout()
-        self.toggle = QLabel('SESSION SHELF · 0')
-        self.toggle.setObjectName('hint')
-        row.addWidget(self.toggle)
-        text = QLabel('Session references')
-        text.setObjectName('hint')
-        row.addWidget(text)
-        row.addStretch()
-        for name, callback in [('Copy to Workspace', self.copy_to_target), ('Remove', self.remove_selected), ('Clear', self.clear)]:
-            button = QPushButton(name)
-            button.clicked.connect(callback)
-            row.addWidget(button)
-        layout.addLayout(row)
-        self.list = ShelfList(self)
-        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.list.customContextMenuRequested.connect(self.menu)
-        self.list.itemDoubleClicked.connect(lambda item: window.preview(Path(item.data(Qt.UserRole))))
-        layout.addWidget(self.list, 1)
-
-    def add_paths(self, paths):
-        existing = {self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())}
-        for path in paths:
-            path = normalized(path)
-            if str(path) in existing:
-                continue
-            item = QListWidgetItem('')
-            item.setData(Qt.UserRole, str(path))
-            self.list.addItem(item)
-            self.refresh_item(item)
-            existing.add(str(path))
-        self.update_count()
-
-    def refresh_item(self, item):
-        from types import SimpleNamespace
-        path = Path(item.data(Qt.UserRole))
-        item.setData(Qt.UserRole + 2, None)
-        kind = 'Folder' if path.is_dir() else 'GIF' if path.suffix.lower() == '.gif' else 'Image' if path.suffix.lower() in IMAGES else 'Video' if path.suffix.lower() in VIDEOS else 'Other'
-        item.setData(Qt.UserRole + 1, SimpleNamespace(path=path, name=path.name, is_dir=path.is_dir(), kind=kind))
-        item.setText(path.name)
-        item.setIcon(self.style().standardIcon(QStyle.SP_DirIcon if path.is_dir() else QStyle.SP_FileIcon))
-        if kind in ('Image', 'GIF'):
-            density = max(2.0, self.devicePixelRatioF() * 2)
-            def decode(task):
-                return decode_thumbnail(path, round(96 * density), round(116 * density))
-            def ready(image):
-                if image.isNull():
-                    return
-                for i in range(self.list.count()):
-                    target = self.list.item(i)
-                    if target.data(Qt.UserRole) == str(path):
-                        pixmap = QPixmap.fromImage(image)
-                        target.setData(Qt.UserRole + 2, pixmap)
-                        target.setIcon(QIcon(pixmap))
-            self.window.jobs.start(decode, ready)
-
-    def update_count(self):
-        self.toggle.setText(f'SESSION SHELF · {self.list.count()}')
-        if hasattr(self.window, 'shelf_button'):
-            self.window.shelf_button.setText(f'Shelf ({self.list.count()})' if self.list.count() else 'Shelf')
-
-    def remove_selected(self):
-        for item in self.list.selectedItems():
-            card = self.list.itemWidget(item)
-            if card:
-                self.list.removeItemWidget(item)
-                card.deleteLater()
-            self.list.takeItem(self.list.row(item))
-        self.update_count()
-
-    def clear(self):
-        self.list.clear()
-        self.update_count()
-
-    def copy_to_target(self):
-        items = self.list.selectedItems() or [self.list.item(i) for i in range(self.list.count())]
-        self.window.transfer([Path(i.data(Qt.UserRole)) for i in items], self.window.target_browser().current, False)
-
-    def menu(self, point):
-        item = self.list.itemAt(point)
-        if item and not item.isSelected():
-            self.list.clearSelection()
-            item.setSelected(True)
-        menu = QMenu(self)
-        menu.addSection('Send to Workspace')
-        action = menu.addAction('Copy to Active Workspace Folder', self.copy_to_target)
-        action.setEnabled(self.list.count() > 0)
-        menu.addSection('Manage Shelf')
-        if self.list.selectedItems():
-            menu.addAction('Remove selected references', self.remove_selected)
-        action = menu.addAction('Clear shelf', self.clear)
-        action.setEnabled(self.list.count() > 0)
-        menu.exec(self.list.viewport().mapToGlobal(point))
-        menu.deleteLater()
-
-
-
-
 # ========================================================================
 # SETTINGS AND BATCH RENAME DIALOGS
 # ========================================================================
@@ -5087,7 +4908,7 @@ class SettingsDialog(QDialog):
         profile_row.addWidget(export)
         profile_row.addWidget(import_button)
         a.addLayout(profile_row)
-        note = QLabel('Profiles contain naming rules and preferences. Source folders, sorting folder, pins remain local. Scope paths in rules are omitted when exporting.\n\nSettings and the disposable catalog are stored in sorter/.local/. The session shelf is never saved.')
+        note = QLabel('Profiles contain naming rules and preferences. Source folders, sorting folder, pins remain local. Scope paths in rules are omitted when exporting.\n\nSettings and the disposable catalog are stored in sorter/.local/.')
         note.setWordWrap(True)
         a.addWidget(note)
         self._section(layout, 'Profiles & exclusions', 'Share naming rules and exclude filenames or folders with wildcard patterns.').addWidget(advanced)
@@ -6091,16 +5912,9 @@ def _make_toolbar_icon(kind):
         painter.setBrush(QColor('#b4b4b4'))
         for x in (4, 9, 14):
             painter.drawEllipse(QPointF(x, 9), 1, 1)
-    elif kind in ('workspace', 'split', 'shelf'):
+    elif kind == 'split':
         painter.drawRoundedRect(QRectF(2, 3, 14, 12), 1, 1)
-        if kind == 'split':
-            painter.drawLine(9, 3, 9, 15)
-        elif kind == 'shelf':
-            painter.drawLine(2, 11, 16, 11)
-            painter.drawLine(6, 6, 6, 10)
-            painter.drawLine(10, 5, 10, 10)
-        else:
-            painter.drawLine(2, 7, 16, 7)
+        painter.drawLine(9, 3, 9, 15)
     elif kind in ('undo', 'redo', 'up'):
         if kind == 'redo':
             painter.translate(18, 0)
@@ -6481,36 +6295,19 @@ class Window(QMainWindow):
         b = QVBoxLayout(bottom)
         b.setContentsMargins(6, 3, 6, 4)
         b.setSpacing(3)
-        self.shelf = Shelf(self)
-        self.shelf.hide()
         controls = self.chrome_tools
         self.target_label = QLabel(self)
         self.target_label.hide()
-        self.workspace_button = QToolButton()
-        self.workspace_button.setIcon(_make_toolbar_icon('workspace'))
-        self.workspace_button.setToolTip('Show workspace')
-        self.workspace_button.setCheckable(True)
-        self.workspace_button.setChecked(True)
-        controls.addWidget(self.workspace_button)
-        shelf_button = QToolButton()
-        self.shelf_button = shelf_button
-        shelf_button.setIcon(_make_toolbar_icon('shelf'))
-        shelf_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        shelf_button.setToolTip('Show session Shelf')
-        shelf_button.setCheckable(True)
-        shelf_button.toggled.connect(self.shelf.setVisible)
-        controls.addWidget(shelf_button)
         self.split_toggle = QToolButton()
         self.split_toggle.setIcon(_make_toolbar_icon('split'))
         self.split_toggle.setToolTip('Split workspace into two panes')
         self.split_toggle.setCheckable(True)
         controls.addWidget(self.split_toggle)
         controls.addWidget(self.make_history_controls())
-        for button in (self.workspace_button, shelf_button, self.split_toggle):
+        for button in (self.split_toggle,):
             button.setObjectName('utilityIcon')
             button.setAccessibleName(button.toolTip())
             button.setFixedSize(26, 24)
-        b.addWidget(self.shelf, 1)
         self.horizontal = QSplitter(Qt.Horizontal)
         self.sorter = WorkspaceBrowser(self)
         self.second = WorkspaceBrowser(self)
@@ -6524,10 +6321,6 @@ class Window(QMainWindow):
         self.split_toggle.toggled.connect(self.second.setVisible)
         self.split_toggle.toggled.connect(lambda: self.update_workspace_headers())
         b.addWidget(self.horizontal, 1)
-        shelf_button.toggled.connect(lambda shelf: (self.horizontal.setVisible(not shelf), self.split_toggle.setEnabled(not shelf)))
-        self.workspace_button.clicked.connect(lambda: shelf_button.setChecked(False))
-        shelf_button.toggled.connect(lambda shelf: self.workspace_button.setChecked(not shelf))
-        self.workspace_button.clicked.connect(lambda: self.workspace_button.setChecked(True))
         self.vertical.addWidget(bottom)
         self.vertical.setSizes([360, 540])
         layout.addWidget(self.vertical, 1)
@@ -6752,7 +6545,7 @@ class Window(QMainWindow):
                 header.style().unpolish(header)
                 header.style().polish(header)
                 header.update()
-            browser.pane_title.setToolTip('Active destination for copies from Sources and Shelf' if active
+            browser.pane_title.setToolTip('Active destination for copies from Sources' if active
                                          else 'Click inside this pane to make it the copy destination')
 
     def focus_changed(self, old, new):
@@ -7156,7 +6949,7 @@ class Window(QMainWindow):
         self.edit_groups_link([group])
 
     def reconcile_references(self, results, save=True):
-        # Moves and renames update pins, shelf entries and browser paths.
+        # Moves and renames update pins and browser paths.
         transferred = []
         for old_text, value in results:
             if isinstance(value, HistoryChange):
@@ -7195,19 +6988,6 @@ class Window(QMainWindow):
                 group['members'] = [mapped(p) for p in group['members'] if mapped(p)]
             for key in ('pins',):
                 self.config[key] = [mapped(p) for p in self.config[key] if mapped(p)]
-            for i in reversed(range(self.shelf.list.count())):
-                item = self.shelf.list.item(i)
-                text = mapped(item.data(Qt.UserRole))
-                if text:
-                    item.setData(Qt.UserRole, text)
-                    self.shelf.refresh_item(item)
-                    card = self.shelf.list.itemWidget(item)
-                    if card:
-                        card.filepath = text
-                        card._image_loaded = False
-                        card.request_image()
-                else:
-                    self.shelf.list.takeItem(i)
             for browser in self.browsers:
                 if browser.current:
                     text = mapped(str(browser.current))
@@ -7232,7 +7012,6 @@ class Window(QMainWindow):
             organize_groups(self.config)
             self.persist()
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
-        self.shelf.update_count()
 
     def transfer(self, paths, destination, move=False):
         if not destination or not paths:

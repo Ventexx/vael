@@ -14,7 +14,6 @@ Browse your content, choose what to use, and organize it in one workspace. Sorte
 - browse source folders above and organize content below
 - use split view to work with two workspace folders
 - search by filename or your own folder-naming rules
-- collect temporary references on the Shelf
 - group images and attach reusable notes and links
 - edit notes and links across several groups at once
 - focus on one folder in a temporary full-window view
@@ -48,7 +47,6 @@ The upper explorer shows your source folders. Click to select, Ctrl-click to add
 
 Drag content into the lower workspace to copy it. The destination highlights while dragging. Newly received items stay selected and scroll into view, ready to group.
 
-**Shelf** holds temporary file references without moving anything. Add files through their context menu or by dragging them onto the Shelf. Use **Copy to Workspace** to copy them into the last active lower pane. Shelf contents disappear when you close Sorter.
 
 ### organize the workspace
 
@@ -173,7 +171,7 @@ For backend authors: provide an import-safe `Tagger(model_dir=None, progress=...
 
 ## local data & artwork
 
-Preferences, naming rules, groups, and notes are stored in `.local/settings.json`. Keep a backup of `.local` if these associations matter to you. The catalog cache is disposable; the Shelf and history are session-only. Sorter does not upload or publish content.
+Preferences, naming rules, groups, and notes are stored in `.local/settings.json`. Keep a backup of `.local` if these associations matter to you. The catalog cache is disposable; history is session-only. Sorter does not upload or publish content.
 
 Keep artwork beside `app.py`. The README displays **cover.png**. The app tries **icon.ico**, **cover.ico**, **icon.png**, then **cover.png** for its icon. Restart after replacing artwork. Missing artwork does not prevent launch.
 
