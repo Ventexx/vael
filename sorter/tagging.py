@@ -154,7 +154,8 @@ class Tagging(QObject):
         self.button.setText('Tagger: ' + label)
         self.button.setToolTip(label + ('\n' + state['current'] if state['current'] else ''))
         elapsed = max(0, int((state.get('ended') or time.monotonic()) - state['started'])) if state['started'] else 0
-        self.summary.setText(f'{phase}\nCompleted: {done} / {total}    Remaining: {max(0, total - done)}\nElapsed: {elapsed}s')
+        counts = f"\nTagged: {state.get('tagged', 0)}    Already tagged: {state['skipped']}" if 'skipped' in state else ''
+        self.summary.setText(f'{phase}\nCompleted: {done} / {total}    Remaining: {max(0, total - done)}{counts}\nElapsed: {elapsed}s')
         self.current.setPlainText(state['current'])
         loading = phase.startswith(('Loading', 'Downloading'))
         self.progress.setRange(0, 0 if loading else (total if total else (0 if self.busy else 1)))
@@ -238,7 +239,7 @@ class Tagging(QObject):
                 last[0] = now
         return report
 
-    def start(self, paths):
+    def start(self, paths, force=False):
         if not self.available():
             return
         roots = [self.window.service.root] if self.window.service.root else []
@@ -254,9 +255,11 @@ class Tagging(QObject):
         self.window.config['tagging'] = dict(general=general, character=character, model_dir=model_dir or '')
         self.window.persist()
         self._begin('Scanning images')
+        self.state.update(tagged=0, skipped=0)
 
         def execute(task):
             done, total, current = 0, 0, ''
+            tagged = skipped = 0
             try:
                 report = self._reporter(task)
                 images, _ = discover(paths, task.cancel, lambda text: report(current=text))
@@ -266,10 +269,22 @@ class Tagging(QObject):
                     raise ValueError('No supported images were found in the selection or its subfolders.')
                 for path in images:
                     if task.cancel.is_set():
-                        return dict(phase='Stopped', done=done, total=total)
+                        return dict(phase='Stopped', done=done, total=total, tagged=tagged, skipped=skipped)
                     current = str(path)
                     report(force=True, current=current, phase='Checking image', done=done)
+                    # Unchanged known paths need only a stat check, not hashing
+                    # or model inference. Unknown/changed paths are fingerprinted.
+                    if not force and self.store.has_tags(path):
+                        skipped += 1
+                        done += 1
+                        report(force=True, phase='Skipping already tagged image', done=done, tagged=tagged, skipped=skipped)
+                        continue
                     digest, file_stamp = fingerprint(path, task.cancel)
+                    if not force and self.store.reuse_tags(path, digest, file_stamp):
+                        skipped += 1
+                        done += 1
+                        report(force=True, phase='Reusing saved tags', done=done, tagged=tagged, skipped=skipped)
+                        continue
                     tags = self.process.tag(path, general, character,
                         lambda text: report(force=True, phase=text, current=current), model_dir)
                     # Hash again: even same-size/timestamp replacements must not receive these tags.
@@ -279,12 +294,15 @@ class Tagging(QObject):
                     self.store.record(path, digest, after_stamp, tags,
                         'SmilingWolf/wd-v1-4-convnextv2-tagger-v2@v2.0', general, character)
                     done += 1
-                    report(force=True, phase='Tagging', done=done)
-                return dict(phase='Complete', done=done, total=total, current=current)
+                    tagged += 1
+                    report(force=True, phase='Tagging', done=done, tagged=tagged, skipped=skipped)
+                return dict(phase=f'Complete · {tagged} tagged · {skipped} skipped', done=done, total=total, current=current,
+                            tagged=tagged, skipped=skipped)
             except InterruptedError:
-                return dict(phase='Stopped', done=done, total=total, current=current)
+                return dict(phase='Stopped', done=done, total=total, current=current, tagged=tagged, skipped=skipped)
             except Exception as error:
                 return dict(phase='Stopped on error', done=done, total=total, current=current,
+                            tagged=tagged, skipped=skipped,
                             errors=[f'{current + chr(10) if current else ""}{error}\nQueue stopped; completed results were kept.'])
         self.task = self.window.jobs.start(execute, self._finish,
             lambda error: self._finish(dict(phase='Stopped on error', errors=[error])), partial=self.update)
@@ -306,6 +324,10 @@ class Tagging(QObject):
             return
         menu.addSection('Tags')
         action = menu.addAction('Auto-Tag Image/s', lambda: self.start(list(paths)))
+        action.setToolTip('Tag only new or changed images in this selection. Already tagged images are skipped.')
+        action.setEnabled(not self.busy and not self.window.operation_task)
+        action = menu.addAction('Re-tag All Selected Images', lambda: self.start(list(paths), force=True))
+        action.setToolTip('Regenerate tags for every selected image, including images inside selected folders, using the current settings.')
         action.setEnabled(not self.busy and not self.window.operation_task)
         if len(paths) == 1 and paths[0].is_file() and self.store and self.store.has_tags(paths[0]):
             action = menu.addAction('Copy Tags', lambda: self.copy_tags(paths[0]))

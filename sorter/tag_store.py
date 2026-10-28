@@ -175,6 +175,18 @@ class TagStore:
             except OSError:
                 return False
 
+    def reuse_tags(self, path, digest, file_stamp):
+        """Recognize a moved/copied image without running the model again."""
+        with self.lock:
+            if digest not in self.data['images']:
+                return False
+            if stamp(path) != file_stamp:
+                raise ValueError(f'Image changed while checking saved tags: {path}')
+            data = copy.deepcopy(self.data)
+            data['paths'][canonical(path)] = {'hash': digest, 'stamp': file_stamp}
+            self._write(data)
+            return True
+
     def folder_text(self, path):
         with self.lock:
             row = self.data['folders'].get(canonical(path))

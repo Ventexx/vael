@@ -143,7 +143,9 @@ M in the source explorer copies the protected originals rather than moving them.
 
 ## optional image tagging
 
-Right-click workspace images or folders → **Auto-Tag Image/s**. It processes only your selection; selected folders include their subfolders. Tagging never starts automatically. Click the tagger status to see progress, stop after the current image, change settings, or inspect errors.
+Right-click workspace images or folders → **Auto-Tag Image/s**. It tags new or changed content and skips images already tagged, so you can select the whole folder after adding images. Unchanged images need only a quick file check; identical copies reuse saved tags. The progress window shows how many were tagged and skipped. Selected folders include their subfolders, but nothing outside your selection is checked. Tagging never starts automatically.
+
+Use **Re-tag All Selected Images** to deliberately regenerate tags for the selection, for example after changing thresholds or the model. A previously processed image with no generated tags still counts as tagged. Click the tagger status to see progress, stop after the current image, change settings, or inspect errors.
 
 **Copy Tags** copies an image's saved tags. **Associate Tags** on a folder adds reusable tags inherited by its images and subfolders, including images added later. Empty folders are supported. Image tags, folder tags, and image links are saved in `.local/tags.json`.
 
