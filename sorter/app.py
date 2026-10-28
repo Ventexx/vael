@@ -5915,18 +5915,24 @@ def _make_toolbar_icon(kind):
     elif kind == 'split':
         painter.drawRoundedRect(QRectF(2, 3, 14, 12), 1, 1)
         painter.drawLine(9, 3, 9, 15)
-    elif kind in ('undo', 'redo', 'up'):
+    elif kind in ('undo', 'redo'):
         if kind == 'redo':
             painter.translate(18, 0)
             painter.scale(-1, 1)
-        if kind == 'up':
-            painter.translate(18, 0)
-            painter.rotate(90)
-        painter.drawLine(4, 9, 14, 9)
-        painter.drawLine(4, 9, 8, 5)
-        painter.drawLine(4, 9, 8, 13)
+        path = QPainterPath(QPointF(3, 6))
+        path.lineTo(10, 6)
+        path.cubicTo(16, 6, 16, 14, 10, 14)
+        painter.drawPath(path)
+        painter.drawLine(3, 6, 7, 2)
+        painter.drawLine(3, 6, 7, 10)
+    elif kind == 'up':
+        painter.drawLine(9, 14, 9, 4)
+        painter.drawLine(9, 4, 5, 8)
+        painter.drawLine(9, 4, 13, 8)
     elif kind == 'history':
-        painter.drawEllipse(QRectF(2, 2, 14, 14))
+        painter.drawArc(QRectF(3, 2, 13, 14), 140 * 16, -310 * 16)
+        painter.drawLine(2, 2, 2, 7)
+        painter.drawLine(2, 7, 6, 7)
         painter.drawLine(9, 4, 9, 9)
         painter.drawLine(9, 9, 12, 11)
     elif kind == 'help':
@@ -6171,7 +6177,7 @@ QToolButton#utilityIcon, QPushButton#utilityIcon {
 }
 QToolButton#utilityIcon:hover, QPushButton#utilityIcon:hover { background: rgba(255,255,255,0.07); }
 QToolButton#utilityIcon:checked { background: rgba(0,212,160,0.12); }
-QToolButton#utilityIcon:focus, QPushButton#utilityIcon:focus { background: rgba(0,212,160,0.16); }
+QToolButton#utilityIcon:focus, QPushButton#utilityIcon:focus { border-bottom: 1px dotted #b4b4b4; }
 #breadcrumbTrail { background: transparent; }
 QToolButton#breadcrumb { background: transparent; color: #999; border: none; padding: 2px 5px; }
 QToolButton#breadcrumb:hover { color: #00d4a0; background: rgba(0,212,160,0.06); }
@@ -6255,6 +6261,7 @@ class Window(QMainWindow):
         self.chrome_tools = QHBoxLayout()
         self.chrome_tools.setSpacing(1)
         title_layout.addLayout(self.chrome_tools)
+        title_layout.addSpacing(8)
         for text, callback in [('Settings', self.settings), ('Help', self.help)]:
             button = QToolButton()
             button.setIcon(_make_gear_icon() if text == 'Settings' else _make_toolbar_icon('help'))
@@ -6270,6 +6277,9 @@ class Window(QMainWindow):
             button.setIcon(_make_win_icon(icon_kind))
             button.setIconSize(QSize(10, 10))
             button.setFixedSize(30, 24)
+            name_text = {'min': 'Minimize window', 'max': 'Maximize window', 'close': 'Close window'}[icon_kind]
+            button.setToolTip(name_text)
+            button.setAccessibleName(name_text)
             button.setFocusPolicy(Qt.NoFocus)
             button.clicked.connect(callback)
             title_layout.addWidget(button)
@@ -6303,7 +6313,9 @@ class Window(QMainWindow):
         self.split_toggle.setToolTip('Split workspace into two panes')
         self.split_toggle.setCheckable(True)
         controls.addWidget(self.split_toggle)
+        controls.addSpacing(8)
         controls.addWidget(self.make_history_controls())
+        controls.addSpacing(8)
         for button in (self.split_toggle,):
             button.setObjectName('utilityIcon')
             button.setAccessibleName(button.toolTip())
@@ -6320,6 +6332,8 @@ class Window(QMainWindow):
         self.second.hide()
         self.split_toggle.toggled.connect(self.second.setVisible)
         self.split_toggle.toggled.connect(lambda: self.update_workspace_headers())
+        self.split_toggle.toggled.connect(self.update_split_control)
+        self.update_split_control()
         b.addWidget(self.horizontal, 1)
         self.vertical.addWidget(bottom)
         self.vertical.setSizes([360, 540])
@@ -6340,6 +6354,7 @@ class Window(QMainWindow):
         self.cancel_button.clicked.connect(lambda: self.operation_task.cancel.set() if self.operation_task else None)
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
+        operation_bar.addSpacing(8)
         self.tagging = Tagging(self, APP_DIR)
         old_tag_button = self.tagging.button
         self.tagging.button = TagStatusButton()
@@ -6514,6 +6529,9 @@ class Window(QMainWindow):
             self._sync_shell_rounding()
             QTimer.singleShot(0, self._sync_shell_rounding)
             self._max_btn.setIcon(_make_win_icon("restore" if self.isMaximized() else "max"))
+            label = 'Restore window' if self.isMaximized() else 'Maximize window'
+            self._max_btn.setToolTip(label)
+            self._max_btn.setAccessibleName(label)
         super().changeEvent(event)
 
     def resizeEvent(self, event):
@@ -6530,6 +6548,13 @@ class Window(QMainWindow):
         root = self.config['sort_root']
         self.target_label.setText('Editable: ' + (Path(root).name or root) if root else 'Choose your folders in Settings to begin')
         self.target_label.setToolTip(root)
+
+    def update_split_control(self, *_):
+        text = ('Use one workspace pane (split view is on)' if self.split_toggle.isChecked()
+                else 'Split workspace into two panes (split view is off)')
+        self.split_toggle.setToolTip(text)
+        self.split_toggle.setAccessibleName('Split view')
+        self.split_toggle.setAccessibleDescription(text)
 
     def update_workspace_headers(self):
         if not hasattr(self, 'sorter'):
@@ -7299,10 +7324,22 @@ class Window(QMainWindow):
 
     def update_history_controls(self, busy=None):
         busy = self.operation_task is not None if busy is None else busy
+        previous = next((batch['title'] for batch in reversed(self.history) if batch['applied']), None)
+        following = next((batch['title'] for batch in self.history if batch['applied'] < batch['units']), None)
         for undo, redo, history in self.history_controls:
             undo.setEnabled(not busy and any(batch['applied'] for batch in self.history))
             redo.setEnabled(not busy and any(batch['applied'] < batch['units'] for batch in self.history))
             history.setEnabled(not busy)
+            for button, action, title, shortcut in ((undo, 'Undo', previous, 'Ctrl+Z'),
+                                                     (redo, 'Redo', following, 'Ctrl+Y')):
+                text = (f'{action}: {title}' if title else f'Nothing to {action.lower()}') + f' · {shortcut}'
+                if busy:
+                    text = 'Wait for the current file operation. ' + text
+                button.setToolTip(text)
+                button.setAccessibleName(action)
+                button.setAccessibleDescription(text)
+            history.setToolTip('Action history · Undo or redo file and group edits')
+            history.setAccessibleName('Action history')
 
     def undo(self):
         target = next((i for i in range(len(self.history) - 1, -1, -1) if self.history[i]['applied']), None)
