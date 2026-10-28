@@ -882,6 +882,34 @@ class MediaFilter(QSortFilterProxyModel):
         super().__init__(browser)
         self.browser = browser
         self.terms = []
+        self._group_sort_keys = {}
+        self._groups_by_path = None
+        self._name_keys = {}
+
+    def invalidate(self):
+        self._group_sort_keys.clear()
+        self._groups_by_path = None
+        self._name_keys.clear()
+        super().invalidate()
+
+    def group_for_path(self, path):
+        if self._groups_by_path is None:
+            self._groups_by_path = {}
+            for group in self.browser.window.config.get('groups', []):
+                for member in group['members']:
+                    self._groups_by_path.setdefault(member, group)
+        return self._groups_by_path.get(str(path))
+
+    def name_key(self, name):
+        if name not in self._name_keys:
+            self._name_keys[name] = entry_name_key(name)
+        return self._name_keys[name]
+
+    def group_sort_key(self, group):
+        if group['id'] not in self._group_sort_keys:
+            self._group_sort_keys[group['id']] = (
+                min(entry_name_key(Path(p).name) for p in group['members']), group['id'])
+        return self._group_sort_keys[group['id']]
 
     def filterAcceptsRow(self, row, parent):
         entry = self.sourceModel().entries[row]
@@ -898,14 +926,26 @@ class MediaFilter(QSortFilterProxyModel):
         if a.is_dir != b.is_dir:
             return a.is_dir
         if self.browser.editable and not a.is_dir:
-            ga = group_for(self.browser.window.config, a.path)
-            gb = group_for(self.browser.window.config, b.path)
+            ga = self.group_for_path(a.path)
+            gb = self.group_for_path(b.path)
             if bool(ga) != bool(gb):
                 return bool(ga)
             if ga and gb:
                 if ga['id'] != gb['id']:
-                    return ga['id'] < gb['id']
-                return entry_name_key(a.name) < entry_name_key(b.name)
+                    # Order whole groups by their first filename, not random UUIDs.
+                    return self.group_sort_key(ga) < self.group_sort_key(gb)
+                return self.name_key(a.name) < self.name_key(b.name)
+        mode = getattr(self.browser, 'sort_mode', 'name')
+        if mode != 'name':
+            keys = {
+                'name_desc': lambda e: self.name_key(e.name),
+                'newest': lambda e: (e.mtime, self.name_key(e.name)),
+                'oldest': lambda e: (e.mtime, self.name_key(e.name)),
+                'largest': lambda e: (e.size, self.name_key(e.name)),
+                'type': lambda e: (e.kind, self.name_key(e.name)),
+            }
+            key = keys[mode]
+            return key(a) > key(b) if mode in ('name_desc', 'newest', 'largest') else key(a) < key(b)
         column = left.column()
         if column == 2:
             return a.size < b.size
@@ -913,9 +953,7 @@ class MediaFilter(QSortFilterProxyModel):
             return a.mtime < b.mtime
         if column == 4:
             return (str(a.path.parent).casefold(), a.name.casefold()) < (str(b.path.parent).casefold(), b.name.casefold())
-        def natural(value):
-            return [(0, int(p)) if p.isdigit() else (1, p.casefold()) for p in re.split(r'(\d+)', value)]
-        return natural(a.name if column == 0 else a.kind) < natural(b.name if column == 0 else b.kind)
+        return self.name_key(a.name if column == 0 else a.kind) < self.name_key(b.name if column == 0 else b.kind)
 
 
 
@@ -1130,11 +1168,23 @@ class WorkspaceGrid(DragViewMixin, QListView):
 
     def group_bands(self):
         bands = []
-        for row in range(self.model().rowCount()):
+        # Uniform, left-to-right wrapped tiles have monotonic vertical bounds.
+        # Find the first visible row without visiting every item on every repaint.
+        model = self.model()
+        low, high = 0, model.rowCount()
+        while low < high:
+            mid = (low + high) // 2
+            if self.visualRect(model.index(mid, 0)).bottom() < 0:
+                low = mid + 1
+            else:
+                high = mid
+        for row in range(low, model.rowCount()):
             index = self.model().index(row, 0)
             rect = self.visualRect(index)
+            if rect.top() >= self.viewport().height():
+                break
             entry = index.data(Qt.UserRole)
-            group = group_for(self.browser.window.config, entry.path)
+            group = model.group_for_path(entry.path)
             if not group:
                 continue
             if bands and bands[-1][0]['id'] == group['id'] and bands[-1][1].top() == rect.top():
@@ -1160,6 +1210,19 @@ class WorkspaceGrid(DragViewMixin, QListView):
         super().paintEvent(event)
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing)
+        if not self.model().rowCount():
+            browser = self.browser
+            if browser.search_progress.isVisible():
+                text = 'Loading folder…'
+            elif browser.active_filter():
+                text = 'No matching items\nChange your search or reset the filters with ×.'
+            elif browser.current:
+                text = 'This folder is empty\nDrag items here from Sources, or create a folder.'
+            else:
+                text = 'Choose a workspace in Settings to start sorting.'
+            painter.setPen(QColor('#aaa'))
+            painter.drawText(self.viewport().rect().adjusted(16, 16, -16, -16),
+                             Qt.AlignCenter | Qt.TextWordWrap, text)
         for group, rect, tiles in self.group_bands():
             if not rect.intersects(event.rect()):
                 continue
@@ -3639,6 +3702,8 @@ class ImageBrowser(QWidget):
         bar = getattr(self, "_status_bar", None)
         if bar is None:
             return
+        if getattr(self, 'pane_header', None) is not None:
+            return  # Rework controls participate in layout; never cover folder tabs.
         bar.adjustSize()
         tab_bar_height = self.tabs.tabBar().sizeHint().height()
         y = max(0, (tab_bar_height - bar.height()) // 2)
@@ -3775,10 +3840,73 @@ class CoverBrowser(ImageBrowser):
         self.tools_btn.setToolTip('Explorer options')
         self.tools_btn.clicked.connect(self.options_menu)
         self._status_bar.layout().insertWidget(0, self.tools_btn)
+        self.pane_header = QWidget()
+        self.pane_header.setObjectName('paneHeader')
+        header = QHBoxLayout(self.pane_header)
+        header.setContentsMargins(5, 1, 5, 1)
+        header.setSpacing(4)
+        self.pane_title = QLabel('Workspace' if editable else 'Sources')
+        self.pane_title.setObjectName('paneTitle')
+        header.addWidget(self.pane_title)
+        if not editable:
+            badge = QLabel('READ ONLY')
+            badge.setObjectName('paneBadge')
+            header.addWidget(badge)
+        header.addStretch()
+        self.search_button.setObjectName('paneButton')
+        self.search_button.setText('Search')
+        self.search_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.search_button.setAccessibleName('Search and filters')
+        self.tools_btn.setObjectName('paneButton')
+        self.tools_btn.setText('')
+        self.tools_btn.setIcon(_make_toolbar_icon('more'))
+        self.reload_folder_btn.setAccessibleName('Refresh folder')
+        self.reload_folder_btn.setIcon(_make_toolbar_icon('refresh'))
+        self.reload_folder_btn.setText('')
+        for button in (self.tools_btn, self.search_button, self.reload_folder_btn, self.restore_hidden_btn):
+            button.setObjectName('utilityIcon')
+            button.setFixedSize(26, 24)
+        header.addWidget(self._status_bar)
+        self.layout().insertWidget(0, self.pane_header)
+        # Keep result counts visible even when the filter controls are collapsed.
+        self.result_bar = QWidget()
+        self.result_bar.setObjectName('resultBar')
+        result_layout = QHBoxLayout(self.result_bar)
+        result_layout.setContentsMargins(5, 0, 5, 0)
+        result_layout.addWidget(self.search_progress)
+        result_layout.addWidget(self.search_feedback, 1)
+        self.selection_summary = QLabel('')
+        self.selection_summary.setObjectName('hint')
+        result_layout.addWidget(self.selection_summary)
+        self.layout().addWidget(self.result_bar)
+        self.search.setAccessibleName('Search filenames, paths and fields')
+        self.kind.setAccessibleName('Filter by file type')
+        self.extension.setAccessibleName('Filter by extension')
+        self.recursive.setToolTip('Include content inside subfolders in search results')
+        self.empty_hint.setWordWrap(True)
         self._position_status_bar()
 
     def options_menu(self):
+        menu = self.build_options_menu()
+        menu.exec(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height())))
+        menu.deleteLater()
+
+    def build_options_menu(self):
         menu = QMenu(self)
+        if self.editable:
+            action = menu.addAction('New folders…', lambda: self.window.new_folders(self))
+            action.setEnabled(bool(self.current))
+        if self.selected_paths():
+            actions = self.build_action_menu()
+            actions.setTitle(f'Selected items ({len(self.selected_paths()):,})')
+            menu.addMenu(actions)
+        if hasattr(self, 'sort_mode'):
+            sorting = menu.addMenu('Sort by')
+            for label, mode in self.SORT_CHOICES:
+                action = sorting.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(self.sort_mode == mode)
+                action.triggered.connect(lambda checked=False, value=mode: self.change_sort(value))
         if self.editable:
             menu.addAction('Group Notes', lambda: self.window.show_notes(True))
             menu.addSeparator()
@@ -3791,7 +3919,7 @@ class CoverBrowser(ImageBrowser):
             action.setCheckable(True)
             action.setChecked(percent == self.entry_zoom)
             action.triggered.connect(lambda checked=False, value=percent: self.set_entry_zoom(value))
-        menu.exec(self.tools_btn.mapToGlobal(QPoint(0, self.tools_btn.height())))
+        return menu
 
     def set_entry_zoom(self, percent):
         self.entry_zoom = max(50, min(200, int(percent)))
@@ -3818,6 +3946,8 @@ class CoverBrowser(ImageBrowser):
         self._position_status_bar()
 
     def _position_status_bar(self):
+        if getattr(self, 'pane_header', None) is not None:
+            return
         super()._position_status_bar()
         if getattr(self, 'filter_panel', None) and self.filter_panel.isVisible():
             self._status_bar.move(self._status_bar.x(), self._status_bar.y() + self.filter_panel.height() + self.layout().spacing())
@@ -4122,6 +4252,9 @@ class CoverBrowser(ImageBrowser):
                 card._img_lbl.update()
         if hasattr(self, 'table'):
             self.table.viewport().update()
+        if hasattr(self, 'selection_summary'):
+            count = len(self.selected_paths())
+            self.selection_summary.setText(f'{count:,} selected' if count else '')
 
     def queue_filter(self, *_):
         self.reset_search_action.setVisible(self.active_filter() or self.recursive.isChecked() != (not self.editable))
@@ -4173,6 +4306,7 @@ class CoverBrowser(ImageBrowser):
         self.search_feedback.setStyleSheet('color: #e88c86;' if error else 'color: #aaa;')
         self.search_progress.setVisible(busy)
         self.search_button.setToolTip(text or 'Search and filters · Ctrl+F')
+        self.search_button.setText('Search •' if self.active_filter() else 'Search')
         self._position_status_bar()
 
     def search_failed(self, serial, error):
@@ -4265,8 +4399,12 @@ class CoverBrowser(ImageBrowser):
 class WorkspaceBrowser(CoverBrowser):
     """A single-folder grid with independent selection and breadcrumb navigation."""
 
+    SORT_CHOICES = [('Name A–Z', 'name'), ('Name Z–A', 'name_desc'), ('Newest first', 'newest'),
+                    ('Oldest first', 'oldest'), ('Largest first', 'largest'), ('File type', 'type')]
+
     def __init__(self, window, editable=True, title='Workspace'):
         self._reveal_received_paths = set()
+        self.sort_mode = 'name'
         self.focus_root = None
         self._restore_scroll = None
         super().__init__(window, True, title)
@@ -4275,6 +4413,7 @@ class WorkspaceBrowser(CoverBrowser):
         self.recursive.setChecked(False)
         self.recursive.hide()
         self.grid = WorkspaceGrid()
+        self.grid.setMinimumHeight(80)
         self.grid.setModel(self.proxy)
         self.grid.setModelColumn(0)
         self.grid.setViewMode(QListView.IconMode)
@@ -4290,15 +4429,47 @@ class WorkspaceBrowser(CoverBrowser):
         self.grid.setItemDelegate(WorkspaceEntryDelegate(self.grid))
         self.grid.setStyleSheet('QListView::item:selected { background: #174b42; border: 2px solid #00d4a0; border-radius: 6px; }')
         self.grid.selectionModel().selectionChanged.connect(lambda *_: self._remember_selection())
-        self.layout().addWidget(self.grid, 1)
+        self.layout().insertWidget(self.layout().indexOf(self.result_bar), self.grid, 1)
         self.navigation = QWidget()
         self.navigation_row = QHBoxLayout(self.navigation)
-        self.navigation_row.setContentsMargins(4, 0, 4, 4)
-        self.breadcrumbs = QHBoxLayout()
-        self.navigation_row.addLayout(self.breadcrumbs, 1)
-        self.navigation_row.addWidget(self._status_bar)
-        self.layout().insertWidget(0, self.navigation)
+        self.navigation_row.setContentsMargins(0, 0, 0, 0)
+        self.up_button = QToolButton()
+        self.up_button.setIcon(_make_toolbar_icon('up'))
+        self.up_button.setObjectName('utilityIcon')
+        self.up_button.setFixedSize(24, 24)
+        self.up_button.setToolTip('Parent folder · Alt+Up')
+        self.up_button.setAccessibleName('Parent folder')
+        self.up_button.clicked.connect(self.up)
+        self.navigation_row.addWidget(self.up_button)
+        self.breadcrumb_scroll = QScrollArea()
+        self.breadcrumb_scroll.setWidgetResizable(True)
+        self.breadcrumb_scroll.setFrameShape(QFrame.NoFrame)
+        self.breadcrumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.breadcrumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.breadcrumb_scroll.setFixedHeight(26)
+        crumbs = QWidget()
+        crumbs.setObjectName('breadcrumbTrail')
+        self.breadcrumbs = QHBoxLayout(crumbs)
+        self.breadcrumbs.setContentsMargins(0, 0, 0, 0)
+        self.breadcrumbs.setSpacing(2)
+        self.breadcrumb_scroll.setWidget(crumbs)
+        self.navigation_row.addWidget(self.breadcrumb_scroll, 1)
+        # Location and pane controls share one compact row in split view.
+        self.pane_header.layout().takeAt(1)  # Remove the header's stretch.
+        self.pane_header.layout().insertWidget(1, self.navigation, 1)
+        self.pane_title.setText('A')
+        self.search_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.tools_btn.setIcon(_make_toolbar_icon('more'))
+        self.tools_btn.setText('')
         self._restoring_selection = False
+
+    def change_sort(self, mode):
+        if mode not in dict((key, label) for label, key in self.SORT_CHOICES):
+            mode = 'name'
+        self.sort_mode = mode
+        self.proxy.invalidate()
+        self.proxy.sort(0, Qt.AscendingOrder)
+        self.grid.viewport().update()
 
     def set_entry_zoom(self, percent):
         self.entry_zoom = max(50, min(200, int(percent)))
@@ -4331,6 +4502,9 @@ class WorkspaceBrowser(CoverBrowser):
     def _remember_selection(self):
         if not getattr(self, '_restoring_selection', False):
             self._selected_file_paths = {str(p) for p in self.selected_paths()}
+        if hasattr(self, 'selection_summary'):
+            count = len(self.selected_paths())
+            self.selection_summary.setText(f'{count:,} selected' if count else '')
 
     def selected_paths(self):
         return [i.data(Qt.UserRole).path for i in sorted(self.grid.selectionModel().selectedIndexes(), key=lambda i: i.row()) if i.column() == 0]
@@ -4355,7 +4529,7 @@ class WorkspaceBrowser(CoverBrowser):
 
     def _update_empty_state(self):
         self.tabs.hide()
-        self.empty_hint.setVisible(not self.current)
+        self.empty_hint.hide()  # WorkspaceGrid provides a single, contextual empty state.
 
     def update_roots(self):
         root = self.window.service.root
@@ -4374,6 +4548,8 @@ class WorkspaceBrowser(CoverBrowser):
             self._reveal_received_paths.clear()
         self.current = self._location = target
         self.path.setText(str(target or ''))
+        self.navigation.setToolTip(str(target or 'Choose a workspace in Settings'))
+        self.up_button.setEnabled(bool(target and target != (self.focus_root or self.window.service.root)))
         self.window.active_workspace = self
         while self.breadcrumbs.count():
             item = self.breadcrumbs.takeAt(0)
@@ -4389,11 +4565,16 @@ class WorkspaceBrowser(CoverBrowser):
                     self.breadcrumbs.addWidget(QLabel('›'))
                 button = QToolButton()
                 button.setText((folder.name if self.focus_root else 'Root') if index == 0 else folder.name)
+                button.setMaximumWidth(190)
+                button.setObjectName('breadcrumb')
+                button.setProperty('currentFolder', index == len(chain) - 1)
                 button.setToolTip(str(folder))
                 button.clicked.connect(lambda checked=False, p=folder: self.navigate(p))
                 button.setContextMenuPolicy(Qt.CustomContextMenu)
                 button.customContextMenuRequested.connect(lambda point, p=folder, btn=button: self.folder_focus_menu(p, btn.mapToGlobal(point)))
                 self.breadcrumbs.addWidget(button)
+            QTimer.singleShot(0, lambda: self.breadcrumb_scroll.horizontalScrollBar().setValue(
+                self.breadcrumb_scroll.horizontalScrollBar().maximum()))
         self.breadcrumbs.addStretch()
         self._update_empty_state()
         self.refresh()
@@ -4478,10 +4659,11 @@ class WorkspaceBrowser(CoverBrowser):
             selection.select(self.proxy.index(row, 0), QItemSelectionModel.Toggle)
 
     def state(self):
-        return {'path': str(self.current or ''), 'zoom': self.entry_zoom}
+        return {'path': str(self.current or ''), 'zoom': self.entry_zoom, 'sort': self.sort_mode}
 
     def restore(self, state):
         self.set_entry_zoom(state.get('zoom', 100))
+        self.change_sort(state.get('sort', 'name'))
         path = state.get('path')
         if path and Path(path).is_dir() and self.window.service.inside(path, True):
             self.navigate(path)
@@ -5898,6 +6080,61 @@ if _IS_WINDOWS:
     _RESIZE_BORDER_PX = 8  # invisible grab margin for edge/corner resize
 
 
+def _make_toolbar_icon(kind):
+    """Small neutral icons that follow the original monochrome chrome."""
+    pm = QPixmap(18, 18)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor('#b4b4b4'), 1.5))
+    if kind == 'more':
+        painter.setBrush(QColor('#b4b4b4'))
+        for x in (4, 9, 14):
+            painter.drawEllipse(QPointF(x, 9), 1, 1)
+    elif kind in ('workspace', 'split', 'shelf'):
+        painter.drawRoundedRect(QRectF(2, 3, 14, 12), 1, 1)
+        if kind == 'split':
+            painter.drawLine(9, 3, 9, 15)
+        elif kind == 'shelf':
+            painter.drawLine(2, 11, 16, 11)
+            painter.drawLine(6, 6, 6, 10)
+            painter.drawLine(10, 5, 10, 10)
+        else:
+            painter.drawLine(2, 7, 16, 7)
+    elif kind in ('undo', 'redo', 'up'):
+        if kind == 'redo':
+            painter.translate(18, 0)
+            painter.scale(-1, 1)
+        if kind == 'up':
+            painter.translate(18, 0)
+            painter.rotate(90)
+        painter.drawLine(4, 9, 14, 9)
+        painter.drawLine(4, 9, 8, 5)
+        painter.drawLine(4, 9, 8, 13)
+    elif kind == 'history':
+        painter.drawEllipse(QRectF(2, 2, 14, 14))
+        painter.drawLine(9, 4, 9, 9)
+        painter.drawLine(9, 9, 12, 11)
+    elif kind == 'help':
+        painter.drawEllipse(QRectF(2, 2, 14, 14))
+        painter.drawText(QRect(2, 1, 14, 15), Qt.AlignCenter, '?')
+    elif kind == 'tag':
+        path = QPainterPath(QPointF(2, 3))
+        for x, y in ((10, 3), (16, 9), (9, 16), (2, 9)):
+            path.lineTo(x, y)
+        path.closeSubpath()
+        painter.drawPath(path)
+        painter.drawEllipse(QPointF(6, 7), 1, 1)
+    elif kind == 'stop':
+        painter.drawRect(QRectF(4, 4, 10, 10))
+    else:
+        painter.drawArc(QRectF(3, 3, 12, 12), 40 * 16, 285 * 16)
+        painter.drawLine(QPointF(14, 3), QPointF(14, 7))
+        painter.drawLine(QPointF(10, 7), QPointF(14, 7))
+    painter.end()
+    return QIcon(pm)
+
+
 def _make_search_icon():
     pixmap = QPixmap(14, 14)
     pixmap.fill(Qt.transparent)
@@ -6079,6 +6316,58 @@ class _CenterSplitter(QSplitter):
     def createHandle(self):
         return _CenterSplitterHandle(self.orientation(), self)
 
+class CompactStatusLabel(QLabel):
+    """Operation messages use spare title-bar space; full text stays in the tooltip."""
+    def __init__(self, text):
+        super().__init__()
+        self._message = ''
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(240)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self._message = text
+        self.setToolTip(text)
+        super().setText(self.fontMetrics().elidedText('' if text == 'Ready' else text, Qt.ElideRight, self.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.setText(self._message)
+
+
+class TagStatusButton(QPushButton):
+    """Accept the tagger's existing status updates while remaining an icon."""
+    def setText(self, text):
+        self.setAccessibleName(text)
+        self.setToolTip(text + '\nTagging progress, settings and errors')
+        super().setText('')
+
+REWORK_STYLE = """
+/* Original near-black/teal palette; compact controls leave room for content. */
+#paneHeader { background: #111; border: 1px solid #252525; border-radius: 4px; }
+#paneHeader[destination="true"] { border-left: 2px solid #00d4a0; }
+#paneTitle { background: transparent; color: #e8e8e8; font-weight: 600; }
+#paneBadge { background: transparent; color: #999; font-size: 10px; padding: 1px 4px; }
+#resultBar { background: transparent; }
+#resultBar QLabel, QLabel#hint { color: #999; background: transparent; }
+QToolButton { background: transparent; border: none; padding: 2px; }
+QToolButton#utilityIcon, QPushButton#utilityIcon {
+    background: transparent; border: none; padding: 3px; border-radius: 3px;
+}
+QToolButton#utilityIcon:hover, QPushButton#utilityIcon:hover { background: rgba(255,255,255,0.07); }
+QToolButton#utilityIcon:checked { background: rgba(0,212,160,0.12); }
+QToolButton#utilityIcon:focus, QPushButton#utilityIcon:focus { background: rgba(0,212,160,0.16); }
+#breadcrumbTrail { background: transparent; }
+QToolButton#breadcrumb { background: transparent; color: #999; border: none; padding: 2px 5px; }
+QToolButton#breadcrumb:hover { color: #00d4a0; background: rgba(0,212,160,0.06); }
+QToolButton#breadcrumb[currentFolder="true"] { color: #eee; font-weight: 600; border-bottom: 1px solid #555; }
+QComboBox:focus, QLineEdit:focus { border: 1px solid #00d4a0; }
+QToolButton:disabled, QPushButton:disabled { color: #666; }
+QMenu::item { padding: 5px 16px; font-size: 12px; }
+"""
+
+
 def apply_style(app: QApplication) -> None:
     app.setStyle("Fusion")
 
@@ -6099,7 +6388,7 @@ def apply_style(app: QApplication) -> None:
     pal.setColor(QPalette.ColorRole.ToolTipText, QColor(220, 220, 220))
     app.setPalette(pal)
 
-    app.setStyleSheet(STYLE)
+    app.setStyleSheet(STYLE + REWORK_STYLE)
 
 class Window(QMainWindow):
     def __init__(self, config=None):
@@ -6141,7 +6430,7 @@ class Window(QMainWindow):
         shell_lay.setSpacing(0)
         self._title_bar = _TitleBar(self)
         self._title_bar.setObjectName('appTitleBar')
-        self._title_bar.setFixedHeight(34)
+        self._title_bar.setFixedHeight(30)
         title_layout = QHBoxLayout(self._title_bar)
         title_layout.setContentsMargins(14, 0, 8, 0)
         title_layout.setSpacing(2)
@@ -6149,6 +6438,18 @@ class Window(QMainWindow):
         brand.setObjectName('brandLbl')
         title_layout.addWidget(brand)
         title_layout.addStretch()
+        self.chrome_tools = QHBoxLayout()
+        self.chrome_tools.setSpacing(1)
+        title_layout.addLayout(self.chrome_tools)
+        for text, callback in [('Settings', self.settings), ('Help', self.help)]:
+            button = QToolButton()
+            button.setIcon(_make_gear_icon() if text == 'Settings' else _make_toolbar_icon('help'))
+            button.setToolTip(text)
+            button.setAccessibleName(text)
+            button.setObjectName('utilityIcon')
+            button.setFixedSize(26, 24)
+            button.clicked.connect(callback)
+            title_layout.addWidget(button)
         for name, icon_kind, callback in [('winMinBtn', 'min', self.showMinimized), ('winMaxBtn', 'max', self._toggle_maximize), ('winCloseBtn', 'close', self.close)]:
             button = QToolButton()
             button.setObjectName(name)
@@ -6166,8 +6467,8 @@ class Window(QMainWindow):
         self._content_root = center
         shell_lay.addWidget(center, 1)
         layout = QVBoxLayout(center)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(8)
         self.vertical = _CenterSplitter(Qt.Vertical)
         self.vertical.setObjectName('centerSplitter')
         self.vertical.setChildrenCollapsible(False)
@@ -6178,84 +6479,84 @@ class Window(QMainWindow):
         bottom.setObjectName('rosterBar')
         bottom.setAttribute(Qt.WA_StyledBackground)
         b = QVBoxLayout(bottom)
-        b.setContentsMargins(14, 8, 14, 10)
-        b.setSpacing(6)
+        b.setContentsMargins(6, 3, 6, 4)
+        b.setSpacing(3)
         self.shelf = Shelf(self)
         self.shelf.hide()
-        controls = QHBoxLayout()
-        settings = QToolButton()
-        settings.setObjectName('browserSettingsBtn')
-        settings.setIcon(_make_gear_icon())
-        settings.setToolTip('Settings')
-        settings.clicked.connect(self.settings)
-        controls.addWidget(settings)
-        help_button = QToolButton()
-        help_button.setObjectName('browserSettingsBtn')
-        help_button.setText('?')
-        help_button.setToolTip('Help and shortcuts')
-        help_button.clicked.connect(self.help)
-        controls.addWidget(help_button)
-        self.target_label = QLabel()
-        self.target_label.setObjectName('hint')
+        controls = self.chrome_tools
+        self.target_label = QLabel(self)
         self.target_label.hide()
-        label = QLabel('SORTING WORKSPACE')
-        label.setObjectName('hint')
-        controls.addWidget(label)
+        self.workspace_button = QToolButton()
+        self.workspace_button.setIcon(_make_toolbar_icon('workspace'))
+        self.workspace_button.setToolTip('Show workspace')
+        self.workspace_button.setCheckable(True)
+        self.workspace_button.setChecked(True)
+        controls.addWidget(self.workspace_button)
         shelf_button = QToolButton()
         self.shelf_button = shelf_button
-        shelf_button.setObjectName('modeTab')
-        shelf_button.setText('Shelf')
+        shelf_button.setIcon(_make_toolbar_icon('shelf'))
+        shelf_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        shelf_button.setToolTip('Show session Shelf')
         shelf_button.setCheckable(True)
-        shelf_button.setToolTip('Show session shelf')
         shelf_button.toggled.connect(self.shelf.setVisible)
         controls.addWidget(shelf_button)
-        controls.addStretch()
-        self.split_toggle = QCheckBox('Split view')
+        self.split_toggle = QToolButton()
+        self.split_toggle.setIcon(_make_toolbar_icon('split'))
+        self.split_toggle.setToolTip('Split workspace into two panes')
+        self.split_toggle.setCheckable(True)
         controls.addWidget(self.split_toggle)
         controls.addWidget(self.make_history_controls())
-        b.addLayout(controls)
+        for button in (self.workspace_button, shelf_button, self.split_toggle):
+            button.setObjectName('utilityIcon')
+            button.setAccessibleName(button.toolTip())
+            button.setFixedSize(26, 24)
         b.addWidget(self.shelf, 1)
         self.horizontal = QSplitter(Qt.Horizontal)
         self.sorter = WorkspaceBrowser(self)
         self.second = WorkspaceBrowser(self)
         self.horizontal.addWidget(self.sorter)
         self.horizontal.addWidget(self.second)
+        self.horizontal.setChildrenCollapsible(False)
+        self.horizontal.setHandleWidth(8)
+        self.sorter.pane_title.setText('A')
+        self.second.pane_title.setText('B')
         self.second.hide()
         self.split_toggle.toggled.connect(self.second.setVisible)
+        self.split_toggle.toggled.connect(lambda: self.update_workspace_headers())
         b.addWidget(self.horizontal, 1)
         shelf_button.toggled.connect(lambda shelf: (self.horizontal.setVisible(not shelf), self.split_toggle.setEnabled(not shelf)))
-        workspace_button = QToolButton()
-        self.workspace_button = workspace_button
-        workspace_button.setObjectName('modeTab')
-        workspace_button.setText('Workspace')
-        workspace_button.setCheckable(True)
-        workspace_button.setChecked(True)
-        controls.replaceWidget(label, workspace_button)
-        label.deleteLater()
-        workspace_button.clicked.connect(lambda: shelf_button.setChecked(False))
-        shelf_button.toggled.connect(lambda shelf: workspace_button.setChecked(not shelf))
-        workspace_button.clicked.connect(lambda: workspace_button.setChecked(True))
-        mode_style = 'QToolButton { color: #777; background: transparent; border: 1px solid transparent; padding: 4px 8px; border-radius: 3px; } QToolButton:checked { color: #eee; background: #111; border: 1px solid #353535; } QToolButton:hover { color: #eee; }'
-        shelf_button.setStyleSheet(mode_style)
-        workspace_button.setStyleSheet(mode_style)
+        self.workspace_button.clicked.connect(lambda: shelf_button.setChecked(False))
+        shelf_button.toggled.connect(lambda shelf: self.workspace_button.setChecked(not shelf))
+        self.workspace_button.clicked.connect(lambda: self.workspace_button.setChecked(True))
         self.vertical.addWidget(bottom)
-        self.vertical.setSizes([470, 450])
+        self.vertical.setSizes([360, 540])
         layout.addWidget(self.vertical, 1)
-        operation_bar = QHBoxLayout()
-        self.operation_status = QLabel('Ready')
+        operation_bar = self.chrome_tools
+        self.operation_status = CompactStatusLabel('Ready')
         self.operation_status.setObjectName('rosterStatusLabel')
-        operation_bar.addWidget(self.operation_status, 1)
+        title_layout.insertWidget(2, self.operation_status, 1)
         self.progress = QProgressBar()
-        self.progress.setFixedWidth(220)
+        self.progress.setFixedWidth(42)
         self.progress.hide()
         operation_bar.addWidget(self.progress)
-        self.cancel_button = QPushButton('Stop after current item')
+        self.cancel_button = QToolButton()
+        self.cancel_button.setIcon(_make_toolbar_icon('stop'))
+        self.cancel_button.setObjectName('utilityIcon')
+        self.cancel_button.setFixedSize(26, 24)
+        self.cancel_button.setToolTip('Stop after current item')
         self.cancel_button.clicked.connect(lambda: self.operation_task.cancel.set() if self.operation_task else None)
         self.cancel_button.hide()
         operation_bar.addWidget(self.cancel_button)
         self.tagging = Tagging(self, APP_DIR)
+        old_tag_button = self.tagging.button
+        self.tagging.button = TagStatusButton()
+        self.tagging.button.setIcon(_make_toolbar_icon('tag'))
+        self.tagging.button.setObjectName('utilityIcon')
+        self.tagging.button.setFixedSize(26, 24)
+        self.tagging.button.setText('Tagger: Ready')
+        self.tagging.button.clicked.connect(lambda: self.tagging.show())
+        old_tag_button.deleteLater()
         operation_bar.addWidget(self.tagging.button)
-        b.addLayout(operation_bar)
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
         self._img_viewer = MediaViewerOverlay(self._content_root)
@@ -6265,6 +6566,7 @@ class Window(QMainWindow):
             browser.update_roots()
         self.restore_layout()
         self.update_target_label()
+        self.update_workspace_headers()
         shortcut = QShortcut(QKeySequence('Ctrl+Z'), self)
         shortcut.activated.connect(lambda: self.undo() if not isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit, QSpinBox)) else None)
         for key in ('Ctrl+Y', 'Ctrl+Shift+Z'):
@@ -6362,7 +6664,7 @@ class Window(QMainWindow):
         title_bar = self._title_bar
         if title_bar.geometry().contains(local):
             child = title_bar.childAt(title_bar.mapFrom(self, local))
-            if not isinstance(child, QToolButton):
+            if not isinstance(child, (QToolButton, QPushButton)):
                 return True, _HTCAPTION
 
         return True, _HTCLIENT
@@ -6436,6 +6738,23 @@ class Window(QMainWindow):
         self.target_label.setText('Editable: ' + (Path(root).name or root) if root else 'Choose your folders in Settings to begin')
         self.target_label.setToolTip(root)
 
+    def update_workspace_headers(self):
+        if not hasattr(self, 'sorter'):
+            return
+        target = self.target_browser()
+        for browser in getattr(self, 'browsers', []):
+            if not browser.editable:
+                continue
+            header = browser.pane_header
+            active = browser is target
+            if header.property('destination') != ('true' if active else 'false'):
+                header.setProperty('destination', 'true' if active else 'false')
+                header.style().unpolish(header)
+                header.style().polish(header)
+                header.update()
+            browser.pane_title.setToolTip('Active destination for copies from Sources and Shelf' if active
+                                         else 'Click inside this pane to make it the copy destination')
+
     def focus_changed(self, old, new):
         typing = isinstance(new, (QLineEdit, QPlainTextEdit, QSpinBox))
         for browser in getattr(self, 'browsers', []):
@@ -6447,6 +6766,7 @@ class Window(QMainWindow):
                     self.active_browser = browser
                     if browser.editable:
                         self.active_workspace = browser
+                        self.update_workspace_headers()
 
     def target_browser(self):
         if self._folder_focus:
@@ -6485,7 +6805,6 @@ class Window(QMainWindow):
             bar.addWidget(back)
             self.focus_title = QLabel()
             bar.addWidget(self.focus_title, 1)
-            bar.addWidget(self.make_history_controls())
             layout.addLayout(bar)
             self.focus_browser = WorkspaceBrowser(self)
             self.browsers.append(self.focus_browser)
@@ -7181,12 +7500,16 @@ class Window(QMainWindow):
         widget = QWidget()
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
         buttons = []
         for text, tooltip, callback in [('←', 'Undo previous action · Ctrl+Z', self.undo),
                                          ('→', 'Redo next action · Ctrl+Y', self.redo),
                                          ('History', 'View history and return to a previous point', self.show_history)]:
             button = QToolButton()
-            button.setText(text)
+            button.setIcon(_make_toolbar_icon({'←': 'undo', '→': 'redo', 'History': 'history'}[text]))
+            button.setObjectName('utilityIcon')
+            button.setFixedSize(26, 24)
+            button.setAccessibleName(tooltip)
             button.setToolTip(tooltip)
             button.clicked.connect(callback)
             layout.addWidget(button)
@@ -7416,7 +7739,7 @@ class Window(QMainWindow):
                 pass
 
     def restore_layout(self):
-        state = self.config.get('layout', {})
+        state = self.config.get('rework_layout', self.config.get('layout', {}))
         if state.get('geometry'):
             self.restoreGeometry(QByteArray.fromBase64(state['geometry'].encode()))
         if state.get('vertical'):
@@ -7457,6 +7780,7 @@ class Window(QMainWindow):
             task.cancel.set()
         self.jobs.pool.waitForDone()
         self.service.discard_backups()
+        self.config.pop('rework_layout', None)
         self.config['layout'] = {
             'geometry': bytes(self.saveGeometry().toBase64()).decode(),
             'vertical': bytes(self.vertical.saveState().toBase64()).decode(),
