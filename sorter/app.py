@@ -6525,6 +6525,16 @@ class Window(QMainWindow):
         local = self.mapFromGlobal(QPoint(x, y))
         w, h, b = self.width(), self.height(), _RESIZE_BORDER_PX
 
+        # A visible button owns its entire hit area, including the strip that
+        # would otherwise be consumed by the invisible native resize margin.
+        title_point = self._title_bar.mapFrom(self, local)
+        if self._title_bar.rect().contains(title_point):
+            child = self._title_bar.childAt(title_point)
+            while child is not None and child is not self._title_bar:
+                if isinstance(child, (QToolButton, QPushButton)):
+                    return True, _HTCLIENT
+                child = child.parentWidget()
+
         if not self.isMaximized() and not self.isFullScreen():
             if local.x() < b and local.y() < b:
                 return True, _HTTOPLEFT
@@ -6624,7 +6634,10 @@ class Window(QMainWindow):
         self.target_label.setToolTip(root)
 
     def update_split_control(self, *_):
-        text = ('Use one workspace pane (split view is on)' if self.split_toggle.isChecked()
+        focused = self._folder_focus is not None
+        self.split_toggle.setEnabled(not focused)
+        text = ('Exit folder focus to change split view' if focused else
+                'Use one workspace pane (split view is on)' if self.split_toggle.isChecked()
                 else 'Split workspace into two panes (split view is off)')
         self.split_toggle.setToolTip(text)
         self.split_toggle.setAccessibleName('Split view')
@@ -6715,6 +6728,7 @@ class Window(QMainWindow):
         self.focus_title.setText('Focus Folder · ' + (path.name or str(path)))
         self.vertical.hide()
         self.focus_surface.show()
+        self.update_split_control()
         browser.navigate(path)
         browser.grid.setFocus()
 
@@ -6724,6 +6738,7 @@ class Window(QMainWindow):
             return
         self._img_viewer.close_viewer()
         self._folder_focus = None
+        self.update_split_control()
         self.focus_browser.model.set_full_loading(False)
         self.focus_surface.hide()
         self.vertical.show()

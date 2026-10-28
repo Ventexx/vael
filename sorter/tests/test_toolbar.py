@@ -159,6 +159,36 @@ class ToolbarTests(unittest.TestCase):
             tagger.state, tagger.errors = saved_state, saved_errors
             tagger.render()
 
+    def test_folder_focus_does_not_offer_hidden_layout_changes(self):
+        w = self.window
+        w.split_toggle.setChecked(True)
+        w.focus_folder(self.workspace, w.sorter)
+        try:
+            self.assertFalse(w.split_toggle.isEnabled())
+            self.assertIn('Exit folder focus', w.split_toggle.toolTip())
+            self.assertTrue(w.focus_browser.isVisible())
+        finally:
+            w.exit_folder_focus()
+        self.assertTrue(w.split_toggle.isEnabled())
+        self.assertTrue(w.split_toggle.isChecked())
+        self.assertTrue(w.sorter.isVisible())
+        self.assertTrue(w.second.isVisible())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows native frame regression')
+    def test_native_resize_margin_does_not_steal_button_clicks(self):
+        w = self.window
+        settle()
+        for button in (w.split_toggle, w.tagging.button, w._max_btn):
+            local = button.mapTo(w, sorter.QPoint(button.width() // 2, 1))
+            self.assertLess(local.y(), sorter._RESIZE_BORDER_PX)
+            point = w.mapToGlobal(local)
+            msg = SimpleNamespace(lParam=((point.y() & 0xffff) << 16) | (point.x() & 0xffff))
+            self.assertEqual(w._win_hit_test(msg), (True, sorter._HTCLIENT))
+        # The empty top edge still resizes the window.
+        point = w.mapToGlobal(sorter.QPoint(170, 1))
+        msg = SimpleNamespace(lParam=((point.y() & 0xffff) << 16) | (point.x() & 0xffff))
+        self.assertEqual(w._win_hit_test(msg), (True, sorter._HTTOP))
+
 
 if __name__ == '__main__':
     unittest.main()
