@@ -3820,7 +3820,7 @@ class CoverBrowser(ImageBrowser):
         self.layout().addWidget(self.table, 1)
         self.table.hide()
         self.reload_folder_btn.show()
-        self.empty_hint.setText('No folders configured yet.\nOpen Settings in the sorting workspace below to add source folders.')
+        self.empty_hint.setText('No folders configured yet.\nOpen the gear in the top bar to add source folders.')
         for key, callback in [('Ctrl+Up', lambda: self.navigate_sibling_folder(-1)), ('Ctrl+Down', lambda: self.navigate_sibling_folder(1)), ('Ctrl+C', lambda: window.copy_selection(self, False)), ('Alt+C', self.close_current_folder), ('M', self.move_selected_images), ('Ctrl+A', self.select_all), ('F5', self.refresh)]:
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -4024,7 +4024,7 @@ class CoverBrowser(ImageBrowser):
         super()._update_empty_state()
         self.sync_source_tabs()
         if not self.tabs.count() and not self._closed_this_session:
-            self.empty_hint.setText('No sorting folder configured.\nOpen Settings below to choose one.' if self.editable else 'No source folders configured.\nOpen Settings in the sorting workspace below to add folders.')
+            self.empty_hint.setText('No sorting folder configured.\nOpen the gear in the top bar to choose one.' if self.editable else 'No source folders configured.\nOpen the gear in the top bar to add folders.')
         if getattr(self, '_details', False):
             self.tabs.hide()
             self.empty_hint.hide()
@@ -4035,7 +4035,7 @@ class CoverBrowser(ImageBrowser):
             event.accept()
             paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
             move = (bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace') and paths and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
-            self.window.operation_status.setText('Move into sorting · hold Ctrl to copy' if move else 'Copy into sorting')
+            self.window.activity.publish('drag', self, 'Move into sorting · hold Ctrl to copy' if move else 'Copy into sorting')
 
     def drop_into(self, event, destination=None):
         if not self.editable:
@@ -4043,7 +4043,7 @@ class CoverBrowser(ImageBrowser):
             return
         paths = [Path(u.toLocalFile()) for u in event.mimeData().urls() if u.isLocalFile()]
         move = (bytes(event.mimeData().data('application/x-vael-sorter')) == b'workspace') and bool(paths) and all(self.window.service.inside(p) for p in paths) and not event.modifiers() & Qt.ControlModifier
-        self.window.transfer(paths, Path(destination) if destination else self.current, bool(move))
+        self.window.transfer(paths, Path(destination) if destination else self.current, bool(move), browser=self)
         event.setDropAction(Qt.CopyAction)
         event.accept()
 
@@ -4499,6 +4499,7 @@ class WorkspaceBrowser(CoverBrowser):
         self.tools_btn.setIcon(_make_toolbar_icon('more'))
         self.tools_btn.setText('')
         self._restoring_selection = False
+        window.activity.register(self)
 
     def change_sort(self, mode):
         if mode not in dict((key, label) for label, key in self.SORT_CHOICES):
@@ -6190,73 +6191,163 @@ class CompactStatusLabel(QLabel):
         self.setText(self._message)
 
 
-class TagStatusButton(QPushButton):
-    """Compact auto-tagging control with visible, shape-coded task feedback."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.task_state = 'idle'
-        self._angle = 0
-        self._animation = QTimer(self)
-        self._animation.setInterval(120)
-        self._animation.timeout.connect(self._advance)
+class WorkspaceActivity(QObject):
+    """Independent live tasks, but only one expiring completion notice app-wide."""
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.panes = []
+        self.active = {}
+        self.notice = None
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(10000)
+        self.timer.timeout.connect(self.clear_notice)
 
-    def _advance(self):
-        self._angle = (self._angle + 35) % 360
-        self.update()
+    def register(self, browser):
+        self.panes.append(browser)
+        row = browser.result_bar.layout()
+        height = max(browser.search_feedback.sizeHint().height(), browser.selection_summary.sizeHint().height())
+        browser.result_bar.setFixedHeight(height)
+        browser.search_feedback.setWordWrap(False)
+        browser.search_feedback.setMaximumWidth(130)
+        row.setStretch(1, 0)
+        browser.activity_text = CompactStatusLabel('Ready')
+        browser.activity_text.setMaximumWidth(16777215)
+        browser.activity_text.setFixedHeight(height)
+        row.insertWidget(row.count() - 1, browser.activity_text, 1)
+        browser.activity_progress = QProgressBar()
+        browser.activity_progress.setFixedSize(24, 3)
+        browser.activity_progress.setTextVisible(False)
+        browser.activity_progress.hide()
+        row.insertWidget(row.count() - 1, browser.activity_progress)
+        browser.activity_stop = QToolButton()
+        browser.activity_stop.setObjectName('footerAction')
+        browser.activity_stop.setIcon(_make_toolbar_icon('stop'))
+        browser.activity_stop.setIconSize(QSize(max(8, height - 2), max(8, height - 2)))
+        browser.activity_stop.setFixedSize(height, height)
+        browser.activity_stop.hide()
+        browser.activity_stop.clicked.connect(lambda: self.stop_for(browser))
+        row.insertWidget(row.count() - 1, browser.activity_stop)
+
+    def publish(self, key, browser, text, busy=False, done=0, total=0, stop=None):
+        if browser not in self.panes:
+            return
+        record = dict(browser=browser, text=text, done=done, total=total, stop=stop)
+        if busy:
+            if key not in self.active:
+                self.notice = None
+                self.timer.stop()
+            self.active[key] = record
+        else:
+            self.active.pop(key, None)
+            self.notice = record
+            self.timer.start()
+        self.render()
+
+    def clear_notice(self):
+        self.notice = None
+        self.timer.stop()
+        self.render()
+
+    def display_pane(self, owner):
+        # Keep feedback reachable in focus mode and if pane B is collapsed.
+        if self.window._folder_focus and owner is not self.window.focus_browser:
+            return self.window.focus_browser
+        if owner is getattr(self.window, 'focus_browser', None) and not self.window._folder_focus:
+            return self.window.target_browser()
+        if owner is getattr(self.window, 'second', None) and not self.window.split_toggle.isChecked():
+            return self.window.sorter
+        return owner
+
+    def records_for(self, browser):
+        return [record for record in self.active.values() if self.display_pane(record['browser']) is browser]
+
+    def stop_for(self, browser):
+        records = self.records_for(browser)
+        if len(records) == 1 and records[0]['stop']:
+            records[0]['stop']()
+        elif records:
+            menu = QMenu(browser)
+            for record in records:
+                if record['stop']:
+                    menu.addAction('Stop: ' + record['text'], record['stop'])
+            menu.exec(browser.activity_stop.mapToGlobal(QPoint(0, browser.activity_stop.height())))
+            menu.deleteLater()
+
+    def render(self):
+        for browser in self.panes:
+            records = self.records_for(browser)
+            notice = self.notice if self.notice and self.display_pane(self.notice['browser']) is browser else None
+            record = records[-1] if records else notice
+            text = record['text'] if record else ''
+            if len(records) > 1:
+                text += f' · +{len(records) - 1} active'
+            browser.activity_text.setText(text)
+            browser.activity_text.setToolTip('\n'.join(r['text'] for r in records) if records else text)
+            browser.activity_progress.setVisible(bool(records))
+            browser.activity_stop.setVisible(any(r['stop'] for r in records))
+            browser.activity_stop.setToolTip('Stop active task' if len(records) != 1 else 'Stop: ' + text)
+            browser.activity_stop.setAccessibleName(browser.activity_stop.toolTip())
+            if records:
+                browser.activity_progress.setRange(0, record['total'])
+                browser.activity_progress.setValue(record['done'])
+
+
+class OperationFeedback(QObject):
+    """Route occasional application notices into the current workspace footer."""
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self._message = ''
+
+    def setText(self, text):
+        self._message = text
+        if text == 'Ready':
+            self.window.activity.clear_notice()
+        elif hasattr(self.window, 'sorter'):
+            self.window.activity.publish('notice', self.window.target_browser(), text)
+
+    def toolTip(self):
+        return self._message
+
+
+class TagStatusButton(QPushButton):
+    """The top icon is a command; live tagging feedback belongs to the footer."""
+    def __init__(self, window):
+        super().__init__(window)
+        self.owner = window
+        self.task_state = 'idle'
+        self._last_token = None
+        self._browser = None
 
     def setText(self, text):
         self.setAccessibleName('Auto-tag images · ' + text)
-        self.setToolTip('Auto-tag images · ' + text + '\nOpen tagging progress, settings and errors')
+        self.setToolTip('Auto-tag images · ' + text)
         super().setText('')
 
     def set_task_status(self, state, busy=False, errors=False):
         phase = state.get('phase', 'Ready')
-        if errors or any(word in phase.lower() for word in ('error', 'failed', 'unavailable', 'incomplete')):
-            status = 'error'
-        elif busy:
-            status = 'running'
-        elif 'stopp' in phase.lower():
-            status = 'stopped'
-        elif state.get('ended') is not None and phase != 'Ready':
-            status = 'complete'
-        else:
-            status = 'idle'
-        total = state.get('total', 0)
-        detail = f" · {state.get('done', 0):,}/{total:,}" if total else ''
-        text = f'Auto-tag images · {phase}{detail}'
-        self.setAccessibleName(text)
-        self.setToolTip(text + '\nOpen tagging progress, settings and errors')
-        if status != self.task_state:
-            self.task_state = status
-            if status == 'running':
-                self._animation.start()
-            else:
-                self._animation.stop()
-            self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
+        self.task_state = ('error' if errors or any(word in phase.lower() for word in ('error', 'failed', 'unavailable', 'incomplete'))
+                           else 'running' if busy else 'stopped' if 'stopp' in phase.lower()
+                           else 'complete' if state.get('ended') is not None and phase != 'Ready' else 'idle')
+        total, done = state.get('total', 0), state.get('done', 0)
+        text = 'Tagging · ' + phase + (f' · {done:,}/{total:,}' if total else '')
+        self.setAccessibleName('Auto-tag images · ' + phase)
+        self.setToolTip('Auto-tag images · ' + phase + '\nOpen progress, settings and errors')
+        token = (state.get('started'), state.get('ended'), phase, busy, errors, done, total)
+        if token == self._last_token:
+            return  # The tagger's clock must not resurrect an expired completion.
+        self._last_token = token
         if self.task_state == 'idle':
+            self.owner.activity.active.pop('tagging', None)
+            self.owner.activity.render()
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.translate(self.width() - 11, self.height() - 11)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor('#0a0a0a'))
-        painter.drawEllipse(QRectF(0, 0, 11, 11))
-        painter.setPen(QPen(QColor('#e88c86' if self.task_state == 'error' else '#00d4a0'), 1.5))
-        if self.task_state == 'running':
-            painter.drawArc(QRectF(2, 2, 7, 7), self._angle * 16, 260 * 16)
-        elif self.task_state == 'complete':
-            painter.drawLine(2, 5, 4, 8)
-            painter.drawLine(4, 8, 9, 2)
-        elif self.task_state == 'error':
-            painter.drawLine(5, 2, 5, 6)
-            painter.drawPoint(5, 9)
-        else:
-            painter.drawLine(3, 2, 3, 9)
-            painter.drawLine(7, 2, 7, 9)
-        painter.end()
+        activity = self.owner.activity
+        if (busy and 'tagging' not in activity.active) or self._browser is None:
+            self._browser = self.owner.target_browser()
+        activity.publish('tagging', self._browser, text, busy=busy, done=done, total=total,
+                         stop=self.owner.tagging.cancel if busy else None)
 
 REWORK_STYLE = """
 /* Original near-black/teal palette; compact controls leave room for content. */
@@ -6286,6 +6377,7 @@ QToolButton#breadcrumb { background: transparent; color: #999; border: none; pad
 QToolButton#breadcrumb:hover { color: #00d4a0; background: rgba(0,212,160,0.06); }
 QToolButton#breadcrumb[currentFolder="true"] { color: #eee; font-weight: 600; border-bottom: 1px solid #555; }
 QComboBox:focus, QLineEdit:focus { border: 1px solid #00d4a0; }
+QToolButton#footerAction { padding: 0; margin: 0; border: none; background: transparent; }
 QToolButton:disabled, QPushButton:disabled { color: #666; }
 QMenu::item { padding: 5px 16px; font-size: 12px; }
 """
@@ -6324,6 +6416,7 @@ class Window(QMainWindow):
         validate_config(self.config)
         self.service = FileService(self.config['sort_root'])
         self.jobs = Jobs(self)
+        self.activity = WorkspaceActivity(self)
         self.operation_task = None
         self.history = []
         self.history_controls = []
@@ -6441,37 +6534,10 @@ class Window(QMainWindow):
         self.vertical.addWidget(bottom)
         self.vertical.setSizes([360, 540])
         layout.addWidget(self.vertical, 1)
-        self.file_task_controls = QWidget()
-        self.file_task_controls.setFixedWidth(108)
-        policy = self.file_task_controls.sizePolicy()
-        policy.setRetainSizeWhenHidden(True)
-        self.file_task_controls.setSizePolicy(policy)
-        self.chrome_tools.addWidget(self.file_task_controls)
-        operation_bar = QHBoxLayout(self.file_task_controls)
-        operation_bar.setContentsMargins(0, 0, 0, 0)
-        operation_bar.setSpacing(4)
-        operation_bar.addWidget(QLabel('Files'))
-        self.file_task_controls.hide()
-        self.operation_status = CompactStatusLabel('Ready')
-        self.operation_status.setObjectName('rosterStatusLabel')
-        title_layout.insertWidget(2, self.operation_status, 1)
-        self.progress = QProgressBar()
-        self.progress.setFixedWidth(42)
-        self.progress.hide()
-        operation_bar.addWidget(self.progress)
-        self.cancel_button = QToolButton()
-        self.cancel_button.setIcon(_make_toolbar_icon('stop'))
-        self.cancel_button.setObjectName('utilityIcon')
-        self.cancel_button.setFixedSize(26, 24)
-        self.cancel_button.setToolTip('Stop the file operation after the current item. Tagging has separate controls.')
-        self.cancel_button.setAccessibleName('Stop file operation after current item')
-        self.cancel_button.clicked.connect(self.stop_file_operation)
-        self.cancel_button.hide()
-        operation_bar.addWidget(self.cancel_button)
-        self.chrome_tools.addSpacing(8)
+        self.operation_status = OperationFeedback(self)
         self.tagging = Tagging(self, APP_DIR)
         old_tag_button = self.tagging.button
-        self.tagging.button = TagStatusButton()
+        self.tagging.button = TagStatusButton(self)
         self.tagging.button.setIcon(_make_toolbar_icon('tag'))
         self.tagging.button.setObjectName('utilityIcon')
         self.tagging.button.setFixedSize(26, 24)
@@ -6684,6 +6750,7 @@ class Window(QMainWindow):
         self.split_toggle.setToolTip(text)
         self.split_toggle.setAccessibleName('Split view')
         self.split_toggle.setAccessibleDescription(text)
+        self.activity.render()
 
     def update_workspace_headers(self):
         if not hasattr(self, 'sorter'):
@@ -6809,6 +6876,7 @@ class Window(QMainWindow):
                 browser.navigate(target)
         self.active_workspace = saved['active']
         self.active_browser = saved['browser']
+        self.activity.render()
         keyboard = saved['keyboard']
         if keyboard and isValid(keyboard) and keyboard.isVisible():
             keyboard.setFocus()
@@ -6870,24 +6938,23 @@ class Window(QMainWindow):
         mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
         # Do not set Windows' external cut marker: deletion is managed here.
         QApplication.clipboard().setMimeData(mime)
-        self.statusBar().showMessage(f'{len(paths)} items ready to {"move" if cut else "copy"} inside sorter')
+        self.activity.publish('clipboard', browser if browser.editable else self.target_browser(),
+                              f'{len(paths)} items ready to {"move" if cut else "copy"}')
 
     def paste(self, browser):
         mime = QApplication.clipboard().mimeData()
         paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()] if mime.hasUrls() else []
         move = self.clip_cut and paths == self.clip_paths
-        self.transfer(paths, browser.current, move)
+        self.transfer(paths, browser.current, move, browser=browser)
         if move:
             self.clip_cut = False
 
     def stop_file_operation(self):
         if self.operation_task:
             self.operation_task.cancel.set()
-            self.cancel_button.setEnabled(False)
-            self.file_task_controls.setToolTip('Stopping the file operation after the current item finishes')
-            self.operation_status.setText('Files · stopping after current item…')
+            self.activity.publish('files', self._operation_browser, 'Files · stopping after current item…', busy=True)
 
-    def run_operations(self, title, work, select_transferred=False, replay=False):
+    def run_operations(self, title, work, select_transferred=False, replay=False, browser=None):
         if self.tagging.busy:
             self.tagging.error('Finish or stop the tagging job / health check before changing files. Browsing is still available.')
             return
@@ -6898,14 +6965,9 @@ class Window(QMainWindow):
             return
         before = self.history_state()
         stack_start = len(self.service.undo_stack)
-        self.progress.setRange(0, len(work))
-        self.progress.setValue(0)
-        self.file_task_controls.setToolTip('File operation: ' + title)
-        self.file_task_controls.show()
-        self.cancel_button.setEnabled(True)
-        self.progress.show()
-        self.cancel_button.show()
-        self.operation_status.setText(title)
+        owner = browser or self.target_browser()
+        self._operation_browser = owner
+        self.activity.publish('files', owner, title, busy=True, total=len(work), stop=self.stop_file_operation)
         self.update_history_controls(busy=True)
 
         def execute(task):
@@ -6925,10 +6987,8 @@ class Window(QMainWindow):
         def finished(result):
             results, errors, cancelled = result
             self.operation_task = None
-            self.file_task_controls.hide()
-            self.progress.hide()
-            self.cancel_button.hide()
-            self.operation_status.setText(f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
+            self.activity.publish('files', owner,
+                f'{title}: {len(results)} processed · {len(errors)} errors' + (' · stopped' if cancelled else ''))
             self.reconcile_references(results)
             if not replay:
                 records = self.service.undo_stack[stack_start:]
@@ -6963,7 +7023,9 @@ class Window(QMainWindow):
 
         self.operation_task = self.jobs.start(execute, finished,
             lambda error: finished(([], [error], False)),
-            lambda value, label: (self.progress.setValue(value), self.operation_status.setText(title + ' · ' + Path(label).name)))
+            lambda value, label: self.activity.publish('files', owner, title + ' · ' + Path(label).name,
+                busy=True, done=value, total=len(work),
+                stop=None if self.operation_task and self.operation_task.cancel.is_set() else self.stop_file_operation))
 
     def groups_changed(self):
         self.persist()
@@ -7194,7 +7256,7 @@ class Window(QMainWindow):
             self.persist()
         self.config['pins'] = [p for p in self.config['pins'] if Path(p).is_dir()]
 
-    def transfer(self, paths, destination, move=False):
+    def transfer(self, paths, destination, move=False, browser=None):
         if not destination or not paths:
             self.notice('Select items and open a destination inside the sorting folder first.')
             return
@@ -7221,7 +7283,7 @@ class Window(QMainWindow):
             return GroupTransferResult(source, target, False, True, snapshots)
         self.run_operations('Move' if move else 'Copy',
             [(str(path), lambda p=path: action(p)) for path in paths],
-            select_transferred=True)
+            select_transferred=True, browser=browser or self.target_browser())
 
     def transfer_policy(self, paths, destinations, skip_same_folder=False):
         conflicts = []
@@ -7366,7 +7428,7 @@ class Window(QMainWindow):
 
     def duplicate(self, browser):
         paths = top_level_selection(browser.selected_paths())
-        self.run_operations('Duplicate', [(str(p), lambda path=p: self.service.transfer(path, path.parent, False, 'rename')) for p in paths])
+        self.run_operations('Duplicate', [(str(p), lambda path=p: self.service.transfer(path, path.parent, False, 'rename')) for p in paths], browser=browser)
 
     def new_folders(self, browser):
         if not browser.current:
@@ -7375,7 +7437,7 @@ class Window(QMainWindow):
         text, ok = QInputDialog.getMultiLineText(self, 'New folders', 'One folder name per line:')
         if ok:
             parent = browser.current
-            self.run_operations('Create folders', [(name, lambda n=name: self.service.mkdir(parent, n)) for name in text.splitlines() if name.strip()])
+            self.run_operations('Create folders', [(name, lambda n=name: self.service.mkdir(parent, n)) for name in text.splitlines() if name.strip()], browser=browser)
 
     def move_to_new(self, browser):
         paths = top_level_selection(browser.selected_paths())
@@ -7405,7 +7467,7 @@ class Window(QMainWindow):
             return
         work = [('Create folder', action)]
         work.extend((str(path), lambda p=path: move_item(p)) for path in paths)
-        self.run_operations('Move into new folder', work)
+        self.run_operations('Move into new folder', work, browser=browser)
 
     def rename_selection(self, browser):
         paths = browser.selected_paths()
@@ -7414,14 +7476,14 @@ class Window(QMainWindow):
         elif paths:
             name, ok = QInputDialog.getText(self, 'Rename', 'New name:', text=paths[0].name)
             if ok:
-                self.run_operations('Rename', [(str(paths[0]), lambda: self.service.rename(paths[0], name))])
+                self.run_operations('Rename', [(str(paths[0]), lambda: self.service.rename(paths[0], name))], browser=browser)
 
     def batch_rename(self, browser):
         if not browser.selected_paths():
             return
         dialog = RenameDialog(browser.selected_paths(), self)
         if self.exec_dialog(dialog) == QDialog.Accepted:
-            self.run_operations('Batch rename', [(str(path), lambda p=path, n=name: self.service.rename(p, n)) for path, name in dialog.mapping])
+            self.run_operations('Batch rename', [(str(path), lambda p=path, n=name: self.service.rename(p, n)) for path, name in dialog.mapping], browser=browser)
 
     def trash_selection(self, browser):
         paths = top_level_selection(browser.selected_paths())
@@ -7429,7 +7491,7 @@ class Window(QMainWindow):
             return
         if QMessageBox.question(self, 'Move to system trash', f'Move {len(paths)} selected items to the system trash?\nRestore trashed items using your system trash, not Undo.') != QMessageBox.Yes:
             return
-        self.run_operations('Trash', [(str(path), lambda p=path: self.service.trash(p)) for path in paths])
+        self.run_operations('Trash', [(str(path), lambda p=path: self.service.trash(p)) for path in paths], browser=browser)
 
     def history_state(self):
         return copy.deepcopy({key: self.config[key] for key in ('groups', 'notes')})

@@ -58,9 +58,11 @@ Double-click folders to open them. Use the **Root › Folder** breadcrumbs to go
 
 Each pane's **⋯ menu** contains folder creation, selected-item actions, sorting, and entry zoom. Sort by name, date, size, or type. Folders stay first, groups stay together, and files inside each group retain their natural filename order. The magnifying glass opens search; the circular arrow refreshes that pane.
 
-Top-bar controls are grouped by purpose: split layout, undo/redo/history, file-operation progress, auto-tagging, then Settings and Help. Hover an icon for its action and shortcuts. Active toggles have a teal background; keyboard focus has a dotted underline.
+Top-bar controls are grouped by purpose: split layout, undo/redo/history, auto-tagging, then Settings and Help. Hover an icon for its action and shortcuts. Active toggles have a teal background; keyboard navigation shows a dotted focus underline. Startup and mouse focus do not show that underline.
 
-While a file operation runs, **Files**, its progress indicator, and a Stop icon appear in a reserved space without moving the other controls. Stop finishes the current item before ending that file operation. Tagging has its own stop control inside the tagger dialog.
+Activity appears beside the entry count in each workspace's existing footer, without making the row taller. Long messages shorten to fit; hover for the full text. File operations and tagging retain their originating pane when you change focus. Active work can appear in both panes at once. Only the newest completion or other notification remains across the two panes, and it clears after 10 seconds; active work stays visible until it finishes. If a pane is temporarily hidden, its activity appears in the visible workspace.
+
+The footer's small Stop icon stops that task after its current item; if multiple tasks share a pane, it opens a menu identifying each task. File operations and tagging retain their separate stop controls. The thin divider between Sources and the workspaces can be dragged along its full width to resize the panes.
 
 Right-click files or folders to copy, cut, move, duplicate, rename, inspect, or trash them. Right-click empty space to paste or create folders. Dragging within the workspace moves files; hold **Ctrl** to copy instead.
 
@@ -153,7 +155,7 @@ M in the source explorer copies the protected originals rather than moving them.
 
 Right-click workspace images or folders → **Auto-Tag Image/s**. It tags new or changed content and skips images already tagged, so you can select the whole folder after adding images. Unchanged images need only a quick file check; identical copies reuse saved tags. The progress window shows how many were tagged and skipped. Selected folders include their subfolders, but nothing outside your selection is checked. Tagging never starts automatically.
 
-The top-bar **tag with a sparkle** opens tagging progress, settings, and errors. Its small status mark spins while working, shows a check when complete, pause bars when stopped, and an exclamation mark on errors. An idle tagger has no status mark. Hover for the current phase and item count.
+The top-bar **tag with a sparkle** opens tagging progress, settings, and errors. Its progress and phase appear in the workspace footer rather than animating in the title bar. Click the tag icon for full details, settings, and persistent error information.
 
 Use **Re-tag All Selected Images** to deliberately regenerate tags for the selection, for example after changing thresholds or the model. A previously processed image with no generated tags still counts as tagged. Click the tagger status to see progress, stop after the current image, change settings, or inspect errors.
 

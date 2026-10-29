@@ -61,6 +61,8 @@ class ToolbarTests(unittest.TestCase):
     def tearDown(self):
         self.window.history.clear()
         self.window.update_history_controls()
+        self.window.activity.active.clear()
+        self.window.activity.clear_notice()
 
     def test_no_collection_surface_or_actions(self):
         self.assertFalse(hasattr(self.window, 'shelf'))
@@ -181,40 +183,74 @@ class ToolbarTests(unittest.TestCase):
         self.assertEqual(browser.source_tabs.count(), 0)
         self.assertTrue(browser.pane_header.isVisible())
 
-    def test_task_controls_do_not_move_toolbar_buttons(self):
+    def test_activity_never_increases_footer_height_or_moves_toolbar(self):
         w = self.window
         w.resize(720, 520)
-        w.file_task_controls.hide()
+        w.split_toggle.setChecked(True)
         settle()
         buttons = [w.split_toggle, *w.history_controls[0], w.tagging.button]
         positions = [button.mapTo(w, sorter.QPoint()) for button in buttons]
+        heights = [b.result_bar.height() for b in (w.sorter, w.second)]
+        for b in (w.sorter, w.second):
+            self.assertEqual(b.result_bar.height(), b.selection_summary.sizeHint().height())
+            w.activity.publish(str(id(b)), b, 'Copying a very long filename ' * 10,
+                               busy=True, total=10, done=2, stop=lambda: None)
+        settle()
+        self.assertEqual(heights, [b.result_bar.height() for b in (w.sorter, w.second)])
+        self.assertEqual(positions, [button.mapTo(w, sorter.QPoint()) for button in buttons])
+        self.assertEqual(w.width(), 720)
+        self.assertFalse(hasattr(w, 'file_task_controls'))
+
+    def test_latest_notification_replaces_previous_but_not_active_tasks(self):
+        w = self.window
+        w.split_toggle.setChecked(True)
+        w.activity.publish('left', w.sorter, 'Left is working', busy=True)
+        w.activity.publish('right', w.second, 'Right is working', busy=True)
+        self.assertIn('Left is working', w.sorter.activity_text._message)
+        self.assertIn('Right is working', w.second.activity_text._message)
+        w.activity.publish('left', w.sorter, 'Left finished')
+        self.assertIn('Left finished', w.sorter.activity_text._message)
+        self.assertIn('Right is working', w.second.activity_text._message)
+        w.activity.publish('right', w.second, 'Right finished')
+        self.assertEqual(w.sorter.activity_text._message, '')
+        self.assertIn('Right finished', w.second.activity_text._message)
+        self.assertEqual(w.activity.timer.interval(), 10000)
+        w.activity.timer.start(20)
+        settle(lambda: w.activity.notice is None)
+        self.assertEqual(w.second.activity_text._message, '')
+        w.activity.timer.setInterval(10000)
+
+    def test_file_job_keeps_its_owner_after_focus_changes(self):
+        w = self.window
+        w.split_toggle.setChecked(True)
+        started, release = threading.Event(), threading.Event()
+        def work():
+            started.set()
+            release.wait(2)
         try:
-            w.file_task_controls.show()
-            w.progress.show()
-            w.cancel_button.show()
-            w.operation_status.setText('Copying a long filename into the workspace')
+            w.run_operations('Sample work', [('sample', work)], browser=w.sorter)
+            settle(started.is_set)
+            w.second.grid.setFocus()
             settle()
-            self.assertEqual(positions, [button.mapTo(w, sorter.QPoint()) for button in buttons])
-            self.assertEqual(w.width(), 720)
+            self.assertIs(w.activity.active['files']['browser'], w.sorter)
         finally:
-            w.file_task_controls.hide()
-            w.progress.hide()
-            w.cancel_button.hide()
-            w.operation_status.setText('Ready')
+            release.set()
+            settle(lambda: w.operation_task is None)
+        self.assertIs(w.activity.notice['browser'], w.sorter)
 
     def test_stop_button_only_cancels_file_operations(self):
         w = self.window
         files = SimpleNamespace(cancel=threading.Event())
         tagging = SimpleNamespace(cancel=threading.Event())
         w.operation_task, w.tagging.task = files, tagging
+        w._operation_browser = w.sorter
         try:
             w.stop_file_operation()
             self.assertTrue(files.cancel.is_set())
             self.assertFalse(tagging.cancel.is_set())
-            self.assertFalse(w.cancel_button.isEnabled())
+            self.assertIsNone(w.activity.active['files']['stop'])
         finally:
             w.operation_task = w.tagging.task = None
-            w.cancel_button.setEnabled(True)
             w.operation_status.setText('Ready')
 
     def test_tagger_reports_task_states_without_hover(self):
@@ -232,9 +268,14 @@ class ToolbarTests(unittest.TestCase):
                 tagger.errors = []
                 tagger.render()
                 self.assertEqual(tagger.button.task_state, expected)
-                self.assertEqual(tagger.button._animation.isActive(), expected == 'running')
+                self.assertFalse(hasattr(tagger.button, '_animation'))
+                self.assertEqual('tagging' in self.window.activity.active, busy)
                 self.assertIn('Auto-tag images', tagger.button.toolTip())
                 self.assertIn(phase, tagger.button.accessibleName())
+                if not busy and expected != 'idle':
+                    self.window.activity.clear_notice()
+                    tagger.render()
+                    self.assertIsNone(self.window.activity.notice)
         finally:
             tagger.task = None
             tagger.state, tagger.errors = saved_state, saved_errors
