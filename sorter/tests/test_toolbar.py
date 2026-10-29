@@ -140,8 +140,14 @@ class ToolbarTests(unittest.TestCase):
             self.assertEqual(button.property('keyboardFocus'), expected)
 
     def test_center_separator_is_compact_and_has_no_shadow(self):
-        self.assertEqual(self.window.vertical.handleWidth(), 4)
+        self.assertEqual(self.window.vertical.handleWidth(), 9)
         self.assertIsNone(self.window.vertical.handle(1).graphicsEffect())
+        self.window.library.clear_selection()
+        self.window.library.set_search_feedback('All content')
+        self.assertFalse(self.window.library.result_bar.isVisible())
+        self.window.library.set_search_feedback('Searching…', busy=True)
+        self.assertTrue(self.window.library.result_bar.isVisible())
+        self.window.library.set_search_feedback('All content')
 
     def test_source_header_switch_refresh_hide_restore_and_overflow(self):
         w, browser = self.window, self.window.library

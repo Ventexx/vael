@@ -3897,6 +3897,8 @@ class CoverBrowser(ImageBrowser):
         self.selection_summary.setObjectName('hint')
         result_layout.addWidget(self.selection_summary)
         self.layout().addWidget(self.result_bar)
+        if not editable:
+            self.result_bar.hide()  # An empty source footer must not pad the divider.
         self.search.setAccessibleName('Search filenames, paths and fields')
         self.kind.setAccessibleName('Filter by file type')
         self.extension.setAccessibleName('Filter by extension')
@@ -4292,6 +4294,8 @@ class CoverBrowser(ImageBrowser):
         if hasattr(self, 'selection_summary'):
             count = len(self.selected_paths())
             self.selection_summary.setText(f'{count:,} selected' if count else '')
+            if not self.editable:
+                self.result_bar.setVisible(bool(count) or getattr(self, '_source_feedback_needed', False))
 
     def queue_filter(self, *_):
         self.reset_search_action.setVisible(self.active_filter() or self.recursive.isChecked() != (not self.editable))
@@ -4342,6 +4346,9 @@ class CoverBrowser(ImageBrowser):
         self.search_feedback.setVisible(bool(text))
         self.search_feedback.setStyleSheet('color: #e88c86;' if error else 'color: #aaa;')
         self.search_progress.setVisible(busy)
+        if not self.editable and hasattr(self, 'result_bar'):
+            self._source_feedback_needed = bool(busy or error or self.active_filter())
+            self.result_bar.setVisible(self._source_feedback_needed or bool(self.selected_paths()))
         self.search_button.setToolTip(text or 'Search and filters · Ctrl+F')
         self.search_button.setText('Search •' if self.active_filter() else 'Search')
         self._position_status_bar()
@@ -6111,12 +6118,7 @@ class _TitleBar(QWidget):
         super().mouseDoubleClickEvent(event)
 
 class _CenterSplitterHandle(QSplitterHandle):
-    """Replaces the old thick, fully-colored splitter bar between the
-    Image Browser and the Input Roster with a slim, mostly-invisible
-    strip that only shows three short horizontal "grip" lines in the
-    middle -- and only responds to a drag that actually starts on that
-    small grip area, so the rest of the handle's width doesn't
-    accidentally resize things."""
+    """Three-line grip with one pixel of padding; the full strip is draggable."""
 
     GRIP_W = 26
     GRIP_HIT_W = 40
@@ -6144,7 +6146,7 @@ class _CenterSplitterHandle(QSplitterHandle):
         p.setPen(pen)
         cx, cy = self.rect().center().x(), self.rect().center().y()
         half = self.GRIP_W // 2
-        for dy in (0,):
+        for dy in (-3, 0, 3):
             p.drawLine(cx - half, cy + dy, cx + half, cy + dy)
         p.end()
 
@@ -6492,7 +6494,7 @@ class Window(QMainWindow):
         self.vertical = _CenterSplitter(Qt.Vertical)
         self.vertical.setObjectName('centerSplitter')
         self.vertical.setChildrenCollapsible(False)
-        self.vertical.setHandleWidth(4)
+        self.vertical.setHandleWidth(9)
         self.library = CoverBrowser(self, False, 'Library')
         self.vertical.addWidget(self.library)
         bottom = QWidget()
