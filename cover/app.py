@@ -2741,6 +2741,9 @@ class FolderSection(QWidget):
             for card in self._cards:
                 card.request_image()
 
+        if self._expanded and self.browser._focused_path == self.path:
+            self.browser._queue_folder_scroll(self)
+
     def absorb_bulk_scan(self, files, subdirs):
         """Called by BulkFolderLoadManager when a background 'Load Selected
         Folders' scan reaches this exact folder. Unlike the interactive
@@ -3352,12 +3355,26 @@ class ImageBrowser(QWidget):
         navigate_sibling_folder(), and scrolls the active tab so the
         folder's header lands at the very top of the viewport, since the
         user almost certainly wants to interact with what they just
-        opened. Deferred one event-loop tick because expanding a folder
-        changes the layout (new cards/children appear) after this call
-        returns, and the scroll target needs the settled geometry."""
+        opened. Scroll after the card grid and enclosing scroll area's
+        geometry have both caught up with the expansion."""
         self._focused_path = section.path
         self.main_window.select_folder_workflow(section.path)
-        QTimer.singleShot(0, lambda s=section: self._scroll_section_into_view(s))
+        self._queue_folder_scroll(section)
+
+    def _queue_folder_scroll(self, section):
+        # Reflow queues another layout pass, including a scrollbar range
+        # update. Give that pass its own turn before reading the geometry.
+        # Capture the path rather than a widget that a tab reload may delete.
+        path = section.path
+        QTimer.singleShot(0, lambda: QTimer.singleShot(
+            0, lambda: self._scroll_focused_folder(path)
+        ))
+
+    def _scroll_focused_folder(self, path):
+        section = self._sections_by_path.get(path)
+        if (path == self._focused_path and section is not None
+                and section.is_expanded()):
+            self._scroll_section_into_view(section)
 
     def _scroll_section_into_view(self, section):
         scroll = self.tabs.currentWidget()
@@ -3414,7 +3431,10 @@ class ImageBrowser(QWidget):
         idx = siblings.index(section)
         target = siblings[(idx + direction) % len(siblings)]
         section.set_expanded(False)
-        target.set_expanded(True)
+        if target.is_expanded():
+            self.focus_folder_section(target)
+        else:
+            target.set_expanded(True)
 
     # -- multi-select (ctrl+click / rubber-band drag) -----------------------
     def selected_folder_paths(self):
