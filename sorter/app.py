@@ -696,7 +696,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox, QSplitter, QStackedWidget,
     QListView, QTableView, QAbstractItemView, QStyledItemDelegate, QStyle,
     QMenu, QWidgetAction, QMessageBox, QFileDialog, QInputDialog, QSlider, QProgressBar,
-    QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
+    QTabWidget, QTabBar, QTableWidget, QTableWidgetItem, QHeaderView, QListWidget,
     QListWidgetItem, QPlainTextEdit, QFormLayout, QDialogButtonBox, QSpinBox,
     QScrollArea, QGroupBox, QCompleter, QToolButton, QFrame, QGridLayout, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QSplitterHandle, QGraphicsDropShadowEffect, QGraphicsBlurEffect, QGraphicsScene, QGraphicsPixmapItem, QSizeGrip,
@@ -3844,12 +3844,33 @@ class CoverBrowser(ImageBrowser):
         header.setSpacing(4)
         self.pane_title = QLabel('Workspace' if editable else 'Sources')
         self.pane_title.setObjectName('paneTitle')
+        self.pane_title.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         header.addWidget(self.pane_title)
         if not editable:
             badge = QLabel('READ ONLY')
             badge.setObjectName('paneBadge')
+            badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
             header.addWidget(badge)
-        header.addStretch()
+        if not editable:
+            self.source_tabs = QTabBar()
+            self.source_tabs.setObjectName('sourceFolderTabs')
+            self.source_tabs.setAccessibleName('Source folders')
+            self.source_tabs.setExpanding(False)
+            self.source_tabs.setDrawBase(False)
+            self.source_tabs.setUsesScrollButtons(True)
+            self.source_tabs.setElideMode(Qt.ElideNone)
+            self.source_tabs.setMinimumWidth(0)
+            self.source_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            header.addWidget(self.source_tabs, 1)
+            self.source_tabs.currentChanged.connect(self.tabs.setCurrentIndex)
+            self._source_tab_sync = QTimer(self)
+            self._source_tab_sync.setSingleShot(True)
+            self._source_tab_sync.timeout.connect(self.sync_source_tabs)
+            self.tabs.currentChanged.connect(lambda _: self._source_tab_sync.start(0))
+            self.tabs.tabBar().setFixedHeight(0)
+            self.sync_source_tabs()
+        else:
+            header.addStretch()
         self.search_button.setObjectName('paneButton')
         self.search_button.setText('Search')
         self.search_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -3882,6 +3903,26 @@ class CoverBrowser(ImageBrowser):
         self.recursive.setToolTip('Include content inside subfolders in search results')
         self.empty_hint.setWordWrap(True)
         self._position_status_bar()
+
+    def sync_source_tabs(self):
+        """Keep header navigation in sync with the existing source page lifecycle."""
+        if not hasattr(self, 'source_tabs'):
+            return
+        self.tabs.tabBar().hide()
+        bar = self.source_tabs
+        state = [(self.tabs.tabText(i), self.tabs.tabToolTip(i)) for i in range(self.tabs.count())]
+        blocked = bar.blockSignals(True)
+        try:
+            if state != getattr(self, '_source_tab_state', None):
+                while bar.count():
+                    bar.removeTab(0)
+                for name, path in state:
+                    index = bar.addTab(name)
+                    bar.setTabToolTip(index, path)
+                self._source_tab_state = state
+            bar.setCurrentIndex(self.tabs.currentIndex())
+        finally:
+            bar.blockSignals(blocked)
 
     def options_menu(self):
         menu = self.build_options_menu()
@@ -3981,6 +4022,7 @@ class CoverBrowser(ImageBrowser):
 
     def _update_empty_state(self):
         super()._update_empty_state()
+        self.sync_source_tabs()
         if not self.tabs.count() and not self._closed_this_session:
             self.empty_hint.setText('No sorting folder configured.\nOpen Settings below to choose one.' if self.editable else 'No source folders configured.\nOpen Settings in the sorting workspace below to add folders.')
         if getattr(self, '_details', False):
@@ -6244,6 +6286,14 @@ QToolButton#utilityIcon:hover, QPushButton#utilityIcon:hover { background: rgba(
 QToolButton#utilityIcon:checked { background: rgba(0,212,160,0.12); }
 QToolButton#utilityIcon:focus, QPushButton#utilityIcon:focus { border-bottom: 1px dotted #b4b4b4; }
 #breadcrumbTrail { background: transparent; }
+QTabBar#sourceFolderTabs { background: transparent; border: none; margin: 0; padding: 0; }
+QTabBar#sourceFolderTabs::tab {
+    background: transparent; color: #999; border: none;
+    border-bottom: 1px solid transparent; padding: 4px 8px; margin-right: 4px;
+}
+QTabBar#sourceFolderTabs::tab:selected { color: #eee; border-bottom: 1px solid #00d4a0; }
+QTabBar#sourceFolderTabs::tab:hover:!selected { color: #00d4a0; background: rgba(0,212,160,0.06); }
+QTabBar#sourceFolderTabs QToolButton { background: #111; border: none; width: 18px; }
 QToolButton#breadcrumb { background: transparent; color: #999; border: none; padding: 2px 5px; }
 QToolButton#breadcrumb:hover { color: #00d4a0; background: rgba(0,212,160,0.06); }
 QToolButton#breadcrumb[currentFolder="true"] { color: #eee; font-weight: 600; border-bottom: 1px solid #555; }

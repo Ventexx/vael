@@ -128,6 +128,46 @@ class ToolbarTests(unittest.TestCase):
             self.assertTrue(button.accessibleName())
             self.assertTrue(button.toolTip())
 
+    def test_source_header_switch_refresh_hide_restore_and_overflow(self):
+        w, browser = self.window, self.window.library
+        folders = [self.root / f'Source {i} with a descriptive folder name' for i in range(8)]
+        for folder in folders:
+            folder.mkdir(exist_ok=True)
+        w.config['sources'] = list(map(str, folders))
+        try:
+            browser.update_roots()
+            settle(lambda: browser.source_tabs.count() == 8)
+            self.assertFalse(browser.tabs.tabBar().isVisible())
+            self.assertTrue(browser.pane_header.isAncestorOf(browser.source_tabs))
+            browser.source_tabs.setCurrentIndex(7)
+            self.assertEqual(browser.tabs.currentIndex(), 7)
+            browser.reload_current_folder()
+            settle(lambda: browser.source_tabs.tabToolTip(7) == str(folders[7]))
+            browser.close_tab_for_session(str(folders[7]))
+            self.assertEqual(browser.source_tabs.count(), 7)
+            browser._restore_all_closed_folders()
+            self.assertEqual(browser.source_tabs.count(), 8)
+            w.resize(720, 520)
+            settle()
+            self.assertEqual(w.width(), 720)
+            self.assertTrue(any(button.isVisible() for button in browser.source_tabs.findChildren(sorter.QToolButton)))
+            self.assertGreater(browser.tools_btn.mapTo(w, sorter.QPoint()).x(),
+                               browser.source_tabs.mapTo(w, sorter.QPoint()).x())
+            # Config edits update both names and tooltips, without creating another row.
+            w.config['source_names'] = {str(folders[0]): 'Renamed source'}
+            browser.update_roots()
+            self.assertEqual(browser.source_tabs.tabText(0), 'Renamed source')
+            for folder in folders:
+                browser.close_tab_for_session(str(folder))
+            self.assertEqual(browser.source_tabs.count(), 0)
+            self.assertTrue(browser.restore_hidden_btn.isVisible())
+        finally:
+            w.config['sources'] = []
+            w.config['source_names'] = {}
+            browser.update_roots()
+        self.assertEqual(browser.source_tabs.count(), 0)
+        self.assertTrue(browser.pane_header.isVisible())
+
     def test_task_controls_do_not_move_toolbar_buttons(self):
         w = self.window
         w.resize(720, 520)

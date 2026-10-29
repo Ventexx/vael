@@ -47,6 +47,8 @@ Close Sorter and delete its installation folder, including `venv` and `.local`. 
 
 The upper explorer shows your source folders. Click to select, Ctrl-click to add or remove selections, and double-click an image to inspect it. Source content can be viewed and copied; Sorter only changes files inside your configured sorting folder.
 
+Source folders share a single header row with **Sources · Read only** and the pane controls. Click a folder name to switch sources; a teal underline marks the selected source. Long rows scroll sideways, and hovering a name shows its full path. These are independent roots, so there are no hierarchy arrows between them.
+
 Drag content into the lower workspace to copy it. The destination highlights while dragging. Newly received items stay selected and scroll into view, ready to group.
 
 
