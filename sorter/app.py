@@ -6123,15 +6123,7 @@ class _CenterSplitterHandle(QSplitterHandle):
 
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
-        # The cast shadow that used to sit on the roster bar itself now
-        # lives on the drag handle instead, blurring down into the
-        # roster below -- it marks the actual boundary the user drags to
-        # resize, rather than reading as a stray bar of its own.
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(36)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 200))
-        self.setGraphicsEffect(shadow)
+        self.setCursor(Qt.SplitVCursor)
 
     def _grip_rect(self):
         r = self.rect()
@@ -6151,16 +6143,12 @@ class _CenterSplitterHandle(QSplitterHandle):
         p.setPen(pen)
         cx, cy = self.rect().center().x(), self.rect().center().y()
         half = self.GRIP_W // 2
-        for dy in (-3, 0, 3):
+        for dy in (0,):
             p.drawLine(cx - half, cy + dy, cx + half, cy + dy)
         p.end()
 
     def mousePressEvent(self, event):
-        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-        if self._grip_rect().contains(pos):
-            super().mousePressEvent(event)
-        else:
-            event.ignore()
+        super().mousePressEvent(event)  # The full thin separator remains draggable.
 
     def mouseMoveEvent(self, event):
         self.update()
@@ -6284,7 +6272,7 @@ QToolButton#utilityIcon, QPushButton#utilityIcon {
 }
 QToolButton#utilityIcon:hover, QPushButton#utilityIcon:hover { background: rgba(255,255,255,0.07); }
 QToolButton#utilityIcon:checked { background: rgba(0,212,160,0.12); }
-QToolButton#utilityIcon:focus, QPushButton#utilityIcon:focus { border-bottom: 1px dotted #b4b4b4; }
+QToolButton#utilityIcon[keyboardFocus="true"]:focus, QPushButton#utilityIcon[keyboardFocus="true"]:focus { border-bottom: 1px dotted #b4b4b4; }
 #breadcrumbTrail { background: transparent; }
 QTabBar#sourceFolderTabs { background: transparent; border: none; margin: 0; padding: 0; }
 QTabBar#sourceFolderTabs::tab {
@@ -6411,7 +6399,7 @@ class Window(QMainWindow):
         self.vertical = _CenterSplitter(Qt.Vertical)
         self.vertical.setObjectName('centerSplitter')
         self.vertical.setChildrenCollapsible(False)
-        self.vertical.setHandleWidth(10)
+        self.vertical.setHandleWidth(4)
         self.library = CoverBrowser(self, False, 'Library')
         self.vertical.addWidget(self.library)
         bottom = QWidget()
@@ -6494,6 +6482,7 @@ class Window(QMainWindow):
         self.tagging.render()
         self.statusBar().hide()
         QApplication.instance().focusChanged.connect(self.focus_changed)
+        QApplication.instance().installEventFilter(self)
         self._img_viewer = MediaViewerOverlay(self._content_root)
         self._modal_dim_overlay = _ModalDimOverlay(self._content_root)
         self.browsers = [self.library, self.sorter, self.second]
@@ -6712,6 +6701,20 @@ class Window(QMainWindow):
                 header.update()
             browser.pane_title.setToolTip('Active destination for copies from Sources' if active
                                          else 'Click inside this pane to make it the copy destination')
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, (QToolButton, QPushButton)) and watched.objectName() == 'utilityIcon':
+            if event.type() == QEvent.FocusIn:
+                keyboard = event.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason)
+            elif event.type() in (QEvent.FocusOut, QEvent.MouseButtonPress):
+                keyboard = False
+            else:
+                return super().eventFilter(watched, event)
+            watched.setProperty('keyboardFocus', keyboard)
+            watched.style().unpolish(watched)
+            watched.style().polish(watched)
+            watched.update()
+        return super().eventFilter(watched, event)
 
     def focus_changed(self, old, new):
         typing = isinstance(new, (QLineEdit, QPlainTextEdit, QSpinBox))

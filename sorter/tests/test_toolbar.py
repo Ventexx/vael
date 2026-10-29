@@ -128,6 +128,19 @@ class ToolbarTests(unittest.TestCase):
             self.assertTrue(button.accessibleName())
             self.assertTrue(button.toolTip())
 
+    def test_utility_focus_marker_only_follows_keyboard_navigation(self):
+        from PySide6.QtGui import QFocusEvent
+        button = self.window.tagging.button
+        for reason, expected in ((sorter.Qt.ActiveWindowFocusReason, False),
+                                 (sorter.Qt.TabFocusReason, True),
+                                 (sorter.Qt.MouseFocusReason, False)):
+            self.app.sendEvent(button, QFocusEvent(sorter.QEvent.FocusIn, reason))
+            self.assertEqual(button.property('keyboardFocus'), expected)
+
+    def test_center_separator_is_compact_and_has_no_shadow(self):
+        self.assertEqual(self.window.vertical.handleWidth(), 4)
+        self.assertIsNone(self.window.vertical.handle(1).graphicsEffect())
+
     def test_source_header_switch_refresh_hide_restore_and_overflow(self):
         w, browser = self.window, self.window.library
         folders = [self.root / f'Source {i} with a descriptive folder name' for i in range(8)]
