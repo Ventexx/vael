@@ -836,6 +836,7 @@
 
 <script src="thumbnail-queue.js"></script>
 <script src="read-ahead.js"></script>
+<script src="image-preparation.js"></script>
 <script src="save-queue.js"></script>
 <script>
 // ════════════════════════════════════════════════════════════════════
@@ -1846,7 +1847,7 @@ async function jumpToHistory(idx) {
   try {
     await hydrateImage(img);
     await restoreHistoryState(img, idx);
-    await enforceMemoryBudget();
+    scheduleMemoryCheck();
     updateUnsaved(img);
     renderGallery(); updateStatusBar(); renderHistoryPanel();
     setStatus(`History: ${img.history[idx].label}`, true);
@@ -2157,7 +2158,7 @@ async function runFilter(type, value) {
     if (!hadSelection) img.mask = null;
     img._pinned = false;
     setFiltersBusy(false);
-    await enforceMemoryBudget();
+    scheduleMemoryCheck();
   }
 }
 async function runFilterBatch(type, value) {
@@ -2201,7 +2202,7 @@ async function runFilterBatch(type, value) {
       img.mask = savedMask;
       if (success) pushHistory(img, filterLabel(type, value), { maskChanged: false });
       img._pinned = false;
-      await enforceMemoryBudget();
+      scheduleMemoryCheck();
     }
   } finally {
     setFiltersBusy(false);
@@ -2249,6 +2250,7 @@ const IMAGE_MEMORY_BUDGET = 512 * 1024 * 1024;
 const OPERATION_MEMORY_LIMIT = 1024 * 1024 * 1024;
 state._hydratedLRU = [];
 let memoryPass = Promise.resolve();
+let memoryRunning = false;
 let memoryTimer;
 function plannedReadAhead() {
   return readAheadPlan(state.images, state.images[state.activeIdx]);
@@ -2273,9 +2275,9 @@ const imageReadAhead = new ImageReadAhead({
   ready: imageReady,
   paused: () => {
     const active = state.images[state.activeIdx];
-    // Foreground loading owns the current category. Editing and worker saves
-    // must not starve preparation of the following category.
-    return state.categoryLoading || (!!active && ((active._lazy && !active._loadFailed) || active._hydrating || active._evicting));
+    // Interactive work has priority over speculative preparation.
+    return state.filterBusy || state.historyBusy || state.saveBusy || state.categoryLoading ||
+      (!!active && ((active._lazy && !active._loadFailed) || active._hydrating || active._evicting));
   },
   prepare: async img => {
     if (img._disposed || !backgroundPreparationPlan().includes(img)) return;
@@ -2307,7 +2309,10 @@ function residentImageBytes() {
 }
 function scheduleMemoryCheck() {
   clearTimeout(memoryTimer);
-  memoryTimer = setTimeout(() => enforceMemoryBudget().catch(error => setStatus(`Memory cache: ${error.message}`, false)), 0);
+  memoryTimer = setTimeout(() => {
+    if (state.filterBusy || state.historyBusy || state.saveBusy) { scheduleMemoryCheck(); return; }
+    enforceMemoryBudget().catch(error => setStatus(`Memory cache: ${error.message}`, false));
+  }, 100);
 }
 async function pruneImageCache(img) {
   if (img._evicting || img._hydrating) return;
@@ -2325,6 +2330,9 @@ function canReuseOriginalCache(img) {
     img.history[0].revision === currentRevision(img);
 }
 function enforceMemoryBudget(reserve = 0) {
+  // Coalesce requests instead of building a queue for every preloaded image.
+  if (memoryRunning) return memoryPass;
+  memoryRunning = true;
   const pass = memoryPass.then(async () => {
     const budget = Math.max(0, (state._memoryBudgetBytes ?? IMAGE_MEMORY_BUDGET) - reserve);
     const lru = state._hydratedLRU = state._hydratedLRU.filter(img => state.images.includes(img));
@@ -2333,6 +2341,7 @@ function enforceMemoryBudget(reserve = 0) {
     const upcoming = new Set(plannedNextCategory());
     const evictionOrder = lru.filter(img => !inActiveCategory(img) && !upcoming.has(img));
     for (const img of evictionOrder) {
+      if (state.filterBusy || state.historyBusy || state.saveBusy) { scheduleMemoryCheck(); return; }
       if (residentImageBytes() <= budget) break;
       if (img._hydrating || img._pinned || keepImageResident(img)) continue;
       if (img !== state.images[state.activeIdx] && canReuseOriginalCache(img) && await evictImage(img)) {
@@ -2345,6 +2354,7 @@ function enforceMemoryBudget(reserve = 0) {
       if (!img._lazy && !keepImageResident(img)) { img.src = null; img._fullSrcDirty = true; }
     }
     for (const img of evictionOrder) {
+      if (state.filterBusy || state.historyBusy || state.saveBusy) { scheduleMemoryCheck(); return; }
       if (residentImageBytes() <= budget) break;
       if (keepImageResident(img) || img._pinned || img._hydrating) continue;
       if (await evictImage(img)) {
@@ -2352,9 +2362,12 @@ function enforceMemoryBudget(reserve = 0) {
         if (at >= 0) lru.splice(at, 1);
       }
     }
-    for (const img of state.images) await pruneImageCache(img);
+    for (const img of state.images) {
+      if (state.filterBusy || state.historyBusy || state.saveBusy) { scheduleMemoryCheck(); return; }
+      await pruneImageCache(img);
+    }
   });
-  memoryPass = pass.catch(() => {});
+  memoryPass = pass.catch(() => {}).finally(() => { memoryRunning = false; });
   return pass;
 }
 function touchHydrated(img) {
@@ -2372,7 +2385,9 @@ async function reserveFilterMemory(img, type, value) {
   if (!Number.isFinite(reserve) || reserve + n * 8 > OPERATION_MEMORY_LIMIT) {
     throw new Error('This image is too large for the filter memory budget. Use a smaller image or blur radius.');
   }
-  await enforceMemoryBudget(reserve);
+  // The cache target is soft (working categories already exceed it). Keep
+  // the hard per-operation limit above, but never gate an edit on cache I/O.
+  scheduleMemoryCheck();
 }
 function releaseImage(img) {
   if (!img) return;
@@ -2466,23 +2481,25 @@ async function hydrateImage(img) {
       if (window.electronAPI?.cachePut) img._originalKey = await cacheValue(img, { source: dataUrl });
       else img._originalSrc = dataUrl;
     }
-    // Decode without waiting for an HTML image's presentation lifecycle.
-    // Upcoming images are off-screen and must prepare independently of it.
-    const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-    const w = bitmap.width, h = bitmap.height;
-    let surface;
+    const { pixels, w, h } = await prepareImagePixels(dataUrl, OPERATION_MEMORY_LIMIT);
+    if (img._disposed) return;
+    const { canvas, ctx } = makeCanvas(null, w, h);
     try {
-      if (img._disposed) return;
-      if (w * h * 12 > OPERATION_MEMORY_LIMIT) throw new Error("Image dimensions exceed the editing memory budget.");
-      surface = makeCanvas(bitmap, w, h);
-    } finally { bitmap.close(); }
-    const { canvas, ctx } = surface;
+      if (!await installImagePixels(ctx, pixels, w, h, () => img._disposed,
+        () => !inActiveCategory(img) && !img._pinned && (state.filterBusy || state.historyBusy || state.saveBusy))) {
+        canvas.width = canvas.height = 0;
+        return;
+      }
+    } catch (error) {
+      canvas.width = canvas.height = 0;
+      throw error;
+    }
     if (img.revision == null) { img.revision = nextRevision++; img.savedRevision = img.revision; }
     img.canvas = canvas; img.ctx = ctx; img.w = w; img.h = h;
     img.src = dataUrl; img._fullSrcDirty = false;
     img._encodedRevision = img.revision;
     if (!img.history?.length) {
-      img.history = [{ label: 'Opened image', revision: img.revision, imageData: ctx.getImageData(0, 0, w, h), mask: null, sel: null }];
+      img.history = [{ label: 'Opened image', revision: img.revision, imageData: new ImageData(pixels, w, h), mask: null, sel: null }];
       img.historyIndex = 0;
     }
     if (cached) img.mask = cached.mask;

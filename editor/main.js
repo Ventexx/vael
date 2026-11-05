@@ -11,7 +11,21 @@ app.on('will-quit', () => saveService.close());
 ipcMain.handle('cache-put', (_, value) => sessionCache.put(value));
 ipcMain.handle('cache-get', (_, key) => sessionCache.get(key));
 ipcMain.handle('cache-remove', (_, key) => sessionCache.remove(key));
-app.on('will-quit', () => sessionCache.close());
+let cacheCleanupFinished = false;
+let cacheCleanupStarted = false;
+app.on('will-quit', event => {
+  if (cacheCleanupFinished) return;
+  event.preventDefault();
+  if (cacheCleanupStarted) return;
+  cacheCleanupStarted = true;
+  sessionCache.close().catch(error => {
+    // A locked temporary cache must not turn a normal exit into a crash.
+    console.warn('Could not remove temporary session cache:', error);
+  }).finally(() => {
+    cacheCleanupFinished = true;
+    app.quit();
+  });
+});
 
 let win;
 
