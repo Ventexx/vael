@@ -74,6 +74,8 @@ When names collide, choose **Auto Rename**, **Overwrite**, or **Cancel**. Auto R
 
 Select images in one workspace folder, then right-click → **Group selected entries**. Groups appear after folders and before ungrouped files. Their colored backgrounds connect them, and their contents sort alphabetically with natural numbering.
 
+Group order is anchored to each group's first filename when it is created (or first loaded for existing groups). This saved order stays stable when members are deleted, renamed, or moved; files within the group still sort by their current names.
+
 Click a group's colored background to select its visible entries. **Ctrl-click more group backgrounds** to select several groups. You can also select images from different groups. Right-click the selection and use **Selected Groups** to apply a shared link or assign notes to every represented group. Selecting part of a group still edits that whole group's associations.
 
 In the note menu, a partially checked box means only some selected groups have that note. Check it to assign the note to all of them; uncheck it to remove it from all. Other notes stay unchanged. **Dissolve Selected Groups** removes the grouping, not the files.

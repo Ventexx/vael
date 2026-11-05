@@ -63,11 +63,20 @@ def new_group_color(used):
             return color
 
 
+def group_order_name(group):
+    """Freeze the original alphabetical anchor independently of member edits."""
+    if 'order_name' not in group:
+        group['order_name'] = min((Path(p).name for p in group['members']),
+                                  key=entry_name_key, default='')
+    return group['order_name']
+
+
 def organize_groups(config):
     """Keep groups folder-local after moves, retaining their assigned notes."""
     import uuid
     result, colors, fragments = [], {}, {}
     for group in config.get('groups', []):
+        group_order_name(group)
         family = group.get('family', group['id'])
         for member in dict.fromkeys(group['members']):
             key = (family, str(Path(member).parent))
@@ -99,11 +108,13 @@ def create_group(config, paths):
     if any(not Path(p).is_file() for p in paths):
         raise ValueError('Groups contain files, not folders.')
     for group in config.setdefault('groups', []):
+        group_order_name(group)
         group['members'] = [p for p in group['members'] if p not in paths]
     config['groups'] = [g for g in config['groups'] if g['members']]
     folder = Path(paths[0]).parent
     used = {g['color'] for g in config['groups'] if Path(g['members'][0]).parent == folder}
     group = dict(id=uuid.uuid4().hex, members=paths, color=new_group_color(used), notes=[])
+    group_order_name(group)
     config['groups'].append(group)
     assign_first_note(config)
     return group
@@ -908,7 +919,7 @@ class MediaFilter(QSortFilterProxyModel):
     def group_sort_key(self, group):
         if group['id'] not in self._group_sort_keys:
             self._group_sort_keys[group['id']] = (
-                min(entry_name_key(Path(p).name) for p in group['members']), group['id'])
+                entry_name_key(group_order_name(group)), group['id'])
         return self._group_sort_keys[group['id']]
 
     def filterAcceptsRow(self, row, parent):
@@ -932,7 +943,7 @@ class MediaFilter(QSortFilterProxyModel):
                 return bool(ga)
             if ga and gb:
                 if ga['id'] != gb['id']:
-                    # Order whole groups by their first filename, not random UUIDs.
+                    # Member edits must not move the whole group to another position.
                     return self.group_sort_key(ga) < self.group_sort_key(gb)
                 return self.name_key(a.name) < self.name_key(b.name)
         mode = getattr(self.browser, 'sort_mode', 'name')
@@ -6411,6 +6422,8 @@ class Window(QMainWindow):
     def __init__(self, config=None):
         super().__init__()
         self.config = config if config is not None else read_settings()
+        for group in self.config.get('groups', []):
+            group_order_name(group)
         self.config.pop('flags', None)
         self.config.setdefault('groups', [])
         self.config.setdefault('notes', [])
@@ -7195,6 +7208,8 @@ class Window(QMainWindow):
 
     def reconcile_references(self, results, save=True):
         # Moves and renames update pins and browser paths.
+        for group in self.config.get('groups', []):
+            group_order_name(group)
         transferred = []
         for old_text, value in results:
             if isinstance(value, HistoryChange):

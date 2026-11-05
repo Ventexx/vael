@@ -100,6 +100,59 @@ class ToolbarTests(unittest.TestCase):
         finally:
             w.config.pop('rework_layout', None)
 
+    def test_group_order_survives_member_edits_and_settings_reload(self):
+        w = self.window
+        saved = copy.deepcopy(w.config['groups'])
+        proxy = w.sorter.proxy
+        with tempfile.TemporaryDirectory(dir=self.root) as folder:
+            paths = [Path(folder) / name for name in ('a1.txt', 'z1.txt', 'm1.txt', 'm2.txt')]
+            for path in paths:
+                path.write_text('test', encoding='utf-8')
+            try:
+                # Legacy groups have no stored anchor. Preserve their existing order.
+                w.config['groups'] = [
+                    dict(id='first', members=list(map(str, paths[:2])), notes=[], color='#568577'),
+                    dict(id='second', members=list(map(str, paths[2:])), notes=[], color='#785687')]
+
+                def order():
+                    proxy.invalidate()
+                    return [g['id'] for g in sorted(w.config['groups'], key=proxy.group_sort_key)]
+
+                self.assertEqual(order(), ['first', 'second'])
+                paths[0].unlink()
+                w.reconcile_references([(str(paths[0]), None)])
+                self.assertEqual(order(), ['first', 'second'])
+                renamed = Path(folder) / '00.txt'
+                paths[2].rename(renamed)
+                w.reconcile_references([(str(paths[2]), renamed)])
+                self.assertEqual(order(), ['first', 'second'])
+                w.config['groups'] = sorter.read_settings()['groups']
+                self.assertEqual(order(), ['first', 'second'])
+                # Splitting into another folder preserves the original anchor.
+                destination = Path(folder) / 'child'
+                destination.mkdir()
+                moved = destination / paths[3].name
+                paths[3].rename(moved)
+                w.reconcile_references([(str(paths[3]), moved)])
+                self.assertEqual([g['order_name'] for g in w.config['groups']],
+                                 ['a1.txt', 'm1.txt', 'm1.txt'])
+            finally:
+                w.config['groups'] = saved
+                proxy.invalidate()
+                w.persist()
+
+    def test_regrouping_keeps_original_group_anchor(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as folder:
+            paths = [Path(folder) / name for name in ('a.txt', 'z.txt', 'b.txt')]
+            for path in paths:
+                path.write_text('test', encoding='utf-8')
+            config = {'groups': [dict(id='old', members=list(map(str, paths[:2])),
+                                     notes=[], color='#568577')]}
+            new = sorter.create_group(config, [paths[0], paths[2]])
+            self.assertEqual(config['groups'][0]['order_name'], 'a.txt')
+            self.assertEqual(config['groups'][0]['members'], [str(paths[1])])
+            self.assertEqual(new['order_name'], 'a.txt')
+
     def test_split_tooltip_describes_next_action(self):
         toggle = self.window.split_toggle
         toggle.setChecked(False)
