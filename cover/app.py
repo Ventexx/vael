@@ -6763,6 +6763,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self._closing = True
+        self.setEnabled(False)
         if active:
             self.setEnabled(False)
             for owner in owners:
@@ -6774,29 +6775,27 @@ class MainWindow(QMainWindow):
             event.ignore()
             QTimer.singleShot(100, self.close)
             return
+        # If a "Load Selected Folders" bulk scan/preload is still in
+        # flight, ask it to stop rather than letting its worker threads
+        # keep touching the (about-to-be-destroyed) UI/cache.
+        if not getattr(self, "_stopping_images", False):
+            self._stopping_images = True
+            for browser in self.findChildren(ImageBrowser):
+                browser.bulk_loader.cancel()
+            PIXMAP_WORKER.stop()
+        # Keep Qt's event loop alive until every decoder and pool has stopped.
+        if (PIXMAP_WORKER.isRunning() or not _BULK_SCAN_POOL.waitForDone(0)
+                or not _BULK_PIXMAP_POOL.waitForDone(0)
+                or not QThreadPool.globalInstance().waitForDone(0)):
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
         if not self._is_windows:
             QApplication.instance().removeEventFilter(self)
         self.config_data["window_geometry"] = {
             "x": self.x(), "y": self.y(), "width": self.width(), "height": self.height(),
         }
         self.persist_all()
-        # If a "Load Selected Folders" bulk scan/preload is still in
-        # flight, ask it to stop rather than letting its worker threads
-        # keep touching the (about-to-be-destroyed) UI/cache.
-        try:
-            for browser in self.findChildren(ImageBrowser):
-                browser.bulk_loader.cancel()
-        except Exception:
-            pass
-        # Cleanly stop the shared background pixmap-loading thread so Qt
-        # doesn't warn (or abort) about a running QThread at interpreter exit.
-        PIXMAP_WORKER.stop()
-        PIXMAP_WORKER.wait(1500)
-        # Same for the bulk-load pools: give queued/running tasks a bounded
-        # window to notice the cancel flag and exit cleanly before we tear
-        # the process down, instead of leaving Qt to abort mid-task.
-        _BULK_SCAN_POOL.waitForDone(1500)
-        _BULK_PIXMAP_POOL.waitForDone(1500)
         super().closeEvent(event)
 
     # -- hotkeys -------------------------------------------------------
