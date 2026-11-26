@@ -19,6 +19,7 @@ import json
 import queue
 import datetime
 import threading
+import math
 from collections import OrderedDict
 import requests
 from pathlib import Path
@@ -135,6 +136,76 @@ _LAST_LOAD_WARNING = None
 _LAST_SAVE_ERROR = None
 
 
+def validate_config(data):
+    """Keep usable settings and report each invalid field independently."""
+    merged = copy.deepcopy(DEFAULTS)
+    merged.update(data)
+    warnings = []
+    nonempty = lambda value: isinstance(value, str) and bool(value.strip())
+    positive = lambda value: type(value) is int and 0 < value <= 16777215
+    scalar = lambda value: (isinstance(value, str) or type(value) in (int, bool)
+                            or (type(value) is float and math.isfinite(value)))
+    fields = {
+        "server": nonempty, "output_dir": nonempty,
+        "sidebar_width": positive, "workflow_sidebar_width": positive,
+        "center_split_roster_height": lambda value: value is None or (type(value) is int and 0 <= value <= 16777215),
+        "window_geometry": lambda value: value is None or (isinstance(value, dict)
+            and all(type(value.get(k)) is int and -2147483648 < value[k] < 2147483647 for k in ("x", "y"))
+            and all(positive(value.get(k)) for k in ("width", "height"))),
+    }
+    for key, valid in fields.items():
+        if not valid(merged[key]):
+            merged[key] = copy.deepcopy(DEFAULTS[key])
+            warnings.append(f"{key}: invalid value; using the default")
+    # Older versions stored folder assignments as an object of preset names.
+    if isinstance(merged["folder_workflows"], dict):
+        merged["folder_workflows"] = folder_workflow_rules(merged)
+    lists = {
+        "tabs": lambda entry: isinstance(entry, dict),
+        "image_selection_folders": lambda entry: isinstance(entry, dict) and nonempty(entry.get("path")),
+        "ignore_folder_patterns": lambda entry: isinstance(entry, dict) and nonempty(entry.get("pattern"))
+            and entry.get("mode") in ("starts_with", "contains"),
+        "folder_workflows": lambda entry: isinstance(entry, dict) and nonempty(entry.get("pattern"))
+            and nonempty(entry.get("workflow_id")),
+    }
+    for key, valid in lists.items():
+        value = merged[key]
+        merged[key] = []
+        if not isinstance(value, list):
+            warnings.append(f"{key}: expected a list; using an empty list")
+            continue
+        for index, entry in enumerate(value):
+            if not valid(entry):
+                warnings.append(f"{key}[{index}]: invalid entry skipped")
+                continue
+            if key == "folder_workflows":
+                try:
+                    folder_pattern_regex(entry["pattern"])
+                except ValueError as exc:
+                    warnings.append(f"{key}[{index}]: {exc}")
+                    continue
+            merged[key].append(dict(entry))
+    seen_ids = set()
+    for index, tab in enumerate(merged["tabs"]):
+        tab_fields = {
+            "workflow_path": (None, lambda value: value is None or isinstance(value, str)),
+            "optional_identifier": ("", lambda value: isinstance(value, str)),
+            "slot_node_order": ([], lambda value: isinstance(value, list) and all(isinstance(v, str) for v in value)),
+            "param_values": ({}, lambda value: isinstance(value, dict) and all(scalar(v) for v in value.values())),
+        }
+        for key, (default, valid) in tab_fields.items():
+            if key in tab and not valid(tab[key]):
+                tab[key] = default
+                warnings.append(f"tabs[{index}].{key}: invalid value reset")
+        identifier = tab.get("workflow_id")
+        if not nonempty(identifier) or identifier in seen_ids:
+            if identifier is not None:
+                warnings.append(f"tabs[{index}].workflow_id: invalid or duplicate ID replaced")
+            tab["workflow_id"] = str(uuid.uuid4())
+        seen_ids.add(tab["workflow_id"])
+    return merged, warnings
+
+
 def load_config():
     """Load workflows_config.json, merged with DEFAULTS for any missing
     keys. If the file exists but can't be parsed -- e.g. it was left
@@ -150,8 +221,9 @@ def load_config():
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("config file does not contain a JSON object")
-            merged = dict(DEFAULTS)
-            merged.update(data)
+            merged, warnings = validate_config(data)
+            if warnings:
+                _LAST_LOAD_WARNING = "Some saved settings were invalid. Valid settings and workflows were retained:\n\n" + "\n".join(warnings)
             return merged
         except Exception as e:
             backup_path = CONFIG_FILE.with_name(
@@ -171,7 +243,7 @@ def load_config():
                     "it will be overwritten the next time settings are saved."
                 )
             )
-    return dict(DEFAULTS)
+    return copy.deepcopy(DEFAULTS)
 
 
 def save_config(config):
@@ -1525,14 +1597,33 @@ class WorkflowState(QObject):
 
         self.optional_node_id = find_node(wf, self.optional_identifier) if self.optional_identifier else None
         self.param_values = {}
+        invalid_params = []
         for key, (value, _type_name) in self.editable_params().items():
             # Restore whatever the user last set for this key (saved in the
             # config file), falling back to the workflow's own default the
             # first time a key is seen.
-            self.param_values[key] = self.saved_param_values.get(key, value)
+            saved = self.saved_param_values.get(key, value)
+            try:
+                if _type_name == "int":
+                    saved = int(saved)
+                    if not -2147483648 <= saved <= 2147483647:
+                        raise ValueError("Integer out of range")
+                elif _type_name == "float":
+                    saved = float(saved)
+                    if not math.isfinite(saved) or not -1e12 <= saved <= 1e12:
+                        raise ValueError("Number out of range")
+                elif not isinstance(saved, str):
+                    raise ValueError("Expected text")
+            except (ValueError, TypeError, OverflowError):
+                saved = value
+                invalid_params.append(key)
+            self.param_values[key] = saved
 
         self.slotsRebuilt.emit()
-        self._set_status(f"Loaded. {len(self.slots)} image input(s) found.")
+        if invalid_params:
+            self._set_status("Loaded; invalid saved parameters reset: " + ", ".join(invalid_params), error=True)
+        else:
+            self._set_status(f"Loaded. {len(self.slots)} image input(s) found.")
 
     def editable_params(self):
         if not self.optional_node_id or not self.raw_workflow:
