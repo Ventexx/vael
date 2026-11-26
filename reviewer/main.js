@@ -101,20 +101,49 @@ function migrateLegacyConfig() {
 }
 migrateLegacyConfig();
 
+let configLoadError = null;
+const reportedConfigErrors = new Set();
+function reportConfigError(error) {
+  const message = error.message || String(error);
+  if (reportedConfigErrors.has(message)) return;
+  reportedConfigErrors.add(message);
+  app.whenReady().then(() => dialog.showErrorBox('Reviewer settings could not be saved or loaded',
+    `${CONFIG_PATH}\n\n${message}\n\nThe existing settings file was kept. Fix the file or its permissions before saving again.`));
+}
 function loadConfig() {
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
     const cfg = JSON.parse(raw);
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('Settings must be a JSON object.');
     if (!Array.isArray(cfg.folders)) cfg.folders = [];
     if (!Array.isArray(cfg.hiddenFolders)) cfg.hiddenFolders = [];
+    configLoadError = null;
     return cfg;
   } catch (e) {
+    configLoadError = e.code === 'ENOENT' ? null : e;
+    if (configLoadError) reportConfigError(e);
     return { folders: [], hiddenFolders: [] };
   }
 }
 function saveConfig(cfg) {
-  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+  const temporary = `${CONFIG_PATH}.${require('crypto').randomUUID()}.tmp`;
+  let fd;
+  try {
+    if (configLoadError) throw configLoadError;
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fd = fs.openSync(temporary, 'wx');
+    fs.writeFileSync(fd, JSON.stringify(cfg, null, 2));
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(temporary, CONFIG_PATH);
+    reportedConfigErrors.clear();
+  } catch (error) {
+    reportConfigError(error);
+    throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(temporary); } catch (_) { /* No temporary file after publication. */ }
+  }
 }
 
 ipcMain.handle('get-config', () => loadConfig());
@@ -134,7 +163,7 @@ function saveWindowStateNow() {
   const zoomFactor = win.webContents.getZoomFactor();
   const cfg = loadConfig();
   cfg.windowState = { ...bounds, isMaximized, zoomFactor };
-  saveConfig(cfg);
+  try { saveConfig(cfg); } catch (_) { /* Already reported; keep the window usable. */ }
 }
 let saveStateTimer = null;
 function scheduleSaveWindowState() {
