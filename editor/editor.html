@@ -2767,12 +2767,17 @@ const IMPORT_BATCH_SIZE = 6;
 async function loadImagesWithProgress(items, loaderFn) {
   const total = items.length;
   const results = new Array(total);
+  const failures = [];
   beginImportProgress(total);
   try {
     for (let i = 0; i < total; i += IMPORT_BATCH_SIZE) {
       const batch = items.slice(i, i + IMPORT_BATCH_SIZE);
-      const batchResults = await Promise.all(batch.map(item => loaderFn(item).catch(() => null)));
-      batchResults.forEach((r, k) => { results[i + k] = r; });
+      const batchResults = await Promise.allSettled(batch.map(item => Promise.resolve().then(() => loaderFn(item))));
+      batchResults.forEach((result, k) => {
+        if (result.status === 'fulfilled' && result.value) results[i + k] = result.value;
+        else failures.push({ path: batch[k].path || batch[k].name || String(batch[k]),
+          error: result.reason?.message || String(result.reason || 'Image could not be decoded') });
+      });
       bumpImportProgress(batch.length);
       // Yield to the browser so it can paint the updated status/progress bar
       // and stay responsive to input, instead of running every batch back
@@ -2782,20 +2787,27 @@ async function loadImagesWithProgress(items, loaderFn) {
   } finally {
     endImportProgress();
   }
-  return results;
+  return { images: results.filter(Boolean), failures };
+}
+function reportImportFailures(failures) {
+  if (!failures.length) return;
+  setStatus(`${failures.length} image(s) or paths could not be loaded`, false);
+  alert('Some images or paths could not be loaded. Successfully loaded images were kept.\n\n' +
+    failures.map(item => `${item.path}: ${item.error}`).join('\n'));
 }
 async function addImages(files) {
   const imageFiles = [...files].filter(f => f.type.startsWith('image/'));
   if (!imageFiles.length) { setStatus('No valid image files', false); return; }
   const startAt = state.images.length;
-  const newImgs = (await loadImagesWithProgress(imageFiles, loadImageFile)).filter(Boolean);
-  if (!newImgs.length) { setStatus('Failed to load images', false); return; }
+  const { images: newImgs, failures } = await loadImagesWithProgress(imageFiles, loadImageFile);
+  if (!newImgs.length) { reportImportFailures(failures); return; }
   newImgs.forEach(img => state.images.push(img));
   renderGallery();
   selectImage(startAt);
   if (state.galleryState === 'hidden') setGalleryState('side');
   setStatus(`Added ${newImgs.length} image${newImgs.length > 1 ? 's' : ''}`, true);
   if (newImgs.length > 1) promptNameCategory(startAt, newImgs.length);
+  reportImportFailures(failures);
 }
 // Whole-folder open (Electron only): main process reads the directory and
 // hands back {name, path} for every image so the renderer never
