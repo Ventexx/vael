@@ -613,8 +613,19 @@ const redoBtn  = document.getElementById('redo-btn');
 const cleanBtn = document.getElementById('clean-btn');
 
 function cloneItems() { return JSON.parse(JSON.stringify(items)); }
+const MAX_ITEMS = 10000, MAX_TEXT_LENGTH = 100000;
+function acceptText(value) {
+  if (value.length <= MAX_TEXT_LENGTH) return true;
+  alert('Text is limited to 100,000 characters. Your previous content was kept.');
+  return false;
+}
+function acceptAddition(collection) {
+  if (collection.length < MAX_ITEMS) return true;
+  alert('Lists and per-task notes are limited to 10,000 entries.');
+  return false;
+}
 function validateItems(value, renewIds = false) {
-  if (!Array.isArray(value) || value.length > 10000) throw new Error('Expected a list of at most 10,000 items.');
+  if (!Array.isArray(value) || value.length > MAX_ITEMS) throw new Error('Expected a list of at most 10,000 items.');
   const ids = new Set();
   let next = 0;
   function identifier(id) {
@@ -624,7 +635,7 @@ function validateItems(value, renewIds = false) {
     return id;
   }
   function text(value) {
-    if (typeof value !== 'string' || value.length > 100000) throw new Error('Task, header, and note text must be strings of at most 100,000 characters.');
+    if (typeof value !== 'string' || value.length > MAX_TEXT_LENGTH) throw new Error('Task, header, and note text must be strings of at most 100,000 characters.');
     return value;
   }
   return value.map(node => {
@@ -644,7 +655,7 @@ function validateItems(value, renewIds = false) {
       }
       if (result.done && result.rejected) throw new Error('A task cannot be both completed and rejected.');
       if (node.notes !== undefined) {
-        if (!Array.isArray(node.notes) || node.notes.length > 10000) throw new Error('Notes must be a list of at most 10,000 entries.');
+        if (!Array.isArray(node.notes) || node.notes.length > MAX_ITEMS) throw new Error('Notes must be a list of at most 10,000 entries.');
         result.notes = node.notes.map(note => {
           if (!note || typeof note !== 'object') throw new Error('Invalid note.');
           return { id: identifier(note.id), text: text(note.text) };
@@ -1002,6 +1013,7 @@ function editTask(item, el) {
     saved = true;
     el.contentEditable = 'false';
     const t = el.textContent.trim();
+    if (!acceptText(t)) { render(); return; }
     if (t && t !== item.text) {
       item.text = t;
       pushHistory(b);
@@ -1038,6 +1050,7 @@ function editHeader(item, el) {
     saved = true;
     el.contentEditable = 'false';
     const t = el.textContent.trim();
+    if (!acceptText(t)) { render(); return; }
     if (t !== item.header) {
       item.header = t;
       pushHistory(b);
@@ -1072,6 +1085,7 @@ function editNote(item, note, el) {
     saved = true;
     el.contentEditable = 'false';
     const t = el.textContent.trim();
+    if (!acceptText(t)) { render(); return; }
     if (t !== note.text) {
       note.text = t;
       pushHistory(b);
@@ -1108,6 +1122,7 @@ function toggleHeader(item) {
 }
 
 function addNote(item) {
+  if (!acceptAddition(item.notes || [])) return;
   const b = cloneItems();
   if (!item.notes) item.notes = [];
   item.notes.push({ id: ++idCounter, text: '' });
@@ -1180,6 +1195,7 @@ function isCollapsedAt(index) {
 }
 
 function addTaskToSection(section) {
+  if (!acceptAddition(items)) return;
   const index = items.indexOf(section);
   if (index < 0 || section.type !== 'spacer') return;
   const before = cloneItems();
@@ -1199,6 +1215,7 @@ function addTaskToSection(section) {
 
 function addTask() {
   const text = input.value.trim();
+  if (!acceptText(text) || !acceptAddition(items)) return;
   if (!text) { input.focus(); return; }
   const b = cloneItems();
   const it = { id: ++idCounter, type: 'task', text, done: false };
@@ -1212,6 +1229,7 @@ function addTask() {
 }
 
 function addSpacer() {
+  if (!acceptAddition(items)) return;
   const b = cloneItems();
   const it = { id: ++idCounter, type: 'spacer' };
   items.push(it);
@@ -1292,6 +1310,8 @@ const DRAFT_KEY = 'vael_draft';
 let draftSaved = true;
 function persistDraft() {
   if (!hasStorageLock) return false;
+  try { validateItems(items); }
+  catch (error) { storageError(DRAFT_KEY, error); return draftSaved = false; }
   const draft = { items: cloneItems(), profileId: currentProfileId,
     dirty: isDirty, input: input.value, savedAt: Date.now() };
   // An empty input and a successfully saved profile need no recovery snapshot.
