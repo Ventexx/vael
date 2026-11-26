@@ -511,8 +511,13 @@ class PixmapWorker(QThread):
             self._pending[id(target)] = request
             # A viewer request takes priority over queued thumbnails.
             self._pending.move_to_end(id(target), last=not preview)
-            while len(self._pending) > 1024:
-                self._pending.popitem(last=False)
+            # Keep one lightweight request per live recipient. Dropping live
+            # requests leaves large folders blank with no automatic retry.
+            # Periodically prune vanished recipients without discarding work.
+            if len(self._pending) >= 1024 and len(self._pending) % 256 == 0:
+                for identity, pending in list(self._pending.items()):
+                    if pending[0]() is None:
+                        del self._pending[identity]
         self._wake.set()
 
     def _deliver(self, recipient, token: int, image: QImage, error: str) -> None:
