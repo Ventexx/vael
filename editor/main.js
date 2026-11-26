@@ -82,20 +82,25 @@ const IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif']);
 
 // Discover paths first; thumbnails are requested separately by renderer workers.
 // No image decoding or synchronous filesystem walk on the window's main thread.
-async function readImagesInSingleDir(dir, strict = false) {
+async function readImagesInSingleDir(dir, strict = false, failures = []) {
   let entries;
   try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
-  catch (error) { if (strict) throw error; return null; }
+  catch (error) { if (strict) throw error; failures.push({ path: dir, error: error.message }); return null; }
   const images = entries
     .filter(e => e.isFile() && IMG_EXT.has(path.extname(e.name).toLowerCase()))
     .map(e => e.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
     .map(name => ({ name, path: path.join(dir, name) }));
+  const readable = [];
   for (const image of images) {
-    const stat = await fs.promises.stat(image.path);
-    image.diskVersion = JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
+    try {
+      const stat = await fs.promises.stat(image.path);
+      if (!stat.isFile()) throw new Error('The image is no longer a regular file.');
+      image.diskVersion = JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
+      readable.push(image);
+    } catch (error) { failures.push({ path: image.path, error: error.message }); }
   }
-  return images;
+  return readable;
 }
 
 ipcMain.handle('read-thumbnail-source', (_, filePath) => fs.promises.readFile(filePath));
@@ -112,8 +117,8 @@ ipcMain.handle('read-thumbnail-source', (_, filePath) => fs.promises.readFile(fi
 // original absolute `path` on disk (from readImagesInSingleDir), so saving
 // later writes back to wherever the file actually lives — the merging here
 // is purely an in-app grouping and never moves anything on disk.
-async function readImagesFromDir(dir, strict = false) {
-  const firstLayer = await readImagesInSingleDir(dir, strict);
+async function readImagesFromDir(dir, strict = false, failures = []) {
+  const firstLayer = await readImagesInSingleDir(dir, strict, failures);
   if (firstLayer === null) return null; // dir itself unreadable/missing
 
   let subdirNames;
@@ -123,13 +128,13 @@ async function readImagesFromDir(dir, strict = false) {
       .map(e => e.name)
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
   } catch (e) {
-    if (strict) throw e;
+    failures.push({ path: dir, error: e.message });
     subdirNames = [];
   }
 
   let images = firstLayer;
   for (const subName of subdirNames) {
-    const subImages = await readImagesInSingleDir(path.join(dir, subName), strict);
+    const subImages = await readImagesInSingleDir(path.join(dir, subName), false, failures);
     if (subImages && subImages.length) images = images.concat(subImages);
   }
   return images;
@@ -137,7 +142,9 @@ async function readImagesFromDir(dir, strict = false) {
 
 ipcMain.handle('reload-folder', async (_, dir) => {
   if (typeof dir !== 'string' || !path.isAbsolute(dir)) throw new Error('Invalid folder path.');
-  return readImagesFromDir(dir, true);
+  const failures = [];
+  const images = await readImagesFromDir(dir, true, failures);
+  return { images, failures };
 });
 
 ipcMain.handle('open-folder', async () => {
@@ -147,9 +154,9 @@ ipcMain.handle('open-folder', async () => {
   });
   if (canceled || !filePaths || !filePaths[0]) return null;
   const dir = filePaths[0];
-  const images = await readImagesFromDir(dir);
-  if (images === null) return null;
-  return { dir, images };
+  const failures = [];
+  const images = await readImagesFromDir(dir, true, failures);
+  return { dir, images, failures };
 });
 
 // Drag-and-drop of a folder from the OS: Electron gives every dropped File —
@@ -170,8 +177,9 @@ ipcMain.handle('inspect-dropped-paths', async (_, paths) => {
       continue;
     }
     if (stat.isDirectory()) {
-      const images = (await readImagesFromDir(p)) || [];
-      results.push({ path: p, isDirectory: true, name: path.basename(p), images });
+      const failures = [];
+      const images = (await readImagesFromDir(p, false, failures)) || [];
+      results.push({ path: p, isDirectory: true, name: path.basename(p), images, failures });
     } else {
       results.push({ path: p, isDirectory: false });
     }

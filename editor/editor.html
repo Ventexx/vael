@@ -2822,17 +2822,18 @@ async function triggerOpenFolder() {
   try {
     result = await window.electronAPI.openFolder();
   } catch (e) {
-    setStatus('Failed to open folder', false);
+    setStatus(`Failed to open folder: ${e.message}`, false);
     return;
   }
   if (!result) { setStatus('Open folder cancelled', false); return; }
   const folderName = result.dir.split(/[\\/]/).pop() || result.dir;
-  importFolders([{ name: folderName, path: result.dir, images: result.images }]);
+  importFolders([{ name: folderName, path: result.dir, images: result.images, failures: result.failures }]);
 }
 // Register all discovered folders before any preview decoding. Focus once,
 // rather than opening a full-resolution image from every folder in turn.
 function importFolders(folders) {
   const imported = [];
+  const failures = folders.flatMap(folder => folder.failures || []);
   let categoryCount = 0;
   for (const folder of folders) {
     if (!folder.images?.length) continue;
@@ -2846,11 +2847,16 @@ function importFolders(folders) {
     }
     categoryCount++;
   }
-  if (!imported.length) { setStatus('No images found in the selected folders', false); return 0; }
+  if (!imported.length) {
+    setStatus('No images found in the selected folders', false);
+    reportImportFailures(failures);
+    return 0;
+  }
   if (state.galleryState === 'hidden') setGalleryState('side');
   if (categoryCount > 1) focusFirstCategory();
   else selectImage(state.images.indexOf(imported[0]));
   thumbnailQueue.add(imported);
+  reportImportFailures(failures);
   return categoryCount;
 }
 async function reloadCategory(id) {
@@ -2864,7 +2870,7 @@ async function reloadCategory(id) {
   renderCategoryPanel();
   setStatus(`Checking folder for "${categoryLabel(cat)}"…`, true);
   try {
-    const files = await window.electronAPI.reloadFolder(cat.folderPath);
+    const { images: files, failures } = await window.electronAPI.reloadFolder(cat.folderPath);
     if (!state.categories.includes(cat)) return;
     if (busy() || savingCategory()) { setStatus('An image operation started. Reload the folder again when it finishes.', false); return; }
     const active = state.images[state.activeIdx];
@@ -2886,7 +2892,10 @@ async function reloadCategory(id) {
       }
     }
     for (const img of byPath.values()) {
-      if (img.unsaved) { next.push(img); protectedCount++; }
+      const normalize = value => value.replace(/\\/g, '/').toLowerCase();
+      const failed = failures.some(entry => normalize(img.path) === normalize(entry.path)
+        || normalize(img.path).startsWith(normalize(entry.path).replace(/\/$/, '') + '/'));
+      if (img.unsaved || failed) { next.push(img); if (img.unsaved) protectedCount++; }
     }
     const keep = new Set(next);
     previous.filter(img => !keep.has(img)).forEach(releaseImage);
@@ -2907,6 +2916,7 @@ async function reloadCategory(id) {
     renderGallery();
     thumbnailQueue.add(added);
     setStatus(`Reloaded "${categoryLabel(cat)}" — ${next.length} images${protectedCount ? `; kept ${protectedCount} unsaved images` : ''}`, true);
+    reportImportFailures(failures);
   } catch (error) {
     setStatus(`Could not reload folder: ${error.message}`, false);
   } finally { cat.reloading = false; renderCategoryPanel(); }
