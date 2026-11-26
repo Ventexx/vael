@@ -263,6 +263,11 @@ ipcMain.handle('delete-files', async (_, items) => {
   for (const it of items || []) {
     const filePath = path.join(it.dir, it.name);
     try {
+      const stat = await fs.promises.lstat(filePath);
+      const version = JSON.stringify([stat.size, stat.mtimeMs, stat.ctimeMs]);
+      if (!stat.isFile() || !it.version || version !== it.version) {
+        throw new Error('Image changed since it was marked. Rescan, review it again, then unmark and mark it to retry.');
+      }
       await shell.trashItem(filePath);
       results.push({ dir: it.dir, name: it.name, ok: true });
     } catch (e) {

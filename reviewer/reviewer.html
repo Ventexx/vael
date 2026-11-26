@@ -649,7 +649,7 @@ let imageCache = {};               // group metadata only; pixel previews use th
 let canvasGeneration = 0;
 let expandedGroups = new Set();    // keys currently expanded in the canvas list
 let groupSectionEls = new Map();   // key -> the .group-section DOM node currently on screen
-let markedForDeletion = {};        // key -> Set(filenames)
+let markedForDeletion = {};        // key -> Map(filename, reviewed version)
 let deleteInProgress = false;
 let rightClickMarks = false;       // false: right-click flags the set (default) | true: right-click marks that image for deletion
 let letterFilter = '';             // '' = show everything | 'A'/'B'/... = only show sets whose label starts with this letter
@@ -1537,8 +1537,9 @@ function updateGroupBodyMarks(dir, base) {
 async function toggleMark(dir, base, name) {
   if (deleteInProgress) return;
   const k = key(dir, base);
-  const set = markedForDeletion[k] || (markedForDeletion[k] = new Set());
-  if (set.has(name)) set.delete(name); else set.add(name);
+  const set = markedForDeletion[k] || (markedForDeletion[k] = new Map());
+  if (set.has(name)) set.delete(name);
+  else set.set(name, ensureImagesLoaded(dir, base).find(image => image.name === name)?.version);
 
   if (reviewMode === 'general') updateWallTileMark(dir, base, name);
   else updateGroupTileMark(dir, base, name);
@@ -1553,9 +1554,11 @@ async function markAllForDeletion(dir, base) {
   const k = key(dir, base);
   const images = await ensureImagesLoaded(dir, base);
   if (!images.length) return;
-  const set = markedForDeletion[k] || (markedForDeletion[k] = new Set());
+  if (deleteInProgress) return;
+  const set = markedForDeletion[k] || (markedForDeletion[k] = new Map());
   const allAlreadyMarked = images.every(i => set.has(i.name));
-  if (allAlreadyMarked) set.clear(); else images.forEach(i => set.add(i.name));
+  if (allAlreadyMarked) set.clear();
+  else images.forEach(i => { if (!set.has(i.name)) set.set(i.name, i.version); });
 
   if (!expandedGroups.has(k)) toggleGroupSection(dir, base); else updateGroupBodyMarks(dir, base);
   if (focusGroupKey === k) updateFocusView();
@@ -1947,7 +1950,7 @@ async function executeDelete() {
   const items = [];
   for (const k in markedForDeletion) {
     const [dir] = JSON.parse(k);
-    for (const name of markedForDeletion[k]) items.push({ dir, name });
+    for (const [name, version] of markedForDeletion[k]) items.push({ dir, name, version });
   }
   if (!items.length) return;
   closeConfirm();
