@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { outputFormat, decodeExport, fileVersion, readSnapshot, atomicSave } = require('./image-files');
@@ -63,7 +63,12 @@ function createWindow() {
 
   win.loadFile('editor.html');
 
-  globalShortcut.register('F12', () => win.webContents.toggleDevTools());
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12') {
+      event.preventDefault();
+      win.webContents.toggleDevTools();
+    }
+  });
 
   // Let the renderer handle close confirmation
   win.on('close', e => {
