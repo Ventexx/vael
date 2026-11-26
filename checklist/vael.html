@@ -673,10 +673,18 @@ function parseImport(raw) {
   return validateItems(Array.isArray(data) ? data : data?.items, true);
 }
 function pushHistory(b) {
-  undoStack.push(b);
+  rememberHistory(undoStack, b);
   redoStack = [];
   updateTB();
   autoSaveIfOpen();
+}
+function rememberHistory(stack, snapshot) {
+  const serialized = JSON.stringify(snapshot);
+  stack.push(serialized);
+  let bytes = stack.reduce((total, entry) => total + entry.length * 2, 0);
+  while (stack.length > 100 || bytes > 4 * 1024 * 1024) {
+    bytes -= stack.shift().length * 2;
+  }
 }
 function updateTB() {
   undoBtn.disabled = !hasStorageLock || !undoStack.length;
@@ -694,8 +702,8 @@ function autoSaveIfOpen() {
   }
   persistDraft();
 }
-function undo() { if (!undoStack.length) return; redoStack.push(cloneItems()); items = undoStack.pop(); render(); updateTB(); autoSaveIfOpen(); }
-function redo() { if (!redoStack.length) return; undoStack.push(cloneItems()); items = redoStack.pop(); render(); updateTB(); autoSaveIfOpen(); }
+function undo() { if (!undoStack.length) return; rememberHistory(redoStack, items); items = JSON.parse(undoStack.pop()); render(); updateTB(); autoSaveIfOpen(); }
+function redo() { if (!redoStack.length) return; rememberHistory(undoStack, items); items = JSON.parse(redoStack.pop()); render(); updateTB(); autoSaveIfOpen(); }
 
 const DRAG_SVG  = `<svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg>`;
 const X_SVG     = `<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="1" y1="1" x2="7" y2="7"/><line x1="7" y1="1" x2="1" y2="7"/></svg>`;
@@ -1308,11 +1316,13 @@ let currentProfileId = null;
 let isDirty = false;
 const DRAFT_KEY = 'vael_draft';
 let draftSaved = true;
+let draftTimer = null;
 function persistDraft() {
+  clearTimeout(draftTimer); draftTimer = null;
   if (!hasStorageLock) return false;
   try { validateItems(items); }
   catch (error) { storageError(DRAFT_KEY, error); return draftSaved = false; }
-  const draft = { items: cloneItems(), profileId: currentProfileId,
+  const draft = { items, profileId: currentProfileId,
     dirty: isDirty, input: input.value, savedAt: Date.now() };
   // An empty input and a successfully saved profile need no recovery snapshot.
   if ((currentProfileId !== null || !items.length) && !isDirty && !input.value) {
@@ -1339,7 +1349,12 @@ function restoreDraft() {
     return true;
   } catch (error) { storageError(DRAFT_KEY, error, true); draftSaved = false; return false; }
 }
-input.addEventListener('input', persistDraft);
+input.addEventListener('input', () => {
+  if (!hasStorageLock) return;
+  draftSaved = false;
+  // Coalesce typing, with a bounded delay even during continuous input.
+  if (draftTimer === null) draftTimer = setTimeout(persistDraft, 250);
+});
 function finishActiveEdit() {
   if (document.activeElement?.isContentEditable) document.activeElement.blur();
 }
