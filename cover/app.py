@@ -1705,7 +1705,7 @@ def _natural_sort_key(path_str):
 THUMB_W = 106
 THUMB_H = 159
 
-_PIXMAP_CACHE: dict[str, QImage] = {}
+_PIXMAP_CACHE: dict[str, tuple[tuple, QImage]] = {}
 
 
 def _read_preview(path: str, width: int, height: int,
@@ -1723,15 +1723,27 @@ def _read_preview(path: str, width: int, height: int,
 
 
 def _load_pixmap(path: str) -> QImage:
-    """Return a cached thumbnail image, safe to decode on a worker thread."""
-    if path not in _PIXMAP_CACHE:
+    """Reuse only a successful decode of the current file version."""
+    try:
+        stat = os.stat(path)
+        version = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+        cached = _PIXMAP_CACHE.get(path)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        _PIXMAP_CACHE.pop(path, None)
         pix = _read_preview(path, THUMB_W, THUMB_H, Qt.KeepAspectRatioByExpanding)
         if not pix.isNull():
             x = (pix.width() - THUMB_W) // 2
             y = (pix.height() - THUMB_H) // 2
             pix = pix.copy(x, y, THUMB_W, THUMB_H)
-        _PIXMAP_CACHE[path] = pix
-    return _PIXMAP_CACHE[path]
+            after = os.stat(path)
+            if version != (after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino):
+                return QImage()
+            _PIXMAP_CACHE[path] = (version, pix)
+        return pix
+    except OSError:
+        _PIXMAP_CACHE.pop(path, None)
+        return QImage()
 
 
 class PixmapWorker(QThread):
@@ -1884,11 +1896,10 @@ class _BulkPixmapPreloadWorker(QRunnable):
         for path in self.filepaths:
             if self.cancel_flag.is_set():
                 break
-            if path not in _PIXMAP_CACHE:
-                try:
-                    _load_pixmap(path)
-                except Exception:
-                    pass
+            try:
+                _load_pixmap(path)
+            except Exception:
+                pass
             done += 1
         self.signals.chunk_done.emit(done)
 
@@ -2183,21 +2194,20 @@ class ThumbnailCard(QWidget):
         self._img_lbl.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._img_lbl)
 
-        PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
+        self._image_loading = False
 
     def request_image(self):
-        """Called by FolderSection once the section is expanded. No-op if
-        this card's image is already loaded/loading."""
-        if self._image_loaded:
+        """Revalidate the thumbnail off-thread each time the folder opens."""
+        if self._image_loading:
             return
-        if self.filepath in _PIXMAP_CACHE:
-            self._apply_pixmap(_PIXMAP_CACHE[self.filepath])
-        else:
-            PIXMAP_WORKER.submit(self, self.filepath)
+        self._image_loading = True
+        PIXMAP_WORKER.pixmap_ready.connect(self._on_pixmap_ready)
+        PIXMAP_WORKER.submit(self, self.filepath)
 
     def _on_pixmap_ready(self, card, pix):
         if card is not self:
             return
+        self._image_loading = False
         self._apply_pixmap(pix)
         try:
             PIXMAP_WORKER.pixmap_ready.disconnect(self._on_pixmap_ready)
@@ -2219,6 +2229,7 @@ class ThumbnailCard(QWidget):
             p.end()
             self._img_lbl.setPixmap(rounded)
         else:
+            self._img_lbl.clear()
             self._img_lbl.setText("?")
 
     # -- click / drag (mirrors indexer's card interactions) ---------------
